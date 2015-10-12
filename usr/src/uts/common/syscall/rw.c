@@ -56,6 +56,12 @@
 
 size_t copyout_max_cached = COPYOUT_MAX_CACHE;	/* global so it's patchable */
 
+
+static int iovec_copyin(void *, int, iovec_t *, ssize_t *);
+int read_common(file_t *, uio_t *, size_t *, boolean_t);
+int write_common(file_t *, uio_t *, size_t *, boolean_t);
+
+
 /*
  * read, write, pread, pwrite, readv, and writev syscalls.
  *
@@ -73,20 +79,16 @@ size_t copyout_max_cached = COPYOUT_MAX_CACHE;	/* global so it's patchable */
  * Native system call
  */
 ssize_t
-read(int fdes, void *cbuf, size_t count)
+read(int fdes, void *cbuf, size_t ccount)
 {
 	struct uio auio;
 	struct iovec aiov;
 	file_t *fp;
-	register vnode_t *vp;
-	struct cpu *cp;
-	int fflag, ioflag, rwflag;
-	ssize_t cnt, bcount;
-	int error = 0;
-	u_offset_t fileoff;
-	int in_crit = 0;
+	ssize_t count = (ssize_t)ccount;
+	size_t nread = 0;
+	int fflag, error = 0;
 
-	if ((cnt = (ssize_t)count) < 0)
+	if (count < 0)
 		return (set_errno(EINVAL));
 	if ((fp = getf(fdes)) == NULL)
 		return (set_errno(EBADF));
@@ -94,135 +96,49 @@ read(int fdes, void *cbuf, size_t count)
 		error = EBADF;
 		goto out;
 	}
-	vp = fp->f_vnode;
-
-	if (vp->v_type == VREG && cnt == 0) {
+	if (fp->f_vnode->v_type == VREG && count == 0) {
 		goto out;
 	}
 
-	rwflag = 0;
 	aiov.iov_base = cbuf;
-	aiov.iov_len = cnt;
-
-	/*
-	 * We have to enter the critical region before calling VOP_RWLOCK
-	 * to avoid a deadlock with write() calls.
-	 */
-	if (nbl_need_check(vp)) {
-		int svmand;
-
-		nbl_start_crit(vp, RW_READER);
-		in_crit = 1;
-		error = nbl_svmand(vp, fp->f_cred, &svmand);
-		if (error != 0)
-			goto out;
-		if (nbl_conflict(vp, NBL_READ, fp->f_offset, cnt, svmand,
-		    NULL)) {
-			error = EACCES;
-			goto out;
-		}
-	}
-
-	(void) VOP_RWLOCK(vp, rwflag, NULL);
-
-	/*
-	 * We do the following checks inside VOP_RWLOCK so as to
-	 * prevent file size from changing while these checks are
-	 * being done. Also, we load fp's offset to the local
-	 * variable fileoff because we can have a parallel lseek
-	 * going on (f_offset is not protected by any lock) which
-	 * could change f_offset. We need to see the value only
-	 * once here and take a decision. Seeing it more than once
-	 * can lead to incorrect functionality.
-	 */
-
-	fileoff = (u_offset_t)fp->f_offset;
-	if (fileoff >= OFFSET_MAX(fp) && (vp->v_type == VREG)) {
-		struct vattr va;
-		va.va_mask = AT_SIZE;
-		if ((error = VOP_GETATTR(vp, &va, 0, fp->f_cred, NULL)))  {
-			VOP_RWUNLOCK(vp, rwflag, NULL);
-			goto out;
-		}
-		if (fileoff >= va.va_size) {
-			cnt = 0;
-			VOP_RWUNLOCK(vp, rwflag, NULL);
-			goto out;
-		} else {
-			error = EOVERFLOW;
-			VOP_RWUNLOCK(vp, rwflag, NULL);
-			goto out;
-		}
-	}
-	if ((vp->v_type == VREG) &&
-	    (fileoff + cnt > OFFSET_MAX(fp))) {
-		cnt = (ssize_t)(OFFSET_MAX(fp) - fileoff);
-	}
-	auio.uio_loffset = fileoff;
+	aiov.iov_len = count;
 	auio.uio_iov = &aiov;
 	auio.uio_iovcnt = 1;
-	auio.uio_resid = bcount = cnt;
+	auio.uio_loffset = fp->f_offset;
+	auio.uio_resid = count;
 	auio.uio_segflg = UIO_USERSPACE;
 	auio.uio_llimit = MAXOFFSET_T;
 	auio.uio_fmode = fflag;
-	/*
-	 * Only use bypass caches when the count is large enough
-	 */
-	if (bcount <= copyout_max_cached)
+	if (count <= copyout_max_cached)
 		auio.uio_extflg = UIO_COPY_CACHED;
 	else
 		auio.uio_extflg = UIO_COPY_DEFAULT;
 
-	ioflag = auio.uio_fmode & (FAPPEND|FSYNC|FDSYNC|FRSYNC);
+	error = read_common(fp, &auio, &nread, B_FALSE);
 
-	/* If read sync is not asked for, filter sync flags */
-	if ((ioflag & FRSYNC) == 0)
-		ioflag &= ~(FSYNC|FDSYNC);
-	error = VOP_READ(vp, &auio, ioflag, fp->f_cred, NULL);
-	cnt -= auio.uio_resid;
-	CPU_STATS_ENTER_K();
-	cp = CPU;
-	CPU_STATS_ADDQ(cp, sys, sysread, 1);
-	CPU_STATS_ADDQ(cp, sys, readch, (ulong_t)cnt);
-	CPU_STATS_EXIT_K();
-	ttolwp(curthread)->lwp_ru.ioch += (ulong_t)cnt;
-
-	if (vp->v_type == VFIFO)	/* Backward compatibility */
-		fp->f_offset = cnt;
-	else if (((fp->f_flag & FAPPEND) == 0) ||
-	    (vp->v_type != VREG) || (bcount != 0))	/* POSIX */
-		fp->f_offset = auio.uio_loffset;
-	VOP_RWUNLOCK(vp, rwflag, NULL);
-
-	if (error == EINTR && cnt != 0)
+	if (error == EINTR && nread != 0)
 		error = 0;
 out:
-	if (in_crit)
-		nbl_end_crit(vp);
 	releasef(fdes);
 	if (error)
 		return (set_errno(error));
-	return (cnt);
+	return ((ssize_t)nread);
 }
 
 /*
  * Native system call
  */
 ssize_t
-write(int fdes, void *cbuf, size_t count)
+write(int fdes, void *cbuf, size_t ccount)
 {
 	struct uio auio;
 	struct iovec aiov;
 	file_t *fp;
-	register vnode_t *vp;
-	struct cpu *cp;
-	int fflag, ioflag, rwflag;
-	ssize_t cnt, bcount;
-	int error = 0;
-	u_offset_t fileoff;
-	int in_crit = 0;
+	ssize_t count = (ssize_t)ccount;
+	size_t nwrite = 0;
+	int fflag, error = 0;
 
-	if ((cnt = (ssize_t)count) < 0)
+	if (count < 0)
 		return (set_errno(EINVAL));
 	if ((fp = getf(fdes)) == NULL)
 		return (set_errno(EBADF));
@@ -230,153 +146,65 @@ write(int fdes, void *cbuf, size_t count)
 		error = EBADF;
 		goto out;
 	}
-	vp = fp->f_vnode;
-
-	if (vp->v_type == VREG && cnt == 0) {
+	if (fp->f_vnode->v_type == VREG && count == 0) {
 		goto out;
 	}
 
-	rwflag = 1;
 	aiov.iov_base = cbuf;
-	aiov.iov_len = cnt;
-
-	/*
-	 * We have to enter the critical region before calling VOP_RWLOCK
-	 * to avoid a deadlock with ufs.
-	 */
-	if (nbl_need_check(vp)) {
-		int svmand;
-
-		nbl_start_crit(vp, RW_READER);
-		in_crit = 1;
-		error = nbl_svmand(vp, fp->f_cred, &svmand);
-		if (error != 0)
-			goto out;
-		if (nbl_conflict(vp, NBL_WRITE, fp->f_offset, cnt, svmand,
-		    NULL)) {
-			error = EACCES;
-			goto out;
-		}
-	}
-
-	(void) VOP_RWLOCK(vp, rwflag, NULL);
-
-	fileoff = fp->f_offset;
-	if (vp->v_type == VREG) {
-
-		/*
-		 * We raise psignal if write for >0 bytes causes
-		 * it to exceed the ulimit.
-		 */
-		if (fileoff >= curproc->p_fsz_ctl) {
-			VOP_RWUNLOCK(vp, rwflag, NULL);
-
-			mutex_enter(&curproc->p_lock);
-			(void) rctl_action(rctlproc_legacy[RLIMIT_FSIZE],
-			    curproc->p_rctls, curproc, RCA_UNSAFE_SIGINFO);
-			mutex_exit(&curproc->p_lock);
-
-			error = EFBIG;
-			goto out;
-		}
-		/*
-		 * We return EFBIG if write is done at an offset
-		 * greater than the offset maximum for this file structure.
-		 */
-
-		if (fileoff >= OFFSET_MAX(fp)) {
-			VOP_RWUNLOCK(vp, rwflag, NULL);
-			error = EFBIG;
-			goto out;
-		}
-		/*
-		 * Limit the bytes to be written  upto offset maximum for
-		 * this open file structure.
-		 */
-		if (fileoff + cnt > OFFSET_MAX(fp))
-			cnt = (ssize_t)(OFFSET_MAX(fp) - fileoff);
-	}
-	auio.uio_loffset = fileoff;
+	aiov.iov_len = count;
 	auio.uio_iov = &aiov;
 	auio.uio_iovcnt = 1;
-	auio.uio_resid = bcount = cnt;
+	auio.uio_loffset = fp->f_offset;
+	auio.uio_resid = count;
 	auio.uio_segflg = UIO_USERSPACE;
 	auio.uio_llimit = curproc->p_fsz_ctl;
 	auio.uio_fmode = fflag;
 	auio.uio_extflg = UIO_COPY_DEFAULT;
 
-	ioflag = auio.uio_fmode & (FAPPEND|FSYNC|FDSYNC|FRSYNC);
+	error = write_common(fp, &auio, &nwrite, B_FALSE);
 
-	error = VOP_WRITE(vp, &auio, ioflag, fp->f_cred, NULL);
-	cnt -= auio.uio_resid;
-	CPU_STATS_ENTER_K();
-	cp = CPU;
-	CPU_STATS_ADDQ(cp, sys, syswrite, 1);
-	CPU_STATS_ADDQ(cp, sys, writech, (ulong_t)cnt);
-	CPU_STATS_EXIT_K();
-	ttolwp(curthread)->lwp_ru.ioch += (ulong_t)cnt;
-
-	if (vp->v_type == VFIFO)	/* Backward compatibility */
-		fp->f_offset = cnt;
-	else if (((fp->f_flag & FAPPEND) == 0) ||
-	    (vp->v_type != VREG) || (bcount != 0))	/* POSIX */
-		fp->f_offset = auio.uio_loffset;
-	VOP_RWUNLOCK(vp, rwflag, NULL);
-
-	if (error == EINTR && cnt != 0)
+	if (error == EINTR && nwrite != 0)
 		error = 0;
 out:
-	if (in_crit)
-		nbl_end_crit(vp);
 	releasef(fdes);
 	if (error)
 		return (set_errno(error));
-	return (cnt);
+	return (nwrite);
 }
 
 ssize_t
-pread(int fdes, void *cbuf, size_t count, off_t offset)
+pread(int fdes, void *cbuf, size_t ccount, off_t offset)
 {
 	struct uio auio;
 	struct iovec aiov;
 	file_t *fp;
-	register vnode_t *vp;
-	struct cpu *cp;
-	int fflag, ioflag, rwflag;
-	ssize_t bcount;
-	int error = 0;
-	u_offset_t fileoff = (u_offset_t)(ulong_t)offset;
+	ssize_t count = (ssize_t)ccount;
+	size_t nread = 0;
+	int fflag, error = 0;
 #ifdef _SYSCALL32_IMPL
 	u_offset_t maxoff = get_udatamodel() == DATAMODEL_ILP32 ?
 	    MAXOFF32_T : MAXOFFSET_T;
 #else
 	const u_offset_t maxoff = MAXOFF32_T;
 #endif
-	int in_crit = 0;
 
-	if ((bcount = (ssize_t)count) < 0)
+	if (count < 0)
 		return (set_errno(EINVAL));
-
 	if ((fp = getf(fdes)) == NULL)
 		return (set_errno(EBADF));
-	if (((fflag = fp->f_flag) & (FREAD)) == 0) {
+	if (((fflag = fp->f_flag) & FREAD) == 0) {
 		error = EBADF;
 		goto out;
 	}
+	if (fp->f_vnode->v_type == VREG) {
+		u_offset_t fileoff = (u_offset_t)(ulong_t)offset;
 
-	rwflag = 0;
-	vp = fp->f_vnode;
-
-	if (vp->v_type == VREG) {
-
-		if (bcount == 0)
+		if (count == 0)
 			goto out;
-
 		/*
 		 * Return EINVAL if an invalid offset comes to pread.
 		 * Negative offset from user will cause this error.
 		 */
-
 		if (fileoff > maxoff) {
 			error = EINVAL;
 			goto out;
@@ -386,115 +214,53 @@ pread(int fdes, void *cbuf, size_t count, off_t offset)
 		 * a file beyond the maximum offset representable in
 		 * an off_t structure.
 		 */
-		if (fileoff + bcount > maxoff)
-			bcount = (ssize_t)((offset_t)maxoff - fileoff);
-	} else if (vp->v_type == VFIFO) {
+		if (fileoff + count > maxoff)
+			count = (ssize_t)((offset_t)maxoff - fileoff);
+	} else if (fp->f_vnode->v_type == VFIFO) {
 		error = ESPIPE;
 		goto out;
 	}
 
-	/*
-	 * We have to enter the critical region before calling VOP_RWLOCK
-	 * to avoid a deadlock with ufs.
-	 */
-	if (nbl_need_check(vp)) {
-		int svmand;
-
-		nbl_start_crit(vp, RW_READER);
-		in_crit = 1;
-		error = nbl_svmand(vp, fp->f_cred, &svmand);
-		if (error != 0)
-			goto out;
-		if (nbl_conflict(vp, NBL_READ, fileoff, bcount, svmand,
-		    NULL)) {
-			error = EACCES;
-			goto out;
-		}
-	}
-
 	aiov.iov_base = cbuf;
-	aiov.iov_len = bcount;
-	(void) VOP_RWLOCK(vp, rwflag, NULL);
-	if (vp->v_type == VREG && fileoff == (u_offset_t)maxoff) {
-		struct vattr va;
-		va.va_mask = AT_SIZE;
-		if ((error = VOP_GETATTR(vp, &va, 0, fp->f_cred, NULL))) {
-			VOP_RWUNLOCK(vp, rwflag, NULL);
-			goto out;
-		}
-		VOP_RWUNLOCK(vp, rwflag, NULL);
-
-		/*
-		 * We have to return EOF if fileoff is >= file size.
-		 */
-		if (fileoff >= va.va_size) {
-			bcount = 0;
-			goto out;
-		}
-
-		/*
-		 * File is greater than or equal to maxoff and therefore
-		 * we return EOVERFLOW.
-		 */
-		error = EOVERFLOW;
-		goto out;
-	}
-	auio.uio_loffset = fileoff;
+	aiov.iov_len = count;
 	auio.uio_iov = &aiov;
 	auio.uio_iovcnt = 1;
-	auio.uio_resid = bcount;
+	auio.uio_loffset = offset;
+	auio.uio_resid = count;
 	auio.uio_segflg = UIO_USERSPACE;
 	auio.uio_llimit = MAXOFFSET_T;
 	auio.uio_fmode = fflag;
 	auio.uio_extflg = UIO_COPY_CACHED;
 
-	ioflag = auio.uio_fmode & (FAPPEND|FSYNC|FDSYNC|FRSYNC);
+	error = read_common(fp, &auio, &nread, B_TRUE);
 
-	/* If read sync is not asked for, filter sync flags */
-	if ((ioflag & FRSYNC) == 0)
-		ioflag &= ~(FSYNC|FDSYNC);
-	error = VOP_READ(vp, &auio, ioflag, fp->f_cred, NULL);
-	bcount -= auio.uio_resid;
-	CPU_STATS_ENTER_K();
-	cp = CPU;
-	CPU_STATS_ADDQ(cp, sys, sysread, 1);
-	CPU_STATS_ADDQ(cp, sys, readch, (ulong_t)bcount);
-	CPU_STATS_EXIT_K();
-	ttolwp(curthread)->lwp_ru.ioch += (ulong_t)bcount;
-	VOP_RWUNLOCK(vp, rwflag, NULL);
-
-	if (error == EINTR && bcount != 0)
+	if (error == EINTR && nread != 0)
 		error = 0;
 out:
-	if (in_crit)
-		nbl_end_crit(vp);
 	releasef(fdes);
 	if (error)
 		return (set_errno(error));
-	return (bcount);
+	return ((ssize_t)nread);
+
 }
 
 ssize_t
-pwrite(int fdes, void *cbuf, size_t count, off_t offset)
+pwrite(int fdes, void *cbuf, size_t ccount, off_t offset)
 {
 	struct uio auio;
 	struct iovec aiov;
 	file_t *fp;
-	register vnode_t *vp;
-	struct cpu *cp;
-	int fflag, ioflag, rwflag;
-	ssize_t bcount;
-	int error = 0;
-	u_offset_t fileoff = (u_offset_t)(ulong_t)offset;
+	ssize_t count = (ssize_t)ccount;
+	size_t nwrite = 0;
+	int fflag, error = 0;
 #ifdef _SYSCALL32_IMPL
 	u_offset_t maxoff = get_udatamodel() == DATAMODEL_ILP32 ?
 	    MAXOFF32_T : MAXOFFSET_T;
 #else
 	const u_offset_t maxoff = MAXOFF32_T;
 #endif
-	int in_crit = 0;
 
-	if ((bcount = (ssize_t)count) < 0)
+	if (count < 0)
 		return (set_errno(EINVAL));
 	if ((fp = getf(fdes)) == NULL)
 		return (set_errno(EBADF));
@@ -502,15 +268,11 @@ pwrite(int fdes, void *cbuf, size_t count, off_t offset)
 		error = EBADF;
 		goto out;
 	}
+	if (fp->f_vnode->v_type == VREG) {
+		u_offset_t fileoff = (u_offset_t)(ulong_t)offset;
 
-	rwflag = 1;
-	vp = fp->f_vnode;
-
-	if (vp->v_type == VREG) {
-
-		if (bcount == 0)
+		if (count == 0)
 			goto out;
-
 		/*
 		 * return EINVAL for offsets that cannot be
 		 * represented in an off_t.
@@ -541,71 +303,32 @@ pwrite(int fdes, void *cbuf, size_t count, off_t offset)
 			goto out;
 		}
 		if (fileoff + count > maxoff)
-			bcount = (ssize_t)((u_offset_t)maxoff - fileoff);
-	} else if (vp->v_type == VFIFO) {
+			count = (ssize_t)((u_offset_t)maxoff - fileoff);
+	} else if (fp->f_vnode->v_type == VFIFO) {
 		error = ESPIPE;
 		goto out;
 	}
 
-	/*
-	 * We have to enter the critical region before calling VOP_RWLOCK
-	 * to avoid a deadlock with ufs.
-	 */
-	if (nbl_need_check(vp)) {
-		int svmand;
-
-		nbl_start_crit(vp, RW_READER);
-		in_crit = 1;
-		error = nbl_svmand(vp, fp->f_cred, &svmand);
-		if (error != 0)
-			goto out;
-		if (nbl_conflict(vp, NBL_WRITE, fileoff, bcount, svmand,
-		    NULL)) {
-			error = EACCES;
-			goto out;
-		}
-	}
-
 	aiov.iov_base = cbuf;
-	aiov.iov_len = bcount;
-	(void) VOP_RWLOCK(vp, rwflag, NULL);
-	auio.uio_loffset = fileoff;
+	aiov.iov_len = count;
 	auio.uio_iov = &aiov;
 	auio.uio_iovcnt = 1;
-	auio.uio_resid = bcount;
+	auio.uio_loffset = offset;
+	auio.uio_resid = count;
 	auio.uio_segflg = UIO_USERSPACE;
 	auio.uio_llimit = curproc->p_fsz_ctl;
 	auio.uio_fmode = fflag;
 	auio.uio_extflg = UIO_COPY_CACHED;
 
-	/*
-	 * The SUSv4 POSIX specification states:
-	 *	The pwrite() function shall be equivalent to write(), except
-	 *	that it writes into a given position and does not change
-	 *	the file offset (regardless of whether O_APPEND is set).
-	 * To make this be true, we omit the FAPPEND flag from ioflag.
-	 */
-	ioflag = auio.uio_fmode & (FSYNC|FDSYNC|FRSYNC);
+	error = write_common(fp, &auio, &nwrite, B_TRUE);
 
-	error = VOP_WRITE(vp, &auio, ioflag, fp->f_cred, NULL);
-	bcount -= auio.uio_resid;
-	CPU_STATS_ENTER_K();
-	cp = CPU;
-	CPU_STATS_ADDQ(cp, sys, syswrite, 1);
-	CPU_STATS_ADDQ(cp, sys, writech, (ulong_t)bcount);
-	CPU_STATS_EXIT_K();
-	ttolwp(curthread)->lwp_ru.ioch += (ulong_t)bcount;
-	VOP_RWUNLOCK(vp, rwflag, NULL);
-
-	if (error == EINTR && bcount != 0)
+	if (error == EINTR && nwrite != 0)
 		error = 0;
 out:
-	if (in_crit)
-		nbl_end_crit(vp);
 	releasef(fdes);
 	if (error)
 		return (set_errno(error));
-	return (bcount);
+	return (nwrite);
 }
 
 ssize_t
@@ -615,14 +338,9 @@ readv(int fdes, struct iovec *iovp, int iovcnt)
 	struct iovec buf[IOV_MAX_STACK], *aiov = buf;
 	int aiovlen = 0;
 	file_t *fp;
-	register vnode_t *vp;
-	struct cpu *cp;
-	int fflag, ioflag, rwflag;
-	ssize_t count, bcount;
-	int error = 0;
-	int i;
-	u_offset_t fileoff;
-	int in_crit = 0;
+	ssize_t count;
+	size_t nread = 0;
+	int fflag, error = 0;
 
 	if (iovcnt <= 0 || iovcnt > IOV_MAX)
 		return (set_errno(EINVAL));
@@ -631,66 +349,12 @@ readv(int fdes, struct iovec *iovp, int iovcnt)
 		aiovlen = iovcnt * sizeof (iovec_t);
 		aiov = kmem_alloc(aiovlen, KM_SLEEP);
 	}
-
-#ifdef _SYSCALL32_IMPL
-	/*
-	 * 32-bit callers need to have their iovec expanded,
-	 * while ensuring that they can't move more than 2Gbytes
-	 * of data in a single call.
-	 */
-	if (get_udatamodel() == DATAMODEL_ILP32) {
-		struct iovec32 buf32[IOV_MAX_STACK], *aiov32 = buf32;
-		int aiov32len;
-		ssize32_t count32;
-
-		aiov32len = iovcnt * sizeof (iovec32_t);
-		if (aiovlen != 0)
-			aiov32 = kmem_alloc(aiov32len, KM_SLEEP);
-
-		if (copyin(iovp, aiov32, aiov32len)) {
-			if (aiovlen != 0) {
-				kmem_free(aiov32, aiov32len);
-				kmem_free(aiov, aiovlen);
-			}
-			return (set_errno(EFAULT));
-		}
-
-		count32 = 0;
-		for (i = 0; i < iovcnt; i++) {
-			ssize32_t iovlen32 = aiov32[i].iov_len;
-			count32 += iovlen32;
-			if (iovlen32 < 0 || count32 < 0) {
-				if (aiovlen != 0) {
-					kmem_free(aiov32, aiov32len);
-					kmem_free(aiov, aiovlen);
-				}
-				return (set_errno(EINVAL));
-			}
-			aiov[i].iov_len = iovlen32;
-			aiov[i].iov_base =
-			    (caddr_t)(uintptr_t)aiov32[i].iov_base;
-		}
-
-		if (aiovlen != 0)
-			kmem_free(aiov32, aiov32len);
-	} else
-#endif
-	if (copyin(iovp, aiov, iovcnt * sizeof (iovec_t))) {
+	if ((error = iovec_copyin(iovp, iovcnt, aiov, &count)) != 0) {
 		if (aiovlen != 0)
 			kmem_free(aiov, aiovlen);
-		return (set_errno(EFAULT));
+		return (set_errno(error));
 	}
 
-	count = 0;
-	for (i = 0; i < iovcnt; i++) {
-		ssize_t iovlen = aiov[i].iov_len;
-		count += iovlen;
-		if (iovlen < 0 || count < 0) {
-			if (aiovlen != 0)
-				kmem_free(aiov, aiovlen);
-			return (set_errno(EINVAL));
-		}
-	}
 	if ((fp = getf(fdes)) == NULL) {
 		if (aiovlen != 0)
 			kmem_free(aiov, aiovlen);
@@ -700,105 +364,33 @@ readv(int fdes, struct iovec *iovp, int iovcnt)
 		error = EBADF;
 		goto out;
 	}
-	vp = fp->f_vnode;
-	if (vp->v_type == VREG && count == 0) {
+	if (fp->f_vnode->v_type == VREG && count == 0) {
 		goto out;
 	}
 
-	rwflag = 0;
-
-	/*
-	 * We have to enter the critical region before calling VOP_RWLOCK
-	 * to avoid a deadlock with ufs.
-	 */
-	if (nbl_need_check(vp)) {
-		int svmand;
-
-		nbl_start_crit(vp, RW_READER);
-		in_crit = 1;
-		error = nbl_svmand(vp, fp->f_cred, &svmand);
-		if (error != 0)
-			goto out;
-		if (nbl_conflict(vp, NBL_READ, fp->f_offset, count, svmand,
-		    NULL)) {
-			error = EACCES;
-			goto out;
-		}
-	}
-
-	(void) VOP_RWLOCK(vp, rwflag, NULL);
-	fileoff = fp->f_offset;
-
-	/*
-	 * Behaviour is same as read. Please see comments in read.
-	 */
-
-	if ((vp->v_type == VREG) && (fileoff >= OFFSET_MAX(fp))) {
-		struct vattr va;
-		va.va_mask = AT_SIZE;
-		if ((error = VOP_GETATTR(vp, &va, 0, fp->f_cred, NULL)))  {
-			VOP_RWUNLOCK(vp, rwflag, NULL);
-			goto out;
-		}
-		if (fileoff >= va.va_size) {
-			VOP_RWUNLOCK(vp, rwflag, NULL);
-			count = 0;
-			goto out;
-		} else {
-			VOP_RWUNLOCK(vp, rwflag, NULL);
-			error = EOVERFLOW;
-			goto out;
-		}
-	}
-	if ((vp->v_type == VREG) && (fileoff + count > OFFSET_MAX(fp))) {
-		count = (ssize_t)(OFFSET_MAX(fp) - fileoff);
-	}
-	auio.uio_loffset = fileoff;
 	auio.uio_iov = aiov;
 	auio.uio_iovcnt = iovcnt;
-	auio.uio_resid = bcount = count;
+	auio.uio_loffset = fp->f_offset;
+	auio.uio_resid = count;
 	auio.uio_segflg = UIO_USERSPACE;
 	auio.uio_llimit = MAXOFFSET_T;
 	auio.uio_fmode = fflag;
-	if (bcount <= copyout_max_cached)
+	if (count <= copyout_max_cached)
 		auio.uio_extflg = UIO_COPY_CACHED;
 	else
 		auio.uio_extflg = UIO_COPY_DEFAULT;
 
+	error = read_common(fp, &auio, &nread, B_FALSE);
 
-	ioflag = auio.uio_fmode & (FAPPEND|FSYNC|FDSYNC|FRSYNC);
-
-	/* If read sync is not asked for, filter sync flags */
-	if ((ioflag & FRSYNC) == 0)
-		ioflag &= ~(FSYNC|FDSYNC);
-	error = VOP_READ(vp, &auio, ioflag, fp->f_cred, NULL);
-	count -= auio.uio_resid;
-	CPU_STATS_ENTER_K();
-	cp = CPU;
-	CPU_STATS_ADDQ(cp, sys, sysread, 1);
-	CPU_STATS_ADDQ(cp, sys, readch, (ulong_t)count);
-	CPU_STATS_EXIT_K();
-	ttolwp(curthread)->lwp_ru.ioch += (ulong_t)count;
-
-	if (vp->v_type == VFIFO)	/* Backward compatibility */
-		fp->f_offset = count;
-	else if (((fp->f_flag & FAPPEND) == 0) ||
-	    (vp->v_type != VREG) || (bcount != 0))	/* POSIX */
-		fp->f_offset = auio.uio_loffset;
-
-	VOP_RWUNLOCK(vp, rwflag, NULL);
-
-	if (error == EINTR && count != 0)
+	if (error == EINTR && nread != 0)
 		error = 0;
 out:
-	if (in_crit)
-		nbl_end_crit(vp);
 	releasef(fdes);
 	if (aiovlen != 0)
 		kmem_free(aiov, aiovlen);
 	if (error)
 		return (set_errno(error));
-	return (count);
+	return (nread);
 }
 
 ssize_t
@@ -808,81 +400,22 @@ writev(int fdes, struct iovec *iovp, int iovcnt)
 	struct iovec buf[IOV_MAX_STACK], *aiov = buf;
 	int aiovlen = 0;
 	file_t *fp;
-	register vnode_t *vp;
-	struct cpu *cp;
-	int fflag, ioflag, rwflag;
-	ssize_t count, bcount;
-	int error = 0;
-	int i;
-	u_offset_t fileoff;
-	int in_crit = 0;
+	ssize_t count;
+	size_t nwrite = 0;
+	int fflag, error = 0;
 
 	if (iovcnt <= 0 || iovcnt > IOV_MAX)
 		return (set_errno(EINVAL));
-
 	if (iovcnt > IOV_MAX_STACK) {
 		aiovlen = iovcnt * sizeof (iovec_t);
 		aiov = kmem_alloc(aiovlen, KM_SLEEP);
 	}
-
-#ifdef _SYSCALL32_IMPL
-	/*
-	 * 32-bit callers need to have their iovec expanded,
-	 * while ensuring that they can't move more than 2Gbytes
-	 * of data in a single call.
-	 */
-	if (get_udatamodel() == DATAMODEL_ILP32) {
-		struct iovec32 buf32[IOV_MAX_STACK], *aiov32 = buf32;
-		int aiov32len;
-		ssize32_t count32;
-
-		aiov32len = iovcnt * sizeof (iovec32_t);
-		if (aiovlen != 0)
-			aiov32 = kmem_alloc(aiov32len, KM_SLEEP);
-
-		if (copyin(iovp, aiov32, aiov32len)) {
-			if (aiovlen != 0) {
-				kmem_free(aiov32, aiov32len);
-				kmem_free(aiov, aiovlen);
-			}
-			return (set_errno(EFAULT));
-		}
-
-		count32 = 0;
-		for (i = 0; i < iovcnt; i++) {
-			ssize32_t iovlen = aiov32[i].iov_len;
-			count32 += iovlen;
-			if (iovlen < 0 || count32 < 0) {
-				if (aiovlen != 0) {
-					kmem_free(aiov32, aiov32len);
-					kmem_free(aiov, aiovlen);
-				}
-				return (set_errno(EINVAL));
-			}
-			aiov[i].iov_len = iovlen;
-			aiov[i].iov_base =
-			    (caddr_t)(uintptr_t)aiov32[i].iov_base;
-		}
-		if (aiovlen != 0)
-			kmem_free(aiov32, aiov32len);
-	} else
-#endif
-	if (copyin(iovp, aiov, iovcnt * sizeof (iovec_t))) {
+	if ((error = iovec_copyin(iovp, iovcnt, aiov, &count)) != 0) {
 		if (aiovlen != 0)
 			kmem_free(aiov, aiovlen);
-		return (set_errno(EFAULT));
+		return (set_errno(error));
 	}
 
-	count = 0;
-	for (i = 0; i < iovcnt; i++) {
-		ssize_t iovlen = aiov[i].iov_len;
-		count += iovlen;
-		if (iovlen < 0 || count < 0) {
-			if (aiovlen != 0)
-				kmem_free(aiov, aiovlen);
-			return (set_errno(EINVAL));
-		}
-	}
 	if ((fp = getf(fdes)) == NULL) {
 		if (aiovlen != 0)
 			kmem_free(aiov, aiovlen);
@@ -892,96 +425,30 @@ writev(int fdes, struct iovec *iovp, int iovcnt)
 		error = EBADF;
 		goto out;
 	}
-	vp = fp->f_vnode;
-	if (vp->v_type == VREG && count == 0) {
+	if (fp->f_vnode->v_type == VREG && count == 0) {
 		goto out;
 	}
 
-	rwflag = 1;
-
-	/*
-	 * We have to enter the critical region before calling VOP_RWLOCK
-	 * to avoid a deadlock with ufs.
-	 */
-	if (nbl_need_check(vp)) {
-		int svmand;
-
-		nbl_start_crit(vp, RW_READER);
-		in_crit = 1;
-		error = nbl_svmand(vp, fp->f_cred, &svmand);
-		if (error != 0)
-			goto out;
-		if (nbl_conflict(vp, NBL_WRITE, fp->f_offset, count, svmand,
-		    NULL)) {
-			error = EACCES;
-			goto out;
-		}
-	}
-
-	(void) VOP_RWLOCK(vp, rwflag, NULL);
-
-	fileoff = fp->f_offset;
-
-	/*
-	 * Behaviour is same as write. Please see comments for write.
-	 */
-
-	if (vp->v_type == VREG) {
-		if (fileoff >= curproc->p_fsz_ctl) {
-			VOP_RWUNLOCK(vp, rwflag, NULL);
-			mutex_enter(&curproc->p_lock);
-			(void) rctl_action(rctlproc_legacy[RLIMIT_FSIZE],
-			    curproc->p_rctls, curproc, RCA_UNSAFE_SIGINFO);
-			mutex_exit(&curproc->p_lock);
-			error = EFBIG;
-			goto out;
-		}
-		if (fileoff >= OFFSET_MAX(fp)) {
-			VOP_RWUNLOCK(vp, rwflag, NULL);
-			error = EFBIG;
-			goto out;
-		}
-		if (fileoff + count > OFFSET_MAX(fp))
-			count = (ssize_t)(OFFSET_MAX(fp) - fileoff);
-	}
-	auio.uio_loffset = fileoff;
 	auio.uio_iov = aiov;
 	auio.uio_iovcnt = iovcnt;
-	auio.uio_resid = bcount = count;
+	auio.uio_loffset = fp->f_offset;
+	auio.uio_resid = count;
 	auio.uio_segflg = UIO_USERSPACE;
 	auio.uio_llimit = curproc->p_fsz_ctl;
 	auio.uio_fmode = fflag;
 	auio.uio_extflg = UIO_COPY_DEFAULT;
 
-	ioflag = auio.uio_fmode & (FAPPEND|FSYNC|FDSYNC|FRSYNC);
+	error = write_common(fp, &auio, &nwrite, B_FALSE);
 
-	error = VOP_WRITE(vp, &auio, ioflag, fp->f_cred, NULL);
-	count -= auio.uio_resid;
-	CPU_STATS_ENTER_K();
-	cp = CPU;
-	CPU_STATS_ADDQ(cp, sys, syswrite, 1);
-	CPU_STATS_ADDQ(cp, sys, writech, (ulong_t)count);
-	CPU_STATS_EXIT_K();
-	ttolwp(curthread)->lwp_ru.ioch += (ulong_t)count;
-
-	if (vp->v_type == VFIFO)	/* Backward compatibility */
-		fp->f_offset = count;
-	else if (((fp->f_flag & FAPPEND) == 0) ||
-	    (vp->v_type != VREG) || (bcount != 0))	/* POSIX */
-		fp->f_offset = auio.uio_loffset;
-	VOP_RWUNLOCK(vp, rwflag, NULL);
-
-	if (error == EINTR && count != 0)
+	if (error == EINTR && nwrite != 0)
 		error = 0;
 out:
-	if (in_crit)
-		nbl_end_crit(vp);
 	releasef(fdes);
 	if (aiovlen != 0)
 		kmem_free(aiov, aiovlen);
 	if (error)
 		return (set_errno(error));
-	return (count);
+	return (nwrite);
 }
 
 ssize_t
@@ -992,13 +459,9 @@ preadv(int fdes, struct iovec *iovp, int iovcnt, off_t offset,
 	struct iovec buf[IOV_MAX_STACK], *aiov = buf;
 	int aiovlen = 0;
 	file_t *fp;
-	register vnode_t *vp;
-	struct cpu *cp;
-	int fflag, ioflag, rwflag;
-	ssize_t count, bcount;
-	int error = 0;
-	int i;
-
+	ssize_t count;
+	size_t nread = 0;
+	int fflag, error = 0;
 #if defined(_SYSCALL32_IMPL) || defined(_ILP32)
 	u_offset_t fileoff = ((u_offset_t)extended_offset << 32) |
 	    (u_offset_t)offset;
@@ -1013,80 +476,18 @@ preadv(int fdes, struct iovec *iovp, int iovcnt, off_t offset,
 	const u_offset_t maxoff = MAXOFF32_T;
 #endif /* _SYSCALL32_IMPL */
 
-	int in_crit = 0;
-
 	if (iovcnt <= 0 || iovcnt > IOV_MAX)
 		return (set_errno(EINVAL));
-
 	if (iovcnt > IOV_MAX_STACK) {
 		aiovlen = iovcnt * sizeof (iovec_t);
 		aiov = kmem_alloc(aiovlen, KM_SLEEP);
 	}
-
-#ifdef _SYSCALL32_IMPL
-	/*
-	 * 32-bit callers need to have their iovec expanded,
-	 * while ensuring that they can't move more than 2Gbytes
-	 * of data in a single call.
-	 */
-	if (get_udatamodel() == DATAMODEL_ILP32) {
-		struct iovec32 buf32[IOV_MAX_STACK], *aiov32 = buf32;
-		int aiov32len;
-		ssize32_t count32;
-
-		aiov32len = iovcnt * sizeof (iovec32_t);
-		if (aiovlen != 0)
-			aiov32 = kmem_alloc(aiov32len, KM_SLEEP);
-
-		if (copyin(iovp, aiov32, aiov32len)) {
-			if (aiovlen != 0) {
-				kmem_free(aiov32, aiov32len);
-				kmem_free(aiov, aiovlen);
-			}
-			return (set_errno(EFAULT));
-		}
-
-		count32 = 0;
-		for (i = 0; i < iovcnt; i++) {
-			ssize32_t iovlen32 = aiov32[i].iov_len;
-			count32 += iovlen32;
-			if (iovlen32 < 0 || count32 < 0) {
-				if (aiovlen != 0) {
-					kmem_free(aiov32, aiov32len);
-					kmem_free(aiov, aiovlen);
-				}
-				return (set_errno(EINVAL));
-			}
-			aiov[i].iov_len = iovlen32;
-			aiov[i].iov_base =
-			    (caddr_t)(uintptr_t)aiov32[i].iov_base;
-		}
-		if (aiovlen != 0)
-			kmem_free(aiov32, aiov32len);
-	} else
-#endif /* _SYSCALL32_IMPL */
-		if (copyin(iovp, aiov, iovcnt * sizeof (iovec_t))) {
-			if (aiovlen != 0)
-				kmem_free(aiov, aiovlen);
-			return (set_errno(EFAULT));
-		}
-
-	count = 0;
-	for (i = 0; i < iovcnt; i++) {
-		ssize_t iovlen = aiov[i].iov_len;
-		count += iovlen;
-		if (iovlen < 0 || count < 0) {
-			if (aiovlen != 0)
-				kmem_free(aiov, aiovlen);
-			return (set_errno(EINVAL));
-		}
-	}
-
-	if ((bcount = (ssize_t)count) < 0) {
+	if ((error = iovec_copyin(iovp, iovcnt, aiov, &count)) != 0) {
 		if (aiovlen != 0)
 			kmem_free(aiov, aiovlen);
-		return (set_errno(EINVAL));
+		return (set_errno(error));
 	}
+
 	if ((fp = getf(fdes)) == NULL) {
 		if (aiovlen != 0)
 			kmem_free(aiov, aiovlen);
@@ -1096,111 +497,52 @@ preadv(int fdes, struct iovec *iovp, int iovcnt, off_t offset,
 		error = EBADF;
 		goto out;
 	}
-	vp = fp->f_vnode;
-	rwflag = 0;
-	if (vp->v_type == VREG) {
-
-		if (bcount == 0)
+	if (fp->f_vnode->v_type == VREG) {
+		if (count == 0)
 			goto out;
-
 		/*
-		 * return EINVAL for offsets that cannot be
-		 * represented in an off_t.
+		 * Return EINVAL if an invalid offset comes to pread.
+		 * Negative offset from user will cause this error.
 		 */
 		if (fileoff > maxoff) {
 			error = EINVAL;
 			goto out;
 		}
-
-		if (fileoff + bcount > maxoff)
-			bcount = (ssize_t)((u_offset_t)maxoff - fileoff);
-	} else if (vp->v_type == VFIFO) {
+		/*
+		 * Limit offset such that we don't read or write
+		 * a file beyond the maximum offset representable in
+		 * an off_t structure.
+		 */
+		if (fileoff + count > maxoff)
+			count = (ssize_t)((offset_t)maxoff - fileoff);
+	} else if (fp->f_vnode->v_type == VFIFO) {
 		error = ESPIPE;
 		goto out;
 	}
-	/*
-	 * We have to enter the critical region before calling VOP_RWLOCK
-	 * to avoid a deadlock with ufs.
-	 */
-	if (nbl_need_check(vp)) {
-		int svmand;
 
-		nbl_start_crit(vp, RW_READER);
-		in_crit = 1;
-		error = nbl_svmand(vp, fp->f_cred, &svmand);
-		if (error != 0)
-			goto out;
-		if (nbl_conflict(vp, NBL_WRITE, fileoff, count, svmand,
-		    NULL)) {
-			error = EACCES;
-			goto out;
-		}
-	}
-
-	(void) VOP_RWLOCK(vp, rwflag, NULL);
-
-	/*
-	 * Behaviour is same as read(2). Please see comments in
-	 * read(2).
-	 */
-
-	if ((vp->v_type == VREG) && (fileoff >= OFFSET_MAX(fp))) {
-		struct vattr va;
-		va.va_mask = AT_SIZE;
-		if ((error =
-		    VOP_GETATTR(vp, &va, 0, fp->f_cred, NULL)))  {
-			VOP_RWUNLOCK(vp, rwflag, NULL);
-			goto out;
-		}
-		if (fileoff >= va.va_size) {
-			VOP_RWUNLOCK(vp, rwflag, NULL);
-			count = 0;
-			goto out;
-		} else {
-			VOP_RWUNLOCK(vp, rwflag, NULL);
-			error = EOVERFLOW;
-			goto out;
-		}
-	}
-	if ((vp->v_type == VREG) &&
-	    (fileoff + count > OFFSET_MAX(fp))) {
-		count = (ssize_t)(OFFSET_MAX(fp) - fileoff);
-	}
-	auio.uio_loffset = fileoff;
 	auio.uio_iov = aiov;
 	auio.uio_iovcnt = iovcnt;
-	auio.uio_resid = bcount = count;
+	auio.uio_loffset = fileoff;
+	auio.uio_resid = count;
 	auio.uio_segflg = UIO_USERSPACE;
 	auio.uio_llimit = MAXOFFSET_T;
 	auio.uio_fmode = fflag;
-	if (bcount <= copyout_max_cached)
+	if (count <= copyout_max_cached)
 		auio.uio_extflg = UIO_COPY_CACHED;
 	else
 		auio.uio_extflg = UIO_COPY_DEFAULT;
 
-	ioflag = auio.uio_fmode & (FAPPEND|FSYNC|FDSYNC|FRSYNC);
-	error = VOP_READ(vp, &auio, ioflag, fp->f_cred, NULL);
-	count -= auio.uio_resid;
-	CPU_STATS_ENTER_K();
-	cp = CPU;
-	CPU_STATS_ADDQ(cp, sys, sysread, 1);
-	CPU_STATS_ADDQ(cp, sys, readch, (ulong_t)count);
-	CPU_STATS_EXIT_K();
-	ttolwp(curthread)->lwp_ru.ioch += (ulong_t)count;
+	error = read_common(fp, &auio, &nread, B_TRUE);
 
-	VOP_RWUNLOCK(vp, rwflag, NULL);
-
-	if (error == EINTR && count != 0)
+	if (error == EINTR && nread != 0)
 		error = 0;
 out:
-	if (in_crit)
-		nbl_end_crit(vp);
 	releasef(fdes);
 	if (aiovlen != 0)
 		kmem_free(aiov, aiovlen);
 	if (error)
 		return (set_errno(error));
-	return (count);
+	return (nread);
 }
 
 ssize_t
@@ -1211,13 +553,9 @@ pwritev(int fdes, struct iovec *iovp, int iovcnt, off_t offset,
 	struct iovec buf[IOV_MAX_STACK], *aiov = buf;
 	int aiovlen = 0;
 	file_t *fp;
-	register vnode_t *vp;
-	struct cpu *cp;
-	int fflag, ioflag, rwflag;
-	ssize_t count, bcount;
-	int error = 0;
-	int i;
-
+	ssize_t count;
+	size_t nwrite = 0;
+	int fflag, error = 0;
 #if defined(_SYSCALL32_IMPL) || defined(_ILP32)
 	u_offset_t fileoff = ((u_offset_t)extended_offset << 32) |
 	    (u_offset_t)offset;
@@ -1232,80 +570,18 @@ pwritev(int fdes, struct iovec *iovp, int iovcnt, off_t offset,
 	const u_offset_t maxoff = MAXOFF32_T;
 #endif /* _SYSCALL32_IMPL */
 
-	int in_crit = 0;
-
 	if (iovcnt <= 0 || iovcnt > IOV_MAX)
 		return (set_errno(EINVAL));
-
 	if (iovcnt > IOV_MAX_STACK) {
 		aiovlen = iovcnt * sizeof (iovec_t);
 		aiov = kmem_alloc(aiovlen, KM_SLEEP);
 	}
-
-#ifdef _SYSCALL32_IMPL
-	/*
-	 * 32-bit callers need to have their iovec expanded,
-	 * while ensuring that they can't move more than 2Gbytes
-	 * of data in a single call.
-	 */
-	if (get_udatamodel() == DATAMODEL_ILP32) {
-		struct iovec32 buf32[IOV_MAX_STACK], *aiov32 = buf32;
-		int aiov32len;
-		ssize32_t count32;
-
-		aiov32len = iovcnt * sizeof (iovec32_t);
-		if (aiovlen != 0)
-			aiov32 = kmem_alloc(aiov32len, KM_SLEEP);
-
-		if (copyin(iovp, aiov32, aiov32len)) {
-			if (aiovlen != 0) {
-				kmem_free(aiov32, aiov32len);
-				kmem_free(aiov, aiovlen);
-			}
-			return (set_errno(EFAULT));
-		}
-
-		count32 = 0;
-		for (i = 0; i < iovcnt; i++) {
-			ssize32_t iovlen32 = aiov32[i].iov_len;
-			count32 += iovlen32;
-			if (iovlen32 < 0 || count32 < 0) {
-				if (aiovlen != 0) {
-					kmem_free(aiov32, aiov32len);
-					kmem_free(aiov, aiovlen);
-				}
-				return (set_errno(EINVAL));
-			}
-			aiov[i].iov_len = iovlen32;
-			aiov[i].iov_base =
-			    (caddr_t)(uintptr_t)aiov32[i].iov_base;
-		}
-		if (aiovlen != 0)
-			kmem_free(aiov32, aiov32len);
-	} else
-#endif /* _SYSCALL32_IMPL */
-		if (copyin(iovp, aiov, iovcnt * sizeof (iovec_t))) {
-			if (aiovlen != 0)
-				kmem_free(aiov, aiovlen);
-			return (set_errno(EFAULT));
-		}
-
-	count = 0;
-	for (i = 0; i < iovcnt; i++) {
-		ssize_t iovlen = aiov[i].iov_len;
-		count += iovlen;
-		if (iovlen < 0 || count < 0) {
-			if (aiovlen != 0)
-				kmem_free(aiov, aiovlen);
-			return (set_errno(EINVAL));
-		}
-	}
-
-	if ((bcount = (ssize_t)count) < 0) {
+	if ((error = iovec_copyin(iovp, iovcnt, aiov, &count)) != 0) {
 		if (aiovlen != 0)
 			kmem_free(aiov, aiovlen);
-		return (set_errno(EINVAL));
+		return (set_errno(error));
 	}
+
 	if ((fp = getf(fdes)) == NULL) {
 		if (aiovlen != 0)
 			kmem_free(aiov, aiovlen);
@@ -1315,13 +591,9 @@ pwritev(int fdes, struct iovec *iovp, int iovcnt, off_t offset,
 		error = EBADF;
 		goto out;
 	}
-	vp = fp->f_vnode;
-	rwflag = 1;
-	if (vp->v_type == VREG) {
-
-		if (bcount == 0)
+	if (fp->f_vnode->v_type == VREG) {
+		if (count == 0)
 			goto out;
-
 		/*
 		 * return EINVAL for offsets that cannot be
 		 * represented in an off_t.
@@ -1361,92 +633,33 @@ pwritev(int fdes, struct iovec *iovp, int iovcnt, off_t offset,
 			goto out;
 		}
 
-		if (fileoff + bcount > maxoff)
-			bcount = (ssize_t)((u_offset_t)maxoff - fileoff);
-	} else if (vp->v_type == VFIFO) {
+		if (fileoff + count > maxoff)
+			count = (ssize_t)((u_offset_t)maxoff - fileoff);
+	} else if (fp->f_vnode->v_type == VFIFO) {
 		error = ESPIPE;
 		goto out;
 	}
-	/*
-	 * We have to enter the critical region before calling VOP_RWLOCK
-	 * to avoid a deadlock with ufs.
-	 */
-	if (nbl_need_check(vp)) {
-		int svmand;
 
-		nbl_start_crit(vp, RW_READER);
-		in_crit = 1;
-		error = nbl_svmand(vp, fp->f_cred, &svmand);
-		if (error != 0)
-			goto out;
-		if (nbl_conflict(vp, NBL_WRITE, fileoff, count, svmand,
-		    NULL)) {
-			error = EACCES;
-			goto out;
-		}
-	}
-
-	(void) VOP_RWLOCK(vp, rwflag, NULL);
-
-
-	/*
-	 * Behaviour is same as write(2). Please see comments for
-	 * write(2).
-	 */
-
-	if (vp->v_type == VREG) {
-		if (fileoff >= curproc->p_fsz_ctl) {
-			VOP_RWUNLOCK(vp, rwflag, NULL);
-			mutex_enter(&curproc->p_lock);
-			/* see above rctl_action comment */
-			(void) rctl_action(
-			    rctlproc_legacy[RLIMIT_FSIZE],
-			    curproc->p_rctls,
-			    curproc, RCA_UNSAFE_SIGINFO);
-			mutex_exit(&curproc->p_lock);
-			error = EFBIG;
-			goto out;
-		}
-		if (fileoff >= OFFSET_MAX(fp)) {
-			VOP_RWUNLOCK(vp, rwflag, NULL);
-			error = EFBIG;
-			goto out;
-		}
-		if (fileoff + count > OFFSET_MAX(fp))
-			count = (ssize_t)(OFFSET_MAX(fp) - fileoff);
-	}
-
-	auio.uio_loffset = fileoff;
 	auio.uio_iov = aiov;
 	auio.uio_iovcnt = iovcnt;
-	auio.uio_resid = bcount = count;
+	auio.uio_loffset = fileoff;
+	auio.uio_resid = count;
 	auio.uio_segflg = UIO_USERSPACE;
 	auio.uio_llimit = curproc->p_fsz_ctl;
 	auio.uio_fmode = fflag;
 	auio.uio_extflg = UIO_COPY_CACHED;
-	ioflag = auio.uio_fmode & (FSYNC|FDSYNC|FRSYNC);
-	error = VOP_WRITE(vp, &auio, ioflag, fp->f_cred, NULL);
-	count -= auio.uio_resid;
-	CPU_STATS_ENTER_K();
-	cp = CPU;
-	CPU_STATS_ADDQ(cp, sys, syswrite, 1);
-	CPU_STATS_ADDQ(cp, sys, writech, (ulong_t)count);
-	CPU_STATS_EXIT_K();
-	ttolwp(curthread)->lwp_ru.ioch += (ulong_t)count;
 
-	VOP_RWUNLOCK(vp, rwflag, NULL);
+	error = write_common(fp, &auio, &nwrite, B_TRUE);
 
-	if (error == EINTR && count != 0)
+	if (error == EINTR && nwrite != 0)
 		error = 0;
 out:
-	if (in_crit)
-		nbl_end_crit(vp);
 	releasef(fdes);
 	if (aiovlen != 0)
 		kmem_free(aiov, aiovlen);
 	if (error)
 		return (set_errno(error));
-	return (count);
+	return (nwrite);
 }
 
 #if defined(_SYSCALL32_IMPL) || defined(_ILP32)
@@ -1455,19 +668,16 @@ out:
  * This syscall supplies 64-bit file offsets to 32-bit applications only.
  */
 ssize32_t
-pread64(int fdes, void *cbuf, size32_t count, uint32_t offset_1,
+pread64(int fdes, void *cbuf, size32_t ccount, uint32_t offset_1,
     uint32_t offset_2)
 {
 	struct uio auio;
 	struct iovec aiov;
 	file_t *fp;
-	register vnode_t *vp;
-	struct cpu *cp;
-	int fflag, ioflag, rwflag;
-	ssize_t bcount;
-	int error = 0;
+	ssize_t count = (ssize_t)ccount;
+	size_t nread = 0;
+	int fflag, error = 0;
 	u_offset_t fileoff;
-	int in_crit = 0;
 
 #if defined(_LITTLE_ENDIAN)
 	fileoff = ((u_offset_t)offset_2 << 32) | (u_offset_t)offset_1;
@@ -1475,122 +685,73 @@ pread64(int fdes, void *cbuf, size32_t count, uint32_t offset_1,
 	fileoff = ((u_offset_t)offset_1 << 32) | (u_offset_t)offset_2;
 #endif
 
-	if ((bcount = (ssize_t)count) < 0 || bcount > INT32_MAX)
+	if (count < 0 || count > INT32_MAX)
 		return (set_errno(EINVAL));
 
 	if ((fp = getf(fdes)) == NULL)
 		return (set_errno(EBADF));
-	if (((fflag = fp->f_flag) & (FREAD)) == 0) {
+	if (((fflag = fp->f_flag) & FREAD) == 0) {
 		error = EBADF;
 		goto out;
 	}
-
-	rwflag = 0;
-	vp = fp->f_vnode;
-
-	if (vp->v_type == VREG) {
-
-		if (bcount == 0)
+	if (fp->f_vnode->v_type == VREG) {
+		if (count == 0)
 			goto out;
-
-		/*
-		 * Same as pread. See comments in pread.
-		 */
-
+		/* Same as pread. See comments in pread. */
 		if (fileoff > MAXOFFSET_T) {
 			error = EINVAL;
 			goto out;
 		}
-		if (fileoff + bcount > MAXOFFSET_T)
-			bcount = (ssize_t)(MAXOFFSET_T - fileoff);
-	} else if (vp->v_type == VFIFO) {
+		if ((fileoff + count) > MAXOFFSET_T)
+			count = (ssize_t)(MAXOFFSET_T - fileoff);
+	} else if (fp->f_vnode->v_type == VFIFO) {
 		error = ESPIPE;
 		goto out;
 	}
 
 	/*
-	 * We have to enter the critical region before calling VOP_RWLOCK
-	 * to avoid a deadlock with ufs.
-	 */
-	if (nbl_need_check(vp)) {
-		int svmand;
-
-		nbl_start_crit(vp, RW_READER);
-		in_crit = 1;
-		error = nbl_svmand(vp, fp->f_cred, &svmand);
-		if (error != 0)
-			goto out;
-		if (nbl_conflict(vp, NBL_READ, fileoff, bcount, svmand,
-		    NULL)) {
-			error = EACCES;
-			goto out;
-		}
-	}
-
-	aiov.iov_base = cbuf;
-	aiov.iov_len = bcount;
-	(void) VOP_RWLOCK(vp, rwflag, NULL);
-	auio.uio_loffset = fileoff;
-
-	/*
 	 * Note: File size can never be greater than MAXOFFSET_T.
-	 * If ever we start supporting 128 bit files the code
-	 * similar to the one in pread at this place should be here.
-	 * Here we avoid the unnecessary VOP_GETATTR() when we
-	 * know that fileoff == MAXOFFSET_T implies that it is always
-	 * greater than or equal to file size.
+	 * If ever we start supporting 128 bit files the code similar to the
+	 * one in pread at this place should be here.  Here we avoid the
+	 * unnecessary VOP_GETATTR() when we know that fileoff == MAXOFFSET_T
+	 * implies that it is always greater than or equal to file size.
 	 */
+	aiov.iov_base = cbuf;
+	aiov.iov_len = count;
 	auio.uio_iov = &aiov;
 	auio.uio_iovcnt = 1;
-	auio.uio_resid = bcount;
+	auio.uio_loffset = fileoff;
+	auio.uio_resid = count;
 	auio.uio_segflg = UIO_USERSPACE;
 	auio.uio_llimit = MAXOFFSET_T;
 	auio.uio_fmode = fflag;
 	auio.uio_extflg = UIO_COPY_CACHED;
 
-	ioflag = auio.uio_fmode & (FAPPEND|FSYNC|FDSYNC|FRSYNC);
+	error = read_common(fp, &auio, &nread, B_TRUE);
 
-	/* If read sync is not asked for, filter sync flags */
-	if ((ioflag & FRSYNC) == 0)
-		ioflag &= ~(FSYNC|FDSYNC);
-	error = VOP_READ(vp, &auio, ioflag, fp->f_cred, NULL);
-	bcount -= auio.uio_resid;
-	CPU_STATS_ENTER_K();
-	cp = CPU;
-	CPU_STATS_ADDQ(cp, sys, sysread, 1);
-	CPU_STATS_ADDQ(cp, sys, readch, (ulong_t)bcount);
-	CPU_STATS_EXIT_K();
-	ttolwp(curthread)->lwp_ru.ioch += (ulong_t)bcount;
-	VOP_RWUNLOCK(vp, rwflag, NULL);
-
-	if (error == EINTR && bcount != 0)
+	if (error == EINTR && nread != 0)
 		error = 0;
 out:
-	if (in_crit)
-		nbl_end_crit(vp);
 	releasef(fdes);
 	if (error)
 		return (set_errno(error));
-	return (bcount);
+	return (nread);
 }
 
 /*
  * This syscall supplies 64-bit file offsets to 32-bit applications only.
  */
 ssize32_t
-pwrite64(int fdes, void *cbuf, size32_t count, uint32_t offset_1,
+pwrite64(int fdes, void *cbuf, size32_t ccount, uint32_t offset_1,
     uint32_t offset_2)
 {
 	struct uio auio;
 	struct iovec aiov;
 	file_t *fp;
-	register vnode_t *vp;
-	struct cpu *cp;
-	int fflag, ioflag, rwflag;
-	ssize_t bcount;
-	int error = 0;
+	ssize_t count = (ssize_t)ccount;
+	size_t nwrite = 0;
+	int fflag, error = 0;
 	u_offset_t fileoff;
-	int in_crit = 0;
 
 #if defined(_LITTLE_ENDIAN)
 	fileoff = ((u_offset_t)offset_2 << 32) | (u_offset_t)offset_1;
@@ -1598,26 +759,18 @@ pwrite64(int fdes, void *cbuf, size32_t count, uint32_t offset_1,
 	fileoff = ((u_offset_t)offset_1 << 32) | (u_offset_t)offset_2;
 #endif
 
-	if ((bcount = (ssize_t)count) < 0 || bcount > INT32_MAX)
+	if (count < 0 || count > INT32_MAX)
 		return (set_errno(EINVAL));
 	if ((fp = getf(fdes)) == NULL)
 		return (set_errno(EBADF));
-	if (((fflag = fp->f_flag) & (FWRITE)) == 0) {
+	if (((fflag = fp->f_flag) & FWRITE) == 0) {
 		error = EBADF;
 		goto out;
 	}
-
-	rwflag = 1;
-	vp = fp->f_vnode;
-
-	if (vp->v_type == VREG) {
-
-		if (bcount == 0)
+	if (fp->f_vnode->v_type == VREG) {
+		if (count == 0)
 			goto out;
-
-		/*
-		 * See comments in pwrite.
-		 */
+		/* See comments in pwrite. */
 		if (fileoff > MAXOFFSET_T) {
 			error = EINVAL;
 			goto out;
@@ -1634,72 +787,33 @@ pwrite64(int fdes, void *cbuf, size32_t count, uint32_t offset_1,
 			error = EFBIG;
 			goto out;
 		}
-		if (fileoff + bcount > MAXOFFSET_T)
-			bcount = (ssize_t)((u_offset_t)MAXOFFSET_T - fileoff);
-	} else if (vp->v_type == VFIFO) {
+		if (fileoff + count > MAXOFFSET_T)
+			count = (ssize_t)((u_offset_t)MAXOFFSET_T - fileoff);
+	} else if (fp->f_vnode->v_type == VFIFO) {
 		error = ESPIPE;
 		goto out;
 	}
 
-	/*
-	 * We have to enter the critical region before calling VOP_RWLOCK
-	 * to avoid a deadlock with ufs.
-	 */
-	if (nbl_need_check(vp)) {
-		int svmand;
-
-		nbl_start_crit(vp, RW_READER);
-		in_crit = 1;
-		error = nbl_svmand(vp, fp->f_cred, &svmand);
-		if (error != 0)
-			goto out;
-		if (nbl_conflict(vp, NBL_WRITE, fileoff, bcount, svmand,
-		    NULL)) {
-			error = EACCES;
-			goto out;
-		}
-	}
-
 	aiov.iov_base = cbuf;
-	aiov.iov_len = bcount;
-	(void) VOP_RWLOCK(vp, rwflag, NULL);
-	auio.uio_loffset = fileoff;
+	aiov.iov_len = count;
 	auio.uio_iov = &aiov;
 	auio.uio_iovcnt = 1;
-	auio.uio_resid = bcount;
+	auio.uio_loffset = fileoff;
+	auio.uio_resid = count;
 	auio.uio_segflg = UIO_USERSPACE;
 	auio.uio_llimit = curproc->p_fsz_ctl;
 	auio.uio_fmode = fflag;
 	auio.uio_extflg = UIO_COPY_CACHED;
 
-	/*
-	 * The SUSv4 POSIX specification states:
-	 *	The pwrite() function shall be equivalent to write(), except
-	 *	that it writes into a given position and does not change
-	 *	the file offset (regardless of whether O_APPEND is set).
-	 * To make this be true, we omit the FAPPEND flag from ioflag.
-	 */
-	ioflag = auio.uio_fmode & (FSYNC|FDSYNC|FRSYNC);
+	error = write_common(fp, &auio, &nwrite, B_TRUE);
 
-	error = VOP_WRITE(vp, &auio, ioflag, fp->f_cred, NULL);
-	bcount -= auio.uio_resid;
-	CPU_STATS_ENTER_K();
-	cp = CPU;
-	CPU_STATS_ADDQ(cp, sys, syswrite, 1);
-	CPU_STATS_ADDQ(cp, sys, writech, (ulong_t)bcount);
-	CPU_STATS_EXIT_K();
-	ttolwp(curthread)->lwp_ru.ioch += (ulong_t)bcount;
-	VOP_RWUNLOCK(vp, rwflag, NULL);
-
-	if (error == EINTR && bcount != 0)
+	if (error == EINTR && nwrite != 0)
 		error = 0;
 out:
-	if (in_crit)
-		nbl_end_crit(vp);
 	releasef(fdes);
 	if (error)
 		return (set_errno(error));
-	return (bcount);
+	return (nwrite);
 }
 
 #endif	/* _SYSCALL32_IMPL || _ILP32 */
@@ -1767,3 +881,264 @@ writev32(int32_t fdes, caddr32_t iovp, int32_t iovcnt)
 	return (writev(fdes, (void *)(uintptr_t)iovp, iovcnt));
 }
 #endif	/* _SYSCALL32_IMPL */
+
+/* Common routines */
+
+static int
+iovec_copyin(void *uiovp, int iovcnt, iovec_t *kiovp, ssize_t *count)
+{
+#ifdef _SYSCALL32_IMPL
+	/*
+	 * 32-bit callers need to have their iovec expanded, while ensuring
+	 * that they can't move more than 2Gbytes of data in a single call.
+	 */
+	if (get_udatamodel() == DATAMODEL_ILP32) {
+		struct iovec32 buf32[IOV_MAX_STACK], *aiov32 = buf32;
+		int aiov32len = 0;
+		ssize32_t total32 = 0;
+		int i;
+
+		if (iovcnt > IOV_MAX_STACK) {
+			aiov32len = iovcnt * sizeof (iovec32_t);
+			aiov32 = kmem_alloc(aiov32len, KM_SLEEP);
+		}
+
+		if (copyin(uiovp, aiov32, iovcnt * sizeof (iovec32_t))) {
+			if (aiov32len != 0) {
+				kmem_free(aiov32, aiov32len);
+			}
+			return (EFAULT);
+		}
+
+		for (i = 0; i < iovcnt; i++) {
+			ssize32_t iovlen32 = aiov32[i].iov_len;
+			total32 += iovlen32;
+			if (iovlen32 < 0 || total32 < 0) {
+				if (aiov32len != 0) {
+					kmem_free(aiov32, aiov32len);
+				}
+				return (EINVAL);
+			}
+			kiovp[i].iov_len = iovlen32;
+			kiovp[i].iov_base =
+			    (caddr_t)(uintptr_t)aiov32[i].iov_base;
+		}
+		*count = total32;
+
+		if (aiov32len != 0)
+			kmem_free(aiov32, aiov32len);
+	} else
+#endif
+	{
+		ssize_t total = 0;
+		int i;
+
+		if (copyin(uiovp, kiovp, iovcnt * sizeof (iovec_t)))
+			return (EFAULT);
+		for (i = 0; i < iovcnt; i++) {
+			ssize_t iovlen = kiovp[i].iov_len;
+			total += iovlen;
+			if (iovlen < 0 || total < 0) {
+				return (EINVAL);
+			}
+		}
+		*count = total;
+	}
+	return (0);
+}
+
+int
+read_common(file_t *fp, uio_t *uiop, size_t *nread, boolean_t positioned)
+{
+	vnode_t *vp = fp->f_vnode;
+	int error = 0, rwflag = 0, ioflag;
+	ssize_t count = uiop->uio_resid;
+	size_t rcount = 0;
+	struct cpu *cp;
+	boolean_t in_crit = B_FALSE;
+
+	/*
+	 * We have to enter the critical region before calling VOP_RWLOCK
+	 * to avoid a deadlock with ufs.
+	 */
+	if (nbl_need_check(vp)) {
+		int svmand;
+
+		nbl_start_crit(vp, RW_READER);
+		in_crit = 1;
+		error = nbl_svmand(vp, fp->f_cred, &svmand);
+		if (error != 0)
+			goto out;
+		if (nbl_conflict(vp, NBL_READ, uiop->uio_offset, count, svmand,
+		    NULL) != 0) {
+			error = EACCES;
+			goto out;
+		}
+	}
+
+	(void) VOP_RWLOCK(vp, rwflag, NULL);
+	/*
+	 * For non-positioned reads, recheck offset/count validity inside
+	 * VOP_WRLOCK to prevent filesize from changing during validation.
+	 */
+	if (!positioned) {
+		u_offset_t uoffset = (u_offset_t)(ulong_t)fp->f_offset;
+
+		if ((vp->v_type == VREG) && (uoffset >= OFFSET_MAX(fp))) {
+			struct vattr va;
+
+			va.va_mask = AT_SIZE;
+			error = VOP_GETATTR(vp, &va, 0, fp->f_cred, NULL);
+			VOP_RWUNLOCK(vp, rwflag, NULL);
+			if (error != 0)
+				goto out;
+			/* We have to return EOF if fileoff is >= file size. */
+			if (uoffset >= va.va_size)
+				goto out;
+			/*
+			 * File is greater than or equal to maxoff and
+			 * therefore we return EOVERFLOW.
+			 */
+			error = EOVERFLOW;
+			goto out;
+		}
+		if ((vp->v_type == VREG) &&
+		    (uoffset + count > OFFSET_MAX(fp))) {
+			count = (ssize_t)(OFFSET_MAX(fp) - uoffset);
+			uiop->uio_resid = count;
+		}
+		uiop->uio_offset = uoffset;
+	}
+	ioflag = uiop->uio_fmode & (FAPPEND|FSYNC|FDSYNC|FRSYNC);
+	/* If read sync is not asked for, filter sync flags */
+	if ((ioflag & FRSYNC) == 0)
+		ioflag &= ~(FSYNC|FDSYNC);
+	error = VOP_READ(vp, uiop, ioflag, fp->f_cred, NULL);
+	rcount = count - uiop->uio_resid;
+	CPU_STATS_ENTER_K();
+	cp = CPU;
+	CPU_STATS_ADDQ(cp, sys, sysread, 1);
+	CPU_STATS_ADDQ(cp, sys, readch, (ulong_t)rcount);
+	CPU_STATS_EXIT_K();
+	ttolwp(curthread)->lwp_ru.ioch += (ulong_t)rcount;
+	/* Store offset for non-positioned reads */
+	if (!positioned) {
+		if (vp->v_type == VFIFO) {
+			/* Backward compatibility */
+			fp->f_offset = rcount;
+		} else if (((fp->f_flag & FAPPEND) == 0) ||
+		    (vp->v_type != VREG) || (count != 0)) {
+			/* POSIX */
+			fp->f_offset = uiop->uio_loffset;
+		}
+	}
+	VOP_RWUNLOCK(vp, rwflag, NULL);
+
+out:
+	if (in_crit)
+		nbl_end_crit(vp);
+	*nread = rcount;
+	return (error);
+}
+
+int
+write_common(file_t *fp, uio_t *uiop, size_t *nwrite, boolean_t positioned)
+{
+	vnode_t *vp = fp->f_vnode;
+	int error = 0, rwflag = 1, ioflag;
+	ssize_t count = uiop->uio_resid;
+	size_t wcount = 0;
+	struct cpu *cp;
+	boolean_t in_crit = B_FALSE;
+
+	/*
+	 * We have to enter the critical region before calling VOP_RWLOCK
+	 * to avoid a deadlock with ufs.
+	 */
+	if (nbl_need_check(vp)) {
+		int svmand;
+
+		nbl_start_crit(vp, RW_READER);
+		in_crit = 1;
+		error = nbl_svmand(vp, fp->f_cred, &svmand);
+		if (error != 0)
+			goto out;
+		if (nbl_conflict(vp, NBL_WRITE, uiop->uio_loffset, count,
+		    svmand, NULL) != 0) {
+			error = EACCES;
+			goto out;
+		}
+	}
+
+	(void) VOP_RWLOCK(vp, rwflag, NULL);
+
+	if (!positioned) {
+		/*
+		 * For non-positioned writes, the value of fp->f_offset is
+		 * re-queried while inside VOP_RWLOCK.  This ensures that other
+		 * writes which alter the filesize will be taken into account.
+		 */
+		uiop->uio_loffset = fp->f_offset;
+		ioflag = uiop->uio_fmode & (FAPPEND|FSYNC|FDSYNC|FRSYNC);
+	} else {
+		/*
+		 * The SUSv4 POSIX specification states:
+		 * The pwrite() function shall be equivalent to write(), except
+		 * that it writes into a given position and does not change
+		 * the file offset (regardless of whether O_APPEND is set).
+		 *
+		 * To make this be true, we omit the FAPPEND flag from ioflag.
+		 */
+		ioflag = uiop->uio_fmode & (FSYNC|FDSYNC|FRSYNC);
+	}
+	if (vp->v_type == VREG) {
+		u_offset_t fileoff = (u_offset_t)(ulong_t)uiop->uio_loffset;
+
+		if (fileoff >= curproc->p_fsz_ctl) {
+			VOP_RWUNLOCK(vp, rwflag, NULL);
+			mutex_enter(&curproc->p_lock);
+			(void) rctl_action(rctlproc_legacy[RLIMIT_FSIZE],
+			    curproc->p_rctls, curproc, RCA_UNSAFE_SIGINFO);
+			mutex_exit(&curproc->p_lock);
+			error = EFBIG;
+			goto out;
+		}
+		if (fileoff >= OFFSET_MAX(fp)) {
+			VOP_RWUNLOCK(vp, rwflag, NULL);
+			error = EFBIG;
+			goto out;
+		}
+		if (fileoff + count > OFFSET_MAX(fp)) {
+			count = (ssize_t)(OFFSET_MAX(fp) - fileoff);
+			uiop->uio_resid = count;
+		}
+	}
+
+	error = VOP_WRITE(vp, uiop, ioflag, fp->f_cred, NULL);
+	wcount = count - uiop->uio_resid;
+	CPU_STATS_ENTER_K();
+	cp = CPU;
+	CPU_STATS_ADDQ(cp, sys, syswrite, 1);
+	CPU_STATS_ADDQ(cp, sys, writech, (ulong_t)wcount);
+	CPU_STATS_EXIT_K();
+	ttolwp(curthread)->lwp_ru.ioch += (ulong_t)wcount;
+
+	/* Store offset for non-positioned writes */
+	if (!positioned) {
+		if (vp->v_type == VFIFO) {
+			/* Backward compatibility */
+			fp->f_offset = wcount;
+		} else if (((fp->f_flag & FAPPEND) == 0) ||
+		    (vp->v_type != VREG) || (count != 0)) {
+			/* POSIX */
+			fp->f_offset = uiop->uio_loffset;
+		}
+	}
+	VOP_RWUNLOCK(vp, rwflag, NULL);
+
+out:
+	if (in_crit)
+		nbl_end_crit(vp);
+	*nwrite = wcount;
+	return (error);
+}

@@ -1415,6 +1415,21 @@ tcp_free(tcp_t *tcp)
 		tcp->tcp_cc_algo->cb_destroy(&tcp->tcp_ccv);
 
 	/*
+	 * Destroy any association with SO_REUSEPORT group.
+	 */
+	if (tcp->tcp_rg_bind != NULL) {
+		/*
+		 * This is only necessary for connections which enabled
+		 * SO_REUSEPORT but were never bound.  Such connections should
+		 * be the one and only member of the tcp_rg_tp to which they
+		 * have been associated.
+		 */
+		VERIFY(tcp_rg_remove(tcp->tcp_rg_bind, tcp));
+		tcp_rg_destroy(tcp->tcp_rg_bind);
+		tcp->tcp_rg_bind = NULL;
+	}
+
+	/*
 	 * If this is a non-STREAM socket still holding on to an upper
 	 * handle, release it. As a result of fallback we might also see
 	 * STREAMS based conns with upper handles, in which case there is

@@ -1287,6 +1287,13 @@ lx_socket(int domain, int type, int protocol)
 	 */
 	so->so_mode |= SM_DEFERERR;
 
+	/*
+	 * Linux uses a less stringent interpretation of X/Open when it comes
+	 * to validating certain operations.  Setting this flag allows them to
+	 * be bypassed down in sockfs.
+	 */
+	so->so_xopen_bypass = B_TRUE;
+
 	/* Now fill in the entries that falloc reserved */
 	if (options & SOCK_NONBLOCK) {
 		so->so_state |= SS_NONBLOCK;

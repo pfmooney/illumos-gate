@@ -482,6 +482,7 @@ sonode_constructor(void *buf, void *cdrarg, int kmflags)
 	so->so_listener		= NULL;
 
 	so->so_snd_qfull	= B_FALSE;
+	so->so_xopen_bypass	= B_FALSE;
 
 	so->so_filter_active	= 0;
 	so->so_filter_tx	= 0;
@@ -605,6 +606,7 @@ sonode_init(struct sonode *so, struct sockparams *sp, int family,
 	vp->v_type	= VSOCK;
 	vp->v_rdev	= sockdev;
 
+	so->so_xopen_bypass = B_FALSE;
 	so->so_snd_qfull = B_FALSE;
 	so->so_minpsz = 0;
 

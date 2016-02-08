@@ -221,7 +221,8 @@ struct sonode {
 		so_rcv_wakeup: 1,
 		so_snd_wakeup: 1,
 		so_not_str: 1,	/* B_TRUE if not streams based socket */
-		so_pad_to_bit_31: 28;
+		so_xopen_bypass: 1,	/* skip certain X/Open checks */
+		so_pad_to_bit_31: 27;
 
 	/* Communication channel with protocol */
 	sock_lower_handle_t	so_proto_handle;

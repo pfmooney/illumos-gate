@@ -672,7 +672,8 @@ so_getpeername(struct sonode *so, struct sockaddr *addr,
 		    (so->so_proto_handle, addr, addrlen, cr);
 	} else if (!(so->so_state & SS_ISCONNECTED)) {
 		error = ENOTCONN;
-	} else if ((so->so_state & SS_CANTSENDMORE) && !xnet_skip_checks) {
+	} else if ((so->so_state & SS_CANTSENDMORE) &&
+	    !(so->so_xopen_bypass || xnet_skip_checks)) {
 		/* Added this check for X/Open */
 		error = EINVAL;
 		if (xnet_check_print) {
@@ -790,7 +791,8 @@ so_setsockopt(struct sonode *so, int level, int option_name,
 	    SOP_SETSOCKOPT(so, level, option_name, optval, optlen, cr));
 
 	/* X/Open requires this check */
-	if (so->so_state & SS_CANTSENDMORE && !xnet_skip_checks) {
+	if ((so->so_state & SS_CANTSENDMORE) &&
+	    !(so->so_xopen_bypass || xnet_skip_checks)) {
 		SO_UNBLOCK_FALLBACK(so);
 		if (xnet_check_print)
 			printf("sockfs: X/Open setsockopt check => EINVAL\n");

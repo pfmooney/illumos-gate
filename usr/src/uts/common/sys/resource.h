@@ -23,7 +23,7 @@
  *
  * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
- * Copyright 2014 Joyent, Inc.  All rights reserved.
+ * Copyright 2016 Joyent, Inc.
  */
 
 /*	Copyright (c) 1984, 1986, 1987, 1988, 1989 AT&T	*/
@@ -221,8 +221,11 @@ struct	rusage32 {
 #ifdef _KERNEL
 
 #include <sys/model.h>
+#include <sys/proc.h>
 
-struct proc;
+extern void getrusage_proc(proc_t *, struct rusage *);
+extern void getrusage_chld(proc_t *, struct rusage *);
+extern void getrusage_curlwp(struct rusage *);
 
 #else
 

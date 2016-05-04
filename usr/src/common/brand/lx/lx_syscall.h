@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2015 Joyent, Inc.
+ * Copyright 2016 Joyent, Inc.
  */
 
 #ifndef	_LX_SYSCALL_H
@@ -29,12 +29,6 @@ extern "C" {
  * exist in illumos. Each section should be labelled with which system call it
  * belongs to.
  */
-
-/* arguments for waitpid(2) */
-/* see comments in usr/src/lib/brand/lx/lx_brand/common/wait.c */
-#define	LX_WNOTHREAD	0x20000000 /* Do not wait on siblings' children */
-#define	LX_WALL		0x40000000 /* Wait on all children */
-#define	LX_WCLONE	0x80000000 /* Wait only on clone children */
 
 /* For arch_prctl(2) */
 #define	LX_ARCH_SET_GS	0x1001

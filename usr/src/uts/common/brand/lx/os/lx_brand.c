@@ -1483,45 +1483,6 @@ lx_brandsys(int cmd, int64_t *rval, uintptr_t arg1, uintptr_t arg2,
 		return (lx_ptrace_set_clone_inherit((int)arg1, arg2 == 0 ?
 		    B_FALSE : B_TRUE));
 
-	case B_HELPER_WAITID: {
-		idtype_t idtype = (idtype_t)arg1;
-		id_t id = (id_t)arg2;
-		siginfo_t *infop = (siginfo_t *)arg3;
-		int options = (int)arg4;
-
-		lwpd = ttolxlwp(curthread);
-
-		/*
-		 * Our brand-specific waitid helper only understands a subset of
-		 * the possible idtypes.  Ensure we keep to that subset here:
-		 */
-		if (idtype != P_ALL && idtype != P_PID && idtype != P_PGID) {
-			return (EINVAL);
-		}
-
-		/*
-		 * Enable the return of emulated ptrace(2) stop conditions
-		 * through lx_waitid_helper, and stash the Linux-specific
-		 * extra waitid() flags.
-		 */
-		lwpd->br_waitid_emulate = B_TRUE;
-		lwpd->br_waitid_flags = (int)arg5;
-
-#if defined(_SYSCALL32_IMPL)
-		if (get_udatamodel() != DATAMODEL_NATIVE) {
-			return (waitsys32(idtype, id, infop, options));
-		} else
-#endif
-		{
-			return (waitsys(idtype, id, infop, options));
-		}
-
-		lwpd->br_waitid_emulate = B_FALSE;
-		lwpd->br_waitid_flags = 0;
-
-		return (0);
-	}
-
 	case B_UNSUPPORTED: {
 		char dmsg[256];
 

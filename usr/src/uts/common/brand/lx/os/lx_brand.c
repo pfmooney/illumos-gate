@@ -2183,8 +2183,8 @@ lx_elfexec(struct vnode *vp, struct execa *uap, struct uarg *args,
 		Ehdr ehdr;
 		Phdr *phdrp;
 		caddr_t phdrbase = NULL;
-		ssize_t phdrsize = 0;
-		int nphdrs, hsize;
+		size_t phdrsize = 0;
+		uint_t nphdrs, hsize;
 
 		if ((error = elfreadhdr(vp, cred, &ehdr, &nphdrs, &phdrbase,
 		    &phdrsize)) != 0) {
@@ -2212,8 +2212,8 @@ lx_elfexec(struct vnode *vp, struct execa *uap, struct uarg *args,
 		Elf32_Ehdr ehdr;
 		Elf32_Phdr *phdrp;
 		caddr_t phdrbase = NULL;
-		ssize_t phdrsize = 0;
-		int nphdrs, hsize;
+		size_t phdrsize = 0;
+		uint_t nphdrs, hsize;
 
 		if ((error = elf32readhdr(vp, cred, &ehdr, &nphdrs, &phdrbase,
 		    &phdrsize)) != 0) {

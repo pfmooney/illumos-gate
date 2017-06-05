@@ -22,11 +22,12 @@
  * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
+/*
+ * Copyright 2017 Joyent, Inc.
+ */
 
 #ifndef _ELF_ELF_IMPL_H
 #define	_ELF_ELF_IMPL_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #ifdef	__cplusplus
 extern "C" {
@@ -70,6 +71,17 @@ typedef struct {
 	Nhdr	nhdr;
 	char	name[8];
 } Note;
+
+typedef struct {
+	vnode_t		*ecc_vp;
+	proc_t		*ecc_p;
+	cred_t		*ecc_credp;
+	rlim64_t	ecc_rlimit;
+	core_content_t	ecc_content;
+	offset_t	ecc_doffset;
+	void		*ecc_buf;
+	size_t		ecc_bufsz;
+} elf_core_ctx_t;
 
 #ifdef	_ELF32_COMPAT
 /*

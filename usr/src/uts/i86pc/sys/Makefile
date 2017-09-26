@@ -64,7 +64,10 @@ HDRS=  \
 	vm_machparam.h	\
 	x_call.h	\
 	xc_levels.h	\
-	xsvc.h
+	xsvc.h		\
+	vmm.h		\
+	vmm_impl.h	\
+	vmm_instruction_emul.h
 
 ROOTHDRS=	$(HDRS:%=$(USR_PSM_ISYS_DIR)/%)
 

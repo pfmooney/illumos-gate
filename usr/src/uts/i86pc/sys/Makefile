@@ -21,6 +21,7 @@
 #
 # Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
+# Copyright 2017 Joyent, Inc.
 #
 # uts/i86pc/sys/Makefile
 #
@@ -36,7 +37,7 @@ include ../Makefile.i86pc
 #
 FILEMODE = 644
 
-HDRS=  \
+CHKHDRS=  \
 	acpidev.h	\
 	amd_iommu.h	\
 	asm_misc.h	\
@@ -64,10 +65,16 @@ HDRS=  \
 	vm_machparam.h	\
 	x_call.h	\
 	xc_levels.h	\
-	xsvc.h		\
+	xsvc.h
+
+NOCHKHDRS= \
 	vmm.h		\
 	vmm_impl.h	\
 	vmm_instruction_emul.h
+
+HDRS= \
+	$(CHKHDRS)	\
+	$(NOCHKHDRS)
 
 ROOTHDRS=	$(HDRS:%=$(USR_PSM_ISYS_DIR)/%)
 
@@ -77,7 +84,7 @@ ROOTDIRS=	$(ROOTDIR)/uts $(ROOTDIR)/uts/$(PLATFORM)
 ROOTLINK=	$(ROOTDIR)/uts/$(PLATFORM)/sys
 LINKDEST=	../../../../platform/$(PLATFORM)/include/sys
 
-CHECKHDRS=	$(HDRS:%.h=%.check)
+CHECKHDRS=	$(CHKHDRS:%.h=%.check)
 
 .KEEP_STATE:
 

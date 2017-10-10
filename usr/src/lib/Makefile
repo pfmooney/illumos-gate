@@ -22,7 +22,7 @@
 #
 # Copyright (c) 1989, 2010, Oracle and/or its affiliates. All rights reserved.
 # Copyright (c) 2012 by Delphix. All rights reserved.
-# Copyright 2015, Joyent, Inc.
+# Copyright 2017 Joyent, Inc.
 # Copyright (c) 2013 Gary Mills
 # Copyright 2014 Garrett D'Amore <garrett@damore.org>
 # Copyright (c) 2015 Gary Mills
@@ -279,7 +279,8 @@ SUBDIRS +=				\
 
 i386_SUBDIRS=		\
 	libfdisk	\
-	libsaveargs
+	libsaveargs	\
+	libvmmapi
 
 sparc_SUBDIRS=		\
 	efcode		\
@@ -512,7 +513,8 @@ HDRSUBDIRS=				\
 
 i386_HDRSUBDIRS=	\
 	libfdisk	\
-	libsaveargs
+	libsaveargs	\
+	libvmmapi
 
 sparc_HDRSUBDIRS=	\
 	libds		\

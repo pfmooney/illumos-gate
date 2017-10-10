@@ -24,6 +24,7 @@
 #
 # Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
 # Copyright (c) 2013 Andrew Stormont.  All rights reserved.
+# Copyright 2017 Joyent, Inc.
 #
 #
 #	This makefile contains the common definitions for the i86pc unix
@@ -264,6 +265,9 @@ DRV_KMODS	+= amd_iommu
 DRV_KMODS	+= dr
 DRV_KMODS	+= ioat
 DRV_KMODS	+= fipe
+# XXX: should be DRV_KMODS_64, but that doesn't work
+DRV_KMODS	+= vmm
+DRV_KMODS	+= viona
 
 DRV_KMODS	+= cpudrv
 

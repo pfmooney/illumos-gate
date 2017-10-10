@@ -483,6 +483,10 @@ i386_SUBDIRS=		\
 	acpi		\
 	acpihpd		\
 	addbadsec	\
+	bhyve		\
+	bhyveconsole	\
+	bhyvectl	\
+	bhyveload-uefi	\
 	biosdev		\
 	diskscan	\
 	nvmeadm		\

@@ -25,6 +25,18 @@
  *
  * $FreeBSD: head/sys/amd64/vmm/intel/vmx_msr.c 284174 2015-06-09 00:14:47Z tychon $
  */
+/*
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
+ *
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * http://www.illumos.org/license/CDDL.
+ *
+ * Copyright 2017 Joyent, Inc.
+ */
 
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD: head/sys/amd64/vmm/intel/vmx_msr.c 284174 2015-06-09 00:14:47Z tychon $");
@@ -184,7 +196,9 @@ msr_bitmap_change_access(char *bitmap, u_int msr, int access)
 static uint64_t misc_enable;
 static uint64_t platform_info;
 static uint64_t turbo_ratio_limit;
+#ifdef	__FreeBSD__
 static uint64_t host_msrs[GUEST_MSR_NUM];
+#endif
 
 static bool
 nehalem_cpu(void)

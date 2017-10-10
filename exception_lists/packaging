@@ -887,3 +887,12 @@ opt/onbld/man/man1onbld/sgsmsg.1onbld
 # The built link-editor demos are not delivered
 #
 opt/SUNWonld/
+
+#
+# private bhyve header files
+#
+usr/include/bhyve.h
+usr/include/vmmapi.h
+usr/platform/i86pc/include/sys/vmm.h
+usr/platform/i86pc/include/sys/vmm_impl.h
+usr/platform/i86pc/include/sys/vmm_instruction_emul.h

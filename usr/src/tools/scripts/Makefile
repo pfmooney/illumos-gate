@@ -51,6 +51,7 @@ SHFILES= \
 PERLFILES= \
 	check_rtime \
 	find_elf \
+	gensetdefs \
 	interface_check \
 	interface_cmp \
 	jstyle \

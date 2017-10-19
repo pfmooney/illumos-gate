@@ -27,8 +27,8 @@
 #define	VNA_IOC_TX_RING_KICK	(VNA_IOC | 8)
 #define	VNA_IOC_RX_INTR_CLR	(VNA_IOC | 9)
 #define	VNA_IOC_TX_INTR_CLR	(VNA_IOC | 10)
-#define VNA_IOC_SET_FEATURES	(VNA_IOC | 11)
-#define VNA_IOC_GET_FEATURES	(VNA_IOC | 12)
+#define	VNA_IOC_SET_FEATURES	(VNA_IOC | 11)
+#define	VNA_IOC_GET_FEATURES	(VNA_IOC | 12)
 
 typedef struct vioc_create {
 	datalink_id_t	c_linkid;

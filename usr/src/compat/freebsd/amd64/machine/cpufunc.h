@@ -16,6 +16,8 @@
 #ifndef _COMPAT_FREEBSD_AMD64_MACHINE_CPUFUNC_H_
 #define	_COMPAT_FREEBSD_AMD64_MACHINE_CPUFUNC_H_
 
+#include <sys/types.h>
+
 static __inline u_long
 bsfq(u_long mask)
 {

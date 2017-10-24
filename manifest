@@ -10265,7 +10265,6 @@ f usr/sbin/allocate 4555 root bin
 d usr/sbin/amd64 0755 root bin
 f usr/sbin/amd64/bhyve 0555 root sys
 f usr/sbin/amd64/bhyvectl 0555 root sys
-f usr/sbin/amd64/bhyveload-uefi 0555 root sys
 f usr/sbin/amd64/dtrace 0555 root bin
 f usr/sbin/amd64/intrstat 0555 root bin
 f usr/sbin/amd64/ipf 0555 root bin
@@ -10290,7 +10289,6 @@ s usr/sbin/autopush=../../sbin/autopush
 h usr/sbin/bhyve=usr/lib/isaexec
 f usr/sbin/bhyveconsole 0555 root bin
 h usr/sbin/bhyvectl=usr/lib/isaexec
-h usr/sbin/bhyveload-uefi=usr/lib/isaexec
 f usr/sbin/cfgadm 0555 root bin
 f usr/sbin/check-hostname 0555 root mail
 f usr/sbin/check-permissions 0555 root mail

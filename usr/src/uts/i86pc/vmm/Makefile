@@ -73,6 +73,8 @@ LINTTAGS	+= -erroff=E_ASM_IMPOSSIBLE_CONSTRAINT
 LINTTAGS	+= -erroff=E_ASM_UNUSED_PARAM
 LINTTAGS	+= -erroff=E_NOP_IF_STMT
 
+CERRWARN	+= -_gcc=-Wno-empty-body
+
 # These sources only compile with gcc.  Workaround a confluence of cruft
 # regarding dmake and shadow compilation by neutering the sun compiler.
 #amd64_CC	= $(ONBLD_TOOLS)/bin/$(MACH)/cw -_gcc

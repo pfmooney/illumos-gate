@@ -110,7 +110,9 @@ pmap_free(pmap_t pmap)
 int
 pmap_pinit_type(pmap_t pmap, enum pmap_type type, int flags)
 {
+#if notyet
 	struct vmspace *vms = PMAP_TO_VMSPACE(pmap);
+#endif
 
 	/* For use in vmm only */
 	pmap->pm_type = type;
@@ -277,7 +279,9 @@ vm_map_find(vm_map_t map, vm_object_t vmo, vm_ooffset_t off, vm_offset_t *addr,
 {
 	struct vmspace *vms = VMMAP_TO_VMSPACE(map);
 	struct as *as = vms->vms_as;
+#if notyet
 	const size_t slen = (size_t)len;
+#endif
 	caddr_t base = (caddr_t)*addr;
 	size_t maxlen;
 	struct segvn_crargs svna;

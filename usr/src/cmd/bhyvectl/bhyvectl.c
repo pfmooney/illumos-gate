@@ -23,7 +23,7 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $FreeBSD: head/usr.sbin/bhyvectl/bhyvectl.c 273375 2014-10-21 07:10:43Z neel $
+ * $FreeBSD$
  */
 /*
  * This file and its contents are supplied under the terms of the
@@ -42,7 +42,7 @@
  */
 
 #include <sys/cdefs.h>
-__FBSDID("$FreeBSD: head/usr.sbin/bhyvectl/bhyvectl.c 273375 2014-10-21 07:10:43Z neel $");
+__FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/types.h>
@@ -583,7 +583,10 @@ enum {
 static void
 print_cpus(const char *banner, const cpuset_t *cpus)
 {
-	int i, first;
+#ifdef __FreeBSD__
+	int i;
+#endif
+	int first;
 
 	first = 1;
 	printf("%s:\t", banner);
@@ -1905,10 +1908,8 @@ main(int argc, char *argv[])
 	if (!error && set_x2apic_state)
 		error = vm_set_x2apic_state(ctx, vcpu, x2apic_state);
 
-#ifdef __FreeBSD__
 	if (!error && unassign_pptdev)
 		error = vm_unassign_pptdev(ctx, bus, slot, func);
-#endif
 
 	if (!error && set_exception_bitmap) {
 		if (cpu_intel)

@@ -24,8 +24,8 @@ extern size_t kpm_size;
 	(uintptr_t)(x) | (uintptr_t)kpm_vbase; })
 
 #define	DMAP_TO_PHYS(x)	({				\
-	ASSERT((uintptr_t)(x) >= kpm_vbase);		\
-	ASSERT((uintptr_t)(x) < (kpm_base + kpm_size));	\
+	ASSERT((uintptr_t)(x) >= (uintptr_t)kpm_vbase);		\
+	ASSERT((uintptr_t)(x) < ((uintptr_t)kpm_vbase + kpm_size));	\
 	(uintptr_t)(x) & ~(uintptr_t)kpm_vbase; })	\
 
 

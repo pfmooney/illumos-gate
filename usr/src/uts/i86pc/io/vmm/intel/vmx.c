@@ -333,6 +333,8 @@ exit_reason_to_str(int reason)
 }
 #endif	/* KTR */
 
+#ifdef __FreeBSD__
+/* XXXJOY: This was previous masked out, still dangerous? */
 static int
 vmx_allow_x2apic_msrs(struct vmx *vmx)
 {
@@ -380,6 +382,7 @@ vmx_allow_x2apic_msrs(struct vmx *vmx)
 
 	return (error);
 }
+#endif
 
 u_long
 vmx_fix_cr0(u_long cr0)
@@ -3305,6 +3308,8 @@ vmx_set_tmr(struct vlapic *vlapic, int vector, bool level)
 	VMCLEAR(vmcs);
 }
 
+#ifdef __FreeBSD__
+/* XXXJOY: This was previous masked out, still dangerous? */
 static void
 vmx_enable_x2apic_mode(struct vlapic *vlapic)
 {
@@ -3347,6 +3352,7 @@ vmx_enable_x2apic_mode(struct vlapic *vlapic)
 		    __func__, error));
 	}
 }
+#endif
 
 static void
 vmx_post_intr(struct vlapic *vlapic, int hostcpu)

@@ -241,4 +241,6 @@ atomic_swap_long(volatile u_long *p, u_long v)
 /* Operations on pointers. */
 #define	atomic_cmpset_ptr	atomic_cmpset_long
 
+#define      mb()    __asm __volatile("mfence;" : : : "memory")
+
 #endif	/* _COMPAT_FREEBSD_AMD64_MACHINE_ATOMIC_H_ */

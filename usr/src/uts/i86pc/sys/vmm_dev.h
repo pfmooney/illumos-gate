@@ -367,7 +367,7 @@ enum {
 	_IOW('v', IOCNUM_PPTDEV_MSIX, struct vm_pptdev_msix)
 #define VM_INJECT_NMI \
 	_IOW('v', IOCNUM_INJECT_NMI, struct vm_nmi)
-#define	VM_STATS \
+#define	VM_STATS_IOC \
 	_IOWR('v', IOCNUM_VM_STATS, struct vm_stats)
 #define	VM_STAT_DESC \
 	_IOWR('v', IOCNUM_VM_STAT_DESC, struct vm_stat_desc)

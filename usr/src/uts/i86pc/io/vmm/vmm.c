@@ -329,11 +329,13 @@ vm_exitinfo(struct vm *vm, int cpuid)
 	return (&vcpu->exitinfo);
 }
 
+#ifdef __FreeBSD__
 static void
 vmm_resume(void)
 {
 	VMM_RESUME();
 }
+#endif
 
 static int
 vmm_init(void)

@@ -23,7 +23,7 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $FreeBSD: head/lib/libvmmapi/vmmapi.c 280929 2015-04-01 00:15:31Z tychon $
+ * $FreeBSD$
  */
 /*
  * This file and its contents are supplied under the terms of the
@@ -39,7 +39,7 @@
  */
 
 #include <sys/cdefs.h>
-__FBSDID("$FreeBSD: head/lib/libvmmapi/vmmapi.c 280929 2015-04-01 00:15:31Z tychon $");
+__FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/sysctl.h>
@@ -51,9 +51,7 @@ __FBSDID("$FreeBSD: head/lib/libvmmapi/vmmapi.c 280929 2015-04-01 00:15:31Z tych
 #include <x86/segments.h>
 #include <machine/specialreg.h>
 
-#ifndef	__FreeBSD__
 #include <errno.h>
-#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -577,7 +575,11 @@ vm_create_devmem(struct vmctx *ctx, int segid, const char *name, size_t len)
 	if (error)
 		goto done;
 
+#ifdef	__FreeBSD__
 	strlcpy(pathname, "/dev/vmm.io/", sizeof(pathname));
+#else
+	strlcpy(pathname, "/devicese/pseudo/vmm@0:io/", sizeof(pathname));
+#endif
 	strlcat(pathname, ctx->name, sizeof(pathname));
 	strlcat(pathname, ".", sizeof(pathname));
 	strlcat(pathname, name, sizeof(pathname));
@@ -1035,7 +1037,7 @@ vm_get_stats(struct vmctx *ctx, int vcpu, struct timeval *ret_tv,
 
 	vmstats.cpuid = vcpu;
 
-	error = ioctl(ctx->fd, VM_STATS, &vmstats);
+	error = ioctl(ctx->fd, VM_STATS_IOC, &vmstats);
 	if (error == 0) {
 		if (ret_entries)
 			*ret_entries = vmstats.num_entries;

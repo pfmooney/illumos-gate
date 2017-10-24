@@ -312,7 +312,7 @@ ENTRY(vmx_call_isr)
 	VLEAVE
 	ret
 END(vmx_call_isr)
-#ifdef /* __FreeBSD__ */
+#endif /* __FreeBSD__ */
 
 
 

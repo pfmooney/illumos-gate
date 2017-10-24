@@ -23,7 +23,7 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $FreeBSD: head/lib/libvmmapi/vmmapi.h 280929 2015-04-01 00:15:31Z tychon $
+ * $FreeBSD$
  */
 /*
  * This file and its contents are supplied under the terms of the

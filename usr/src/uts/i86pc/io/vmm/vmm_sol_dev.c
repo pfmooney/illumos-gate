@@ -354,7 +354,6 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
     cred_t *credp, int *rvalp)
 {
 	int error, vcpu, state_changed, size, pincount;
-	cpuset_t *cpuset;
 	void *datap = (void *)arg;
 	struct vm_register vmreg;
 	struct vm_seg_desc vmsegd;
@@ -501,7 +500,7 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 		}
 		break;
 	}
-	case VM_STATS: {
+	case VM_STATS_IOC: {
 		CTASSERT(MAX_VM_STATS >= MAX_VMM_STAT_ELEMS);
 		if (ddi_copyin(datap, &vmstats, sizeof (vmstats), md)) {
 			error = EFAULT;
@@ -947,7 +946,6 @@ vmm_find_free_minor(void)
 static boolean_t
 vmmdev_mod_incr()
 {
-	boolean_t res = B_TRUE;
 	ASSERT(MUTEX_HELD(&vmmdev_mtx));
 
 	if (vmmdev_inst_count == 0) {

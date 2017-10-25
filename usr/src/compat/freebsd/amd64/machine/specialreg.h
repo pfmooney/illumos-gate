@@ -10,12 +10,17 @@
  */
 
 /*
- * Copyright 2014 Pluribus Networks Inc.
+ * Copyright 2017 Joyent, Inc.
  */
+#ifndef _COMPAT_FREEBSD_AMD64_MACHINE_SPECIALREG_H_
+#define	_COMPAT_FREEBSD_AMD64_MACHINE_SPECIALREG_H_
 
-#ifndef _COMPAT_FREEBSD_VM_PMAP_H_
-#define	_COMPAT_FREEBSD_VM_PMAP_H_
+#ifdef _SYS_X86_ARCHEXT_H
+/* Our x85_archext conflicts with BSD header for the XFEATURE_ defines */
+#undef	XFEATURE_AVX
+#undef	XFEATURE_MPX
+#undef	XFEATURE_AVX512
+#endif
 
-#include <machine/pmap.h>
-
-#endif	/* _COMPAT_FREEBSD_VM_PMAP_H_ */
+#include <x86/specialreg.h>
+#endif /* _COMPAT_FREEBSD_AMD64_MACHINE_SPECIALREG_H_ */

@@ -25,12 +25,9 @@
  */
 
 #include <sys/cdefs.h>
-__FBSDID("$FreeBSD: head/sys/amd64/vmm/vmm_ioport.c 277168 2015-01-14 07:18:51Z neel $");
+__FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
-#include <sys/types.h>
-#include <sys/queue.h>
-#include <sys/cpuset.h>
 #include <sys/systm.h>
 
 #include <machine/vmm.h>
@@ -38,6 +35,8 @@ __FBSDID("$FreeBSD: head/sys/amd64/vmm/vmm_ioport.c 277168 2015-01-14 07:18:51Z 
 
 #include "vatpic.h"
 #include "vatpit.h"
+#include "vpmtmr.h"
+#include "vrtc.h"
 #include "vmm_ioport.h"
 #include "vmm_ktr.h"
 
@@ -55,6 +54,9 @@ ioport_handler_func_t ioport_handler[MAX_IOPORTS] = {
 	[IO_ICU2 + ICU_IMR_OFFSET] = vatpic_slave_handler,
 	[IO_ELCR1] = vatpic_elc_handler,
 	[IO_ELCR2] = vatpic_elc_handler,
+	[IO_PMTMR] = vpmtmr_handler,
+	[IO_RTC] = vrtc_addr_handler,
+	[IO_RTC + 1] = vrtc_data_handler,
 };
 
 #ifdef KTR

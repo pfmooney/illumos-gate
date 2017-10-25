@@ -16,7 +16,7 @@
 PROG= bhyvectl
 
 SRCS = bhyvectl.c
-OBJS = $(SRCS:.c=.o)
+OBJS = $(SRCS:.c=.o) humanize_number.o
 
 include ../../Makefile.cmd
 
@@ -27,6 +27,8 @@ CPPFLAGS =	-I$(COMPAT)/freebsd -I$(CONTRIB)/freebsd $(CPPFLAGS.master) \
 	-I$(ROOT)/usr/platform/i86pc/include \
 	-I$(SRC)/uts/i86pc/io/vmm
 LDLIBS +=	-lvmmapi
+
+CERRWARN +=	-_gcc=-Wno-uninitialized
 
 all: $(PROG)
 
@@ -42,6 +44,10 @@ clean:
 lint:	lint_SRCS
 
 include ../../Makefile.targ
+
+%.o: $(CONTRIB)/freebsd/lib/libutil/%.c
+	$(COMPILE.c) -o $@ $<
+	$(POST_PROCESS_O)
 
 %.o: ../%.c
 	$(COMPILE.c) -I$(SRC)/common $<

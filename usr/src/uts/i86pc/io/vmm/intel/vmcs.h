@@ -23,7 +23,7 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $FreeBSD: head/sys/amd64/vmm/intel/vmcs.h 276098 2014-12-23 02:14:49Z neel $
+ * $FreeBSD$
  */
 
 #ifndef _VMCS_H_
@@ -47,15 +47,6 @@ struct msr_entry {
 
 int vmcs_set_msr_save(struct vmcs *vmcs, u_long g_area, u_int g_count);
 int	vmcs_init(struct vmcs *vmcs);
-#ifndef	__FreeBSD__
-int vmcs_set_host_msr_save(struct vmcs *vmcs, u_long h_area, u_int h_count);
-#endif
-int	vmcs_set_defaults(struct vmcs *vmcs, u_long host_rip, u_long host_rsp,
-			  u_long ept_pml4,
-			  uint32_t pinbased_ctls, uint32_t procbased_ctls,
-			  uint32_t procbased_ctls2, uint32_t exit_ctls,
-			  uint32_t entry_ctls, u_long msr_bitmap,
-			  uint16_t vpid);
 int	vmcs_getreg(struct vmcs *vmcs, int running, int ident, uint64_t *rv);
 int	vmcs_setreg(struct vmcs *vmcs, int running, int ident, uint64_t val);
 int	vmcs_getdesc(struct vmcs *vmcs, int running, int ident,

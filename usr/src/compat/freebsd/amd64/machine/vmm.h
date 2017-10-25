@@ -16,6 +16,8 @@
 #ifndef _COMPAT_FREEBSD_AMD64_MACHINE_VMM_H_
 #define	_COMPAT_FREEBSD_AMD64_MACHINE_VMM_H_
 
+#include <sys/_cpuset.h>
+
 #include <sys/vmm.h>
 
 #endif	/* _COMPAT_FREEBSD_AMD64_MACHINE_VMM_H_ */

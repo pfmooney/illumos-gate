@@ -24,6 +24,7 @@
 #include <sys/sunddi.h>
 #include <sys/fs/dv_node.h>
 #include <sys/pc_hvm.h>
+#include <sys/cpuset.h>
 
 #include <sys/vmm.h>
 #include <sys/vmm_instruction_emul.h>
@@ -35,7 +36,10 @@
 
 #include "io/vatpic.h"
 #include "io/vioapic.h"
+#include "io/vrtc.h"
+#include "io/vhpet.h"
 #include "vmm_lapic.h"
+#include "vmm_stat.h"
 
 static dev_info_t *vmm_dip;
 static void *vmm_statep;
@@ -214,35 +218,177 @@ vmmdev_init(void)
 	vmm_trace_rbuf_alloc();
 }
 
-void
+int
 vmmdev_cleanup(void)
 {
 	VERIFY(SLIST_EMPTY(&head));
 
 	vmm_trace_dmsg_free();
+	return (0);
+}
+
+static int
+vmmdev_get_memseg(struct vmm_softc *sc, struct vm_memseg *mseg)
+{
+	int error;
+	bool sysmem;
+
+	error = vm_get_memseg(sc->vm, mseg->segid, &mseg->len, &sysmem, NULL);
+	if (error || mseg->len == 0)
+		return (error);
+
+	if (!sysmem) {
+#ifdef __FreeBSD__
+		/* XXXJOY: Punt on device mapping for now */
+		struct devmem_softc *dsc;
+		SLIST_FOREACH(dsc, &sc->devmem, link) {
+			if (dsc->segid == mseg->segid)
+				break;
+		}
+		KASSERT(dsc != NULL, ("%s: devmem segment %d not found",
+		    __func__, mseg->segid));
+		error = copystr(dsc->name, mseg->name, SPECNAMELEN + 1, NULL);
+#endif
+	} else {
+		bzero(mseg->name, sizeof(mseg->name));
+	}
+
+	return (error);
+}
+
+static int
+vmmdev_alloc_memseg(struct vmm_softc *sc, struct vm_memseg *mseg)
+{
+	int error;
+	bool sysmem;
+
+	error = 0;
+	sysmem = true;
+
+	if (VM_MEMSEG_NAME(mseg)) {
+#ifdef __FreeBSD__
+		sysmem = false;
+		name = malloc(SPECNAMELEN + 1, M_VMMDEV, M_WAITOK);
+		error = copystr(mseg->name, name, SPECNAMELEN + 1, 0);
+		if (error)
+			goto done;
+#else
+		/* XXXJOY: Punt on device mapping for now */
+		return (EINVAL);
+#endif
+	}
+
+	error = vm_alloc_memseg(sc->vm, mseg->segid, mseg->len, sysmem);
+	if (error)
+		goto done;
+
+#ifdef __FreeBSD__
+	if (VM_MEMSEG_NAME(mseg)) {
+		error = devmem_create_cdev(vm_name(sc->vm), mseg->segid, name);
+		if (error)
+			vm_free_memseg(sc->vm, mseg->segid);
+		else
+			name = NULL;	/* freed when 'cdev' is destroyed */
+	}
+#endif
+done:
+	return (error);
+}
+
+static int
+vcpu_lock_one(struct vmm_softc *sc, int vcpu)
+{
+	int error;
+
+	if (vcpu < 0 || vcpu >= VM_MAXCPU)
+		return (EINVAL);
+
+	error = vcpu_set_state(sc->vm, vcpu, VCPU_FROZEN, true);
+	return (error);
+}
+
+static void
+vcpu_unlock_one(struct vmm_softc *sc, int vcpu)
+{
+	enum vcpu_state state;
+
+	state = vcpu_get_state(sc->vm, vcpu, NULL);
+	if (state != VCPU_FROZEN) {
+		panic("vcpu %s(%d) has invalid state %d", vm_name(sc->vm),
+		    vcpu, state);
+	}
+
+	vcpu_set_state(sc->vm, vcpu, VCPU_IDLE, false);
+}
+
+static int
+vcpu_lock_all(struct vmm_softc *sc)
+{
+	int error, vcpu;
+
+	for (vcpu = 0; vcpu < VM_MAXCPU; vcpu++) {
+		error = vcpu_lock_one(sc, vcpu);
+		if (error)
+			break;
+	}
+
+	if (error) {
+		while (--vcpu >= 0)
+			vcpu_unlock_one(sc, vcpu);
+	}
+
+	return (error);
+}
+
+static void
+vcpu_unlock_all(struct vmm_softc *sc)
+{
+	int vcpu;
+
+	for (vcpu = 0; vcpu < VM_MAXCPU; vcpu++)
+		vcpu_unlock_one(sc, vcpu);
 }
 
 int
-vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int mode,
+vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
     cred_t *credp, int *rvalp)
 {
-	int error, vcpu, state_changed;
-	struct vm_memory_segment seg;
+	int error, vcpu, state_changed, size, pincount;
+	cpuset_t *cpuset;
+	void *datap = (void *)arg;
 	struct vm_register vmreg;
-	struct vm_seg_desc vmsegdesc;
+	struct vm_seg_desc vmsegd;
 	struct vm_run vmrun;
+	struct vm_exception vmexc;
 	struct vm_lapic_irq vmirq;
 	struct vm_lapic_msi vmmsi;
 	struct vm_ioapic_irq ioapic_irq;
 	struct vm_isa_irq isa_irq;
+	struct vm_isa_irq_trigger isa_irq_trigger;
 	struct vm_capability vmcap;
+	struct vm_pptdev *pptdev;
+	struct vm_pptdev_mmio *pptmmio;
+	struct vm_pptdev_msi *pptmsi;
+	struct vm_pptdev_msix *pptmsix;
+	struct vm_nmi vmnmi;
+	struct vm_stats vmstats;
+	struct vm_stat_desc statdesc;
 	struct vm_x2apic x2apic;
+	struct vm_gpa_pte gpapte;
+	struct vm_suspend vmsuspend;
 	struct vm_gla2gpa gg;
 	struct vm_activate_cpu vac;
-	int pincount;
+	struct vm_cpuset vm_cpuset;
+	struct vm_intinfo vmii;
+	struct vm_rtc_time rtctime;
+	struct vm_rtc_data rtcdata;
+	struct vm_memmap mm;
+	struct vm_memseg vmseg;
+	struct vm_hpet_cap hpetcap;
 
 	vcpu = -1;
 	state_changed = 0;
+	error = 0;
 
 	/*
 	 * Some VMM ioctls can operate only on vcpus that are not running.
@@ -261,12 +407,14 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int mode,
 	case VM_SET_X2APIC_STATE:
 	case VM_GLA2GPA:
 	case VM_ACTIVATE_CPU:
+	case VM_SET_INTINFO:
+	case VM_GET_INTINFO:
 	case VM_RESTART_INSTRUCTION:
 		/*
 		 * XXX fragile, handle with care
 		 * Assumes that the first field of the ioctl data is the vcpu.
 		 */
-		if (ddi_copyin((void *)arg, &vcpu, sizeof (vcpu), mode)) {
+		if (ddi_copyin(datap, &vcpu, sizeof (vcpu), md)) {
 			return (EFAULT);
 		}
 		if (vcpu < 0 || vcpu >= VM_MAXCPU) {
@@ -274,31 +422,39 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int mode,
 			goto done;
 		}
 
-		error = vcpu_set_state(sc->vm, vcpu, VCPU_FROZEN, true);
+		error = vcpu_lock_one(sc, vcpu);
 		if (error)
 			goto done;
-
 		state_changed = 1;
 		break;
-	case VM_MAP_MEMORY:
+
+	case VM_MAP_PPTDEV_MMIO:
+	case VM_BIND_PPTDEV:
+	case VM_UNBIND_PPTDEV:
+	case VM_ALLOC_MEMSEG:
+	case VM_MMAP_MEMSEG:
+	case VM_REINIT:
 		/*
 		 * ioctls that operate on the entire virtual machine must
 		 * prevent all vcpus from running.
 		 */
-		error = 0;
-		for (vcpu = 0; vcpu < VM_MAXCPU; vcpu++) {
-			error = vcpu_set_state(sc->vm, vcpu, VCPU_FROZEN, true);
-			if (error)
-				break;
-		}
-
-		if (error) {
-			while (--vcpu >= 0)
-				vcpu_set_state(sc->vm, vcpu, VCPU_IDLE, false);
+		error = vcpu_lock_all(sc);
+		if (error)
 			goto done;
-		}
-
 		state_changed = 2;
+		break;
+
+	case VM_GET_MEMSEG:
+	case VM_MMAP_GETNEXT:
+		/*
+		 * Lock a vcpu to make sure that the memory map cannot be
+		 * modified while it is being inspected.
+		 */
+		vcpu = VM_MAXCPU - 1;
+		error = vcpu_lock_one(sc, vcpu);
+		if (error)
+			goto done;
+		state_changed = 1;
 		break;
 
 	default:
@@ -307,235 +463,332 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int mode,
 
 	switch (cmd) {
 	case VM_RUN:
-		if (ddi_copyin((void *)arg, &vmrun,
-		    sizeof (struct vm_run), mode)) {
-			return (EFAULT);
+		if (ddi_copyin(datap, &vmrun, sizeof (vmrun), md)) {
+			error = EFAULT;
+			break;
 		}
 		error = vm_run(sc->vm, &vmrun);
-		if (ddi_copyout(&vmrun, (void *)arg,
-		    sizeof (struct vm_run), mode)) {
-			return (EFAULT);
+		/*
+		 * XXXJOY: I think it's necessary to do copyout, even in the
+		 * face of errors, since the exit state is communicated out.
+		 */
+		if (ddi_copyout(&vmrun, datap, sizeof (vmrun), md)) {
+			error = EFAULT;
+			break;
 		}
+		break;
+	case VM_SUSPEND:
+		if (ddi_copyin(datap, &vmsuspend, sizeof (vmsuspend), md)) {
+			error = EFAULT;
+			break;
+		}
+		error = vm_suspend(sc->vm, vmsuspend.how);
+		break;
+	case VM_REINIT:
+		error = vm_reinit(sc->vm);
+		break;
+	case VM_STAT_DESC: {
+		if (ddi_copyin(datap, &statdesc, sizeof (statdesc), md)) {
+			error = EFAULT;
+			break;
+		}
+		error = vmm_stat_desc_copy(statdesc.index, statdesc.desc,
+		    sizeof (statdesc.desc));
+		if (error == 0 &&
+		    ddi_copyout(&statdesc, datap, sizeof (statdesc), md)) {
+			error = EFAULT;
+			break;
+		}
+		break;
+	}
+	case VM_STATS: {
+		CTASSERT(MAX_VM_STATS >= MAX_VMM_STAT_ELEMS);
+		if (ddi_copyin(datap, &vmstats, sizeof (vmstats), md)) {
+			error = EFAULT;
+			break;
+		}
+		hrt2tv(gethrtime(), &vmstats.tv);
+		error = vmm_stat_copy(sc->vm, vmstats.cpuid,
+		    &vmstats.num_entries, vmstats.statbuf);
+		if (error == 0 &&
+		    ddi_copyout(&vmstats, datap, sizeof (vmstats), md)) {
+			error = EFAULT;
+			break;
+		}
+		break;
+	}
+
+	/* XXXJOY: punt on these for now */
+	case VM_PPTDEV_MSI:
+		if (ddi_copyin(datap, &pptmsi, sizeof (pptmsi), md)) {
+			error = EFAULT;
+			break;
+		}
+		return (ENOTTY);
+	case VM_PPTDEV_MSIX:
+		if (ddi_copyin(datap, &pptmsix, sizeof (pptmsix), md)) {
+			error = EFAULT;
+			break;
+		}
+		return (ENOTTY);
+	case VM_MAP_PPTDEV_MMIO:
+		if (ddi_copyin(datap, &pptmmio, sizeof (pptmmio), md)) {
+			error = EFAULT;
+			break;
+		}
+		return (ENOTTY);
+	case VM_BIND_PPTDEV:
+	case VM_UNBIND_PPTDEV:
+		if (ddi_copyin(datap, &pptdev, sizeof (pptdev), md)) {
+			error = EFAULT;
+			break;
+		}
+		return (ENOTTY);
+
+	case VM_INJECT_EXCEPTION:
+		if (ddi_copyin(datap, &vmexc, sizeof (vmexc), md)) {
+			error = EFAULT;
+			break;
+		}
+		error = vm_inject_exception(sc->vm, vmexc.cpuid,
+		    vmexc.vector, vmexc.error_code_valid, vmexc.error_code,
+		    vmexc.restart_instruction);
+		break;
+	case VM_INJECT_NMI:
+		if (ddi_copyin(datap, &vmnmi, sizeof (vmnmi), md)) {
+			error = EFAULT;
+			break;
+		}
+		error = vm_inject_nmi(sc->vm, vmnmi.cpuid);
 		break;
 	case VM_LAPIC_IRQ:
-		if (ddi_copyin((void *)arg, &vmirq,
-		    sizeof (struct vm_lapic_irq), mode)) {
-			return (EFAULT);
+		if (ddi_copyin(datap, &vmirq, sizeof (vmirq), md)) {
+			error = EFAULT;
+			break;
 		}
 		error = lapic_intr_edge(sc->vm, vmirq.cpuid, vmirq.vector);
-		if (ddi_copyout(&vmirq, (void *)arg,
-		    sizeof (struct vm_lapic_irq), mode)) {
-			return (EFAULT);
-		}
 		break;
 	case VM_LAPIC_LOCAL_IRQ:
-		if (ddi_copyin((void *)arg, &vmirq,
-		    sizeof (struct vm_lapic_irq), mode)) {
-			return (EFAULT);
+		if (ddi_copyin(datap, &vmirq, sizeof (vmirq), md)) {
+			error = EFAULT;
+			break;
 		}
-		error = lapic_set_local_intr(sc->vm, vmirq.cpuid,
-		    vmirq.vector);
-		if (ddi_copyout(&vmirq, (void *)arg,
-		    sizeof (struct vm_lapic_irq), mode)) {
-			return (EFAULT);
-		}
+		error = lapic_set_local_intr(sc->vm, vmirq.cpuid, vmirq.vector);
 		break;
 	case VM_LAPIC_MSI:
-		if (ddi_copyin((void *)arg, &vmmsi,
-		    sizeof (struct vm_lapic_msi), mode)) {
-			return (EFAULT);
+		if (ddi_copyin(datap, &vmmsi, sizeof (vmmsi), md)) {
+			error = EFAULT;
+			break;
 		}
 		error = lapic_intr_msi(sc->vm, vmmsi.addr, vmmsi.msg);
-		if (ddi_copyout(&vmmsi, (void *)arg,
-		    sizeof (struct vm_lapic_msi), mode)) {
-			return (EFAULT);
-		}
 	case VM_IOAPIC_ASSERT_IRQ:
-		if (ddi_copyin((void *)arg, &ioapic_irq,
-		    sizeof (struct vm_ioapic_irq), mode)) {
-			return (EFAULT);
+		if (ddi_copyin(datap, &ioapic_irq, sizeof (ioapic_irq), md)) {
+			error = EFAULT;
+			break;
 		}
 		error = vioapic_assert_irq(sc->vm, ioapic_irq.irq);
-		if (ddi_copyout(&ioapic_irq, (void *)arg,
-		    sizeof (struct vm_ioapic_irq), mode)) {
-			return (EFAULT);
-		}
 		break;
 	case VM_IOAPIC_DEASSERT_IRQ:
-		if (ddi_copyin((void *)arg, &ioapic_irq,
-		    sizeof (struct vm_ioapic_irq), mode)) {
-			return (EFAULT);
+		if (ddi_copyin(datap, &ioapic_irq, sizeof (ioapic_irq), md)) {
+			error = EFAULT;
+			break;
 		}
 		error = vioapic_deassert_irq(sc->vm, ioapic_irq.irq);
-		if (ddi_copyout(&ioapic_irq, (void *)arg,
-		    sizeof (struct vm_ioapic_irq), mode)) {
-			return (EFAULT);
-		}
 		break;
 	case VM_IOAPIC_PULSE_IRQ:
-		if (ddi_copyin((void *)arg, &ioapic_irq,
-		    sizeof (struct vm_ioapic_irq), mode)) {
-			return (EFAULT);
+		if (ddi_copyin(datap, &ioapic_irq, sizeof (ioapic_irq), md)) {
+			error = EFAULT;
+			break;
 		}
 		error = vioapic_pulse_irq(sc->vm, ioapic_irq.irq);
-		if (ddi_copyout(&ioapic_irq, (void *)arg,
-		    sizeof (struct vm_ioapic_irq), mode)) {
-			return (EFAULT);
-		}
 		break;
 	case VM_IOAPIC_PINCOUNT:
-		error = 0;
 		pincount = vioapic_pincount(sc->vm);
-		if (ddi_copyout(&pincount, (void *)arg, sizeof (int), mode)) {
-			return (EFAULT);
+		if (ddi_copyout(&pincount, datap, sizeof (int), md)) {
+			error = EFAULT;
+			break;
 		}
 		break;
 	case VM_ISA_ASSERT_IRQ:
-		if (ddi_copyin((void *)arg, &isa_irq,
-		    sizeof (struct vm_isa_irq), mode)) {
-			return (EFAULT);
+		if (ddi_copyin(datap, &isa_irq, sizeof (isa_irq), md)) {
+			error = EFAULT;
+			break;
 		}
 		error = vatpic_assert_irq(sc->vm, isa_irq.atpic_irq);
-		if (error == 0 && isa_irq.ioapic_irq != -1)
-			error = vioapic_assert_irq(sc->vm,
-			    isa_irq.ioapic_irq);
-		if (ddi_copyout(&isa_irq, (void *)arg,
-		    sizeof (struct vm_isa_irq), mode)) {
-			return (EFAULT);
+		if (error == 0 && isa_irq.ioapic_irq != -1) {
+			error = vioapic_assert_irq(sc->vm, isa_irq.ioapic_irq);
 		}
 		break;
 	case VM_ISA_DEASSERT_IRQ:
-		if (ddi_copyin((void *)arg, &isa_irq,
-		    sizeof (struct vm_isa_irq), mode)) {
-			return (EFAULT);
+		if (ddi_copyin(datap, &isa_irq, sizeof (isa_irq), md)) {
+			error = EFAULT;
+			break;
 		}
 		error = vatpic_deassert_irq(sc->vm, isa_irq.atpic_irq);
-		if (error == 0 && isa_irq.ioapic_irq != -1)
+		if (error == 0 && isa_irq.ioapic_irq != -1) {
 			error = vioapic_deassert_irq(sc->vm,
 			    isa_irq.ioapic_irq);
-		if (ddi_copyout(&isa_irq, (void *)arg,
-		    sizeof (struct vm_isa_irq), mode)) {
-			return (EFAULT);
 		}
 		break;
 	case VM_ISA_PULSE_IRQ:
-		if (ddi_copyin((void *)arg, &isa_irq,
-		    sizeof (struct vm_isa_irq), mode)) {
-			return (EFAULT);
+		if (ddi_copyin(datap, &isa_irq, sizeof (isa_irq), md)) {
+			error = EFAULT;
+			break;
 		}
 		error = vatpic_pulse_irq(sc->vm, isa_irq.atpic_irq);
-		if (error == 0 && isa_irq.ioapic_irq != -1)
+		if (error == 0 && isa_irq.ioapic_irq != -1) {
 			error = vioapic_pulse_irq(sc->vm, isa_irq.ioapic_irq);
-		if (ddi_copyout(&isa_irq, (void *)arg,
-		    sizeof (struct vm_isa_irq), mode)) {
-			return (EFAULT);
 		}
 		break;
-	case VM_MAP_MEMORY:
-		if (ddi_copyin((void *)arg, &seg,
-		    sizeof (struct vm_memory_segment), mode)) {
-			return (EFAULT);
+	case VM_ISA_SET_IRQ_TRIGGER:
+		if (ddi_copyin(datap, &isa_irq_trigger,
+		    sizeof (isa_irq_trigger), md)) {
+			error = EFAULT;
+			break;
 		}
-		error = vm_malloc(sc->vm, seg.gpa, seg.len);
+		error = vatpic_set_irq_trigger(sc->vm,
+		    isa_irq_trigger.atpic_irq, isa_irq_trigger.trigger);
 		break;
-	case VM_GET_MEMORY_SEG:
-		if (ddi_copyin((void *)arg, &seg,
-		    sizeof (struct vm_memory_segment), mode)) {
-			return (EFAULT);
+	case VM_MMAP_GETNEXT:
+		if (ddi_copyin(datap, &mm, sizeof (mm), md)) {
+			error = EFAULT;
+			break;
 		}
-		seg.len = 0;
-		(void) vm_gpabase2memseg(sc->vm, seg.gpa, &seg);
-		if (ddi_copyout(&seg, (void *)arg,
-		    sizeof (struct vm_memory_segment), mode)) {
-			return (EFAULT);
+		error = vm_mmap_getnext(sc->vm, &mm.gpa, &mm.segid, &mm.segoff,
+		    &mm.len, &mm.prot, &mm.flags);
+		if (error == 0 && ddi_copyout(&mm, datap, sizeof (mm), md)) {
+			error = EFAULT;
+			break;
 		}
-		error = 0;
+		break;
+	case VM_MMAP_MEMSEG:
+		if (ddi_copyin(datap, &mm, sizeof (mm), md)) {
+			error = EFAULT;
+			break;
+		}
+		error = vm_mmap_memseg(sc->vm, mm.gpa, mm.segid, mm.segoff,
+		    mm.len, mm.prot, mm.flags);
+		break;
+	case VM_ALLOC_MEMSEG:
+		if (ddi_copyin(datap, &vmseg, sizeof (vmseg), md)) {
+			error = EFAULT;
+			break;
+		}
+		error = vmmdev_alloc_memseg(sc, &vmseg);
+		break;
+	case VM_GET_MEMSEG:
+		if (ddi_copyin(datap, &vmseg, sizeof (vmseg), md)) {
+			error = EFAULT;
+			break;
+		}
+		error = vmmdev_get_memseg(sc, &vmseg);
+		if (error == 0 &&
+		    ddi_copyout(&vmseg, datap, sizeof (vmseg), md)) {
+			error = EFAULT;
+			break;
+		}
 		break;
 	case VM_GET_REGISTER:
-		if (ddi_copyin((void *)arg, &vmreg,
-		    sizeof (struct vm_register), mode)) {
-			return (EFAULT);
+		if (ddi_copyin(datap, &vmreg, sizeof (vmreg), md)) {
+			error = EFAULT;
+			break;
 		}
 		error = vm_get_register(sc->vm, vmreg.cpuid, vmreg.regnum,
 		    &vmreg.regval);
-		if (!error) {
-			if (ddi_copyout(&vmreg, (void *)arg,
-			    sizeof (struct vm_register), mode)) {
-				return (EFAULT);
-			}
+		if (error == 0 &&
+		    ddi_copyout(&vmreg, datap, sizeof (vmreg), md)) {
+			error = EFAULT;
+			break;
 		}
 		break;
 	case VM_SET_REGISTER:
-		if (ddi_copyin((void *)arg, &vmreg,
-		    sizeof (struct vm_register), mode)) {
-			return (EFAULT);
+		if (ddi_copyin(datap, &vmreg, sizeof (vmreg), md)) {
+			error = EFAULT;
+			break;
 		}
 		error = vm_set_register(sc->vm, vmreg.cpuid, vmreg.regnum,
 		    vmreg.regval);
 		break;
 	case VM_SET_SEGMENT_DESCRIPTOR:
-		if (ddi_copyin((void *)arg, &vmsegdesc,
-		    sizeof (struct vm_seg_desc), mode)) {
-			return (EFAULT);
+		if (ddi_copyin(datap, &vmsegd, sizeof (vmsegd), md)) {
+			error = EFAULT;
+			break;
 		}
-		error = vm_set_seg_desc(sc->vm, vmsegdesc.cpuid,
-		    vmsegdesc.regnum, &vmsegdesc.desc);
+		error = vm_set_seg_desc(sc->vm, vmsegd.cpuid, vmsegd.regnum,
+		    &vmsegd.desc);
 		break;
 	case VM_GET_SEGMENT_DESCRIPTOR:
-		if (ddi_copyin((void *)arg, &vmsegdesc,
-		    sizeof (struct vm_seg_desc), mode)) {
-			return (EFAULT);
+		if (ddi_copyin(datap, &vmsegd, sizeof (vmsegd), md)) {
+			error = EFAULT;
+			break;
 		}
-		error = vm_get_seg_desc(sc->vm, vmsegdesc.cpuid,
-		    vmsegdesc.regnum, &vmsegdesc.desc);
-		if (!error) {
-			if (ddi_copyout(&vmsegdesc, (void *)arg,
-			    sizeof (struct vm_seg_desc), mode)) {
-				return (EFAULT);
-			}
+		error = vm_get_seg_desc(sc->vm, vmsegd.cpuid, vmsegd.regnum,
+		    &vmsegd.desc);
+		if (error == 0 &&
+		    ddi_copyout(&vmsegd, datap, sizeof (vmsegd), md)) {
+			error = EFAULT;
+			break;
 		}
 		break;
 	case VM_GET_CAPABILITY:
-		if (ddi_copyin((void *)arg, &vmcap,
-		    sizeof (struct vm_capability), mode)) {
-			return (EFAULT);
+		if (ddi_copyin(datap, &vmcap, sizeof (vmcap), md)) {
+			error = EFAULT;
+			break;
 		}
-		error = vm_get_capability(sc->vm, vmcap.cpuid,
-		    vmcap.captype, &vmcap.capval);
-		if (!error) {
-			if (ddi_copyout(&vmcap, (void *)arg,
-			    sizeof (struct vm_capability), mode)) {
-				return (EFAULT);
-			}
+		error = vm_get_capability(sc->vm, vmcap.cpuid, vmcap.captype,
+		    &vmcap.capval);
+		if (error == 0 &&
+		    ddi_copyout(&vmcap, datap, sizeof (vmcap), md)) {
+			error = EFAULT;
+			break;
 		}
 		break;
 	case VM_SET_CAPABILITY:
-		if (ddi_copyin((void *)arg, &vmcap,
-		    sizeof (struct vm_capability), mode)) {
-			return (EFAULT);
+		if (ddi_copyin(datap, &vmcap, sizeof (vmcap), md)) {
+			error = EFAULT;
+			break;
 		}
 		error = vm_set_capability(sc->vm, vmcap.cpuid,
 		    vmcap.captype, vmcap.capval);
 		break;
 	case VM_SET_X2APIC_STATE:
-		if (ddi_copyin((void *)arg, &x2apic,
-		    sizeof (struct vm_x2apic), mode)) {
-			return (EFAULT);
+		if (ddi_copyin(datap, &x2apic, sizeof (x2apic), md)) {
+			error = EFAULT;
+			break;
 		}
 		error = vm_set_x2apic_state(sc->vm, x2apic.cpuid, x2apic.state);
 		break;
 	case VM_GET_X2APIC_STATE:
-		if (ddi_copyin((void *)arg, &x2apic,
-		    sizeof (struct vm_x2apic), mode)) {
-			return (EFAULT);
+		if (ddi_copyin(datap, &x2apic, sizeof (x2apic), md)) {
+			error = EFAULT;
+			break;
 		}
 		error = vm_get_x2apic_state(sc->vm, x2apic.cpuid,
 		    &x2apic.state);
-		if (!error) {
-			if (ddi_copyout(&x2apic, (void *)arg,
-			    sizeof (struct vm_x2apic), mode)) {
-				return (EFAULT);
-			}
+		if (error == 0 &&
+		    ddi_copyout(&x2apic, datap, sizeof (x2apic), md)) {
+			error = EFAULT;
+			break;
+		}
+		break;
+	case VM_GET_GPA_PMAP:
+		if (ddi_copyin(datap, &gpapte, sizeof (gpapte), md)) {
+			error = EFAULT;
+			break;
+		}
+#ifdef __FreeBSD__
+		/* XXXJOY: add function? */
+		pmap_get_mapping(vmspace_pmap(vm_get_vmspace(sc->vm)),
+		    gpapte.gpa, gpapte.pte, &gpapte.ptenum);
+#endif
+		error = 0;
+		break;
+	case VM_GET_HPET_CAPABILITIES:
+		error = vhpet_getcap(&hpetcap);
+		if (error == 0 &&
+		    ddi_copyout(&hpetcap, datap, sizeof (hpetcap), md)) {
+			error = EFAULT;
+			break;
 		}
 		break;
 	case VM_GLA2GPA: {
@@ -543,37 +796,120 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int mode,
 		CTASSERT(PROT_WRITE == VM_PROT_WRITE);
 		CTASSERT(PROT_EXEC == VM_PROT_EXECUTE);
 
-		if (ddi_copyin((void *)arg, &gg,
-		    sizeof (struct vm_gla2gpa), mode)) {
-			return (EFAULT);
+		if (ddi_copyin(datap, &gg, sizeof (gg), md)) {
+			error = EFAULT;
+			break;
 		}
 		error = vm_gla2gpa(sc->vm, gg.vcpuid, &gg.paging, gg.gla,
-		    gg.prot, &gg.gpa);
-		KASSERT(error == 0 || error == 1 || error == -1,
+		    gg.prot, &gg.gpa, &gg.fault);
+		KASSERT(error == 0 || error == EFAULT,
 		    ("%s: vm_gla2gpa unknown error %d", __func__, error));
-		if (error >= 0) {
-			/*
-			 * error = 0: the translation was successful
-			 * error = 1: a fault was injected into the guest
-			 */
-			gg.fault = error;
-			error = 0;
-			if (ddi_copyout(&gg, (void *)arg,
-			    sizeof (struct vm_gla2gpa), mode)) {
-				return (EFAULT);
-			}
-		} else {
+		if (error == 0 && ddi_copyout(&gg, datap, sizeof (gg), md)) {
 			error = EFAULT;
+			break;
 		}
 		break;
 	}
 	case VM_ACTIVATE_CPU:
-		if (ddi_copyin((void *)arg, &vac,
-		    sizeof (struct vm_activate_cpu), mode)) {
-			return (EFAULT);
+		if (ddi_copyin(datap, &vac, sizeof (vac), md)) {
+			error = EFAULT;
+			break;
 		}
 		error = vm_activate_cpu(sc->vm, vac.vcpuid);
 		break;
+
+	case VM_GET_CPUS: {
+		cpuset_t tempset;
+		void *srcp = &tempset;
+
+		if (ddi_copyin(datap, &vm_cpuset, sizeof (vm_cpuset), md)) {
+			error = EFAULT;
+			break;
+		}
+
+		/* Be more generous about sizing since our cpuset_t is large. */
+		size = vm_cpuset.cpusetsize;
+		if (size <= 0 || size > sizeof (cpuset_t)) {
+			error = ERANGE;
+		}
+		/*
+		 * If they want a ulong_t or less, make sure they receive the
+		 * low bits with all the useful information.
+		 */
+		if (size <= tempset.cpub[0]) {
+			srcp = &tempset.cpub[0];
+		}
+
+		if (vm_cpuset.which == VM_ACTIVE_CPUS) {
+			tempset = vm_active_cpus(sc->vm);
+		} else if (vm_cpuset.which == VM_SUSPENDED_CPUS) {
+			tempset = vm_suspended_cpus(sc->vm);
+		} else {
+			error = EINVAL;
+		}
+
+		ASSERT(size > 0 && size <= sizeof (tempset));
+		if (error == 0 &&
+		    ddi_copyout(&tempset, vm_cpuset.cpus, size, md)) {
+			error = EFAULT;
+			break;
+		}
+		break;
+	}
+	case VM_SET_INTINFO:
+		if (ddi_copyin(datap, &vmii, sizeof (vmii), md)) {
+			error = EFAULT;
+			break;
+		}
+		error = vm_exit_intinfo(sc->vm, vmii.vcpuid, vmii.info1);
+		break;
+	case VM_GET_INTINFO:
+		if (ddi_copyin(datap, &vmii, sizeof (vmii), md)) {
+			error = EFAULT;
+			break;
+		}
+		error = vm_get_intinfo(sc->vm, vmii.vcpuid, &vmii.info1,
+		    &vmii.info2);
+		if (error == 0 &&
+		    ddi_copyout(&vmii, datap, sizeof (vmii), md)) {
+			error = EFAULT;
+			break;
+		}
+		break;
+	case VM_RTC_WRITE:
+		if (ddi_copyin(datap, &rtcdata, sizeof (rtcdata), md)) {
+			error = EFAULT;
+			break;
+		}
+		error = vrtc_nvram_write(sc->vm, rtcdata.offset, rtcdata.value);
+		break;
+	case VM_RTC_READ:
+		if (ddi_copyin(datap, &rtcdata, sizeof (rtcdata), md)) {
+			error = EFAULT;
+			break;
+		}
+		error = vrtc_nvram_read(sc->vm, rtcdata.offset, &rtcdata.value);
+		if (error == 0 &&
+		    ddi_copyout(&rtcdata, datap, sizeof (rtcdata), md)) {
+			error = EFAULT;
+			break;
+		}
+		break;
+	case VM_RTC_SETTIME:
+		if (ddi_copyin(datap, &rtctime, sizeof (rtctime), md)) {
+			error = EFAULT;
+			break;
+		}
+		error = vrtc_set_time(sc->vm, rtctime.secs);
+		break;
+	case VM_RTC_GETTIME:
+		rtctime.secs = vrtc_get_time(sc->vm);
+		if (ddi_copyout(&rtctime, datap, sizeof (rtctime), md)) {
+			error = EFAULT;
+			break;
+		}
+		break;
+
 	case VM_RESTART_INSTRUCTION:
 		error = vm_restart_instruction(sc->vm, vcpu);
 		break;
@@ -583,11 +919,9 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int mode,
 	}
 
 	if (state_changed == 1) {
-		vcpu_set_state(sc->vm, vcpu, VCPU_IDLE, false);
+		vcpu_unlock_one(sc, vcpu);
 	} else if (state_changed == 2) {
-		for (vcpu = 0; vcpu < VM_MAXCPU; vcpu++) {
-			vcpu_set_state(sc->vm, vcpu, VCPU_IDLE, false);
-		}
+		vcpu_unlock_all(sc);
 	}
 
 done:
@@ -763,23 +1097,6 @@ vmmdev_do_vm_destroy(dev_info_t *dip, char *name)
 	return (0);
 }
 
-int
-vmmdev_do_vm_mmap(struct vmm_softc *vmm_sc, off_t off, int nprot)
-{
-	vm_paddr_t	paddr;
-
-	mutex_enter(&vmmdev_mtx);
-
-	paddr = vm_gpa2hpa(vmm_sc->vm, (vm_paddr_t)off, PAGE_SIZE);
-	if (paddr == -1) {
-		return (-1);
-	}
-
-	mutex_exit(&vmmdev_mtx);
-
-	return (btop(paddr));
-}
-
 
 static int
 vmm_open(dev_t *devp, int flag, int otyp, cred_t *credp)
@@ -875,17 +1192,6 @@ vmm_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
 }
 
 static int
-vmm_mmap(dev_t dev, off_t off, int prot)
-{
-	struct vmm_softc	*sc;
-
-	sc = ddi_get_soft_state(vmm_statep, getminor(dev));
-	ASSERT(sc);
-
-	return (vmmdev_do_vm_mmap(sc, off, prot));
-}
-
-static int
 vmm_segmap(dev_t dev, off_t off, struct as *as, caddr_t *addrp, off_t len,
     unsigned int prot, unsigned int maxprot, unsigned int flags, cred_t *credp)
 {
@@ -900,7 +1206,7 @@ vmm_segmap(dev_t dev, off_t off, struct as *as, caddr_t *addrp, off_t len,
 		return (error);
 	}
 
-	dev_a.mapfunc = vmm_mmap;
+	dev_a.mapfunc = NULL; /* XXXJOY: fix this to do proper mapping */
 	dev_a.dev = dev;
 	dev_a.offset = off;
 	dev_a.type = (flags & MAP_TYPE);
@@ -980,7 +1286,7 @@ static struct cb_ops vmm_cb_ops = {
 	nodev,		/* write */
 	vmm_ioctl,
 	nodev,		/* devmap */
-	vmm_mmap,
+	nodev,		/* mmap */
 	vmm_segmap,
 	nochpoll,	/* poll */
 	ddi_prop_op,

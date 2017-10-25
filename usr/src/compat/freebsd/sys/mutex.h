@@ -28,8 +28,7 @@ struct mtx;
 void mtx_init(struct mtx *, char *name, const char *type_name, int opts);
 void mtx_destroy(struct mtx *);
 
-int mtx_sleep(void *chan, struct mtx *mtx, int priority, const char *wmesg,
-    int timo);
+int mtx_sleep(void *, struct mtx *, int, const char *, int);
 
 #endif	/* KERNEL */
 #include_next <sys/mutex.h>

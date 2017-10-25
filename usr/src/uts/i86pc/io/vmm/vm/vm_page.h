@@ -10,12 +10,19 @@
  */
 
 /*
- * Copyright 2014 Pluribus Networks Inc.
+ * Copyright 2017 Joyent, Inc.
  */
 
-#ifndef _COMPAT_FREEBSD_VM_PMAP_H_
-#define	_COMPAT_FREEBSD_VM_PMAP_H_
 
-#include <machine/pmap.h>
+#ifndef	_VM_PAGE_
+#define	_VM_PAGE_
 
-#endif	/* _COMPAT_FREEBSD_VM_PMAP_H_ */
+#include "vm_glue.h"
+
+void vm_page_lock(vm_page_t);
+void vm_page_unhold(vm_page_t);
+void vm_page_unlock(vm_page_t);
+
+#define	VM_PAGE_TO_PHYS(page)	(mmu_ptob((uintptr_t)((page)->vmp_pfn)))
+
+#endif /* _VM_PAGE_ */

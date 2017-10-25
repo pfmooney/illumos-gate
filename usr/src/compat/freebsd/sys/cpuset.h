@@ -20,18 +20,34 @@
 #define	NOCPU			-1
 
 #ifdef	_KERNEL
-#define	CPU_SET(cpu, set)		CPUSET_ADD(*(set), cpu)
-#define	CPU_SETOF(cpu, set)		CPUSET_ONLY(*(set), cpu)
-#define	CPU_ZERO(set)			CPUSET_ZERO(*(set))
-#define	CPU_CLR(cpu, set)		CPUSET_DEL(*(set), cpu)
-#define	CPU_FFS(set)			cpusetobj_ffs(set)
-#define	CPU_ISSET(cpu, set)		CPU_IN_SET(*(set), cpu)
-#define	CPU_CMP(set1, set2)		CPUSET_ISEQUAL(*(set1), *(set2))
-#define	CPU_SET_ATOMIC(cpu, set)	CPUSET_ATOMIC_ADD(*(set), cpu)
 
-#include <sys/cpuvar.h>
+#include <sys/_cpuset.h>
+
+#define	CPU_SET(cpu, set)		cpuset_add((set), (cpu))
+#define	CPU_SETOF(cpu, set)		cpuset_only((set), (cpu))
+#define	CPU_ZERO(set)			cpuset_zero((cpuset_t *)(set))
+#define	CPU_CLR(cpu, set)		cpuset_del((set), (cpu))
+#define	CPU_FFS(set)			cpusetobj_ffs(set)
+#define	CPU_ISSET(cpu, set)		cpu_in_set((cpuset_t *)(set), (cpu))
+#define	CPU_AND(dst, src)		cpuset_and(			\
+						(cpuset_t *)(dst),	\
+						(cpuset_t *)(src))
+#define	CPU_CMP(set1, set2)		(cpuset_isequal(		\
+						(cpuset_t *)(set1),	\
+						(cpuset_t *)(set2)) == 0)
+#define	CPU_SET_ATOMIC(cpu, set)	cpuset_atomic_add(		\
+						(cpuset_t *)(set),	\
+						(cpu))
+#define	CPU_CLR_ATOMIC(cpu, set)	cpuset_atomic_del(		\
+						(cpuset_t *)(set),	\
+						(cpu))
+
+/* XXXJOY: The _ACQ variants appear to imply a membar too. Is that an issue? */
+#define	CPU_SET_ATOMIC_ACQ(cpu, set)	cpuset_atomic_add((set), (cpu))
+
 
 int	cpusetobj_ffs(const cpuset_t *set);
+
 #else
 #include <machine/atomic.h>
 

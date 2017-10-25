@@ -71,6 +71,7 @@ CHKHDRS=  \
 
 NOCHKHDRS= \
 	vmm.h		\
+	vmm_dev.h	\
 	vmm_impl.h	\
 	vmm_instruction_emul.h
 

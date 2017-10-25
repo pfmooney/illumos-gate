@@ -488,6 +488,7 @@ i386_SUBDIRS=		\
 	acpihpd		\
 	addbadsec	\
 	ahciem		\
+	bhyvectl	\
 	biosdev		\
 	cxgbetool	\
 	diskscan	\

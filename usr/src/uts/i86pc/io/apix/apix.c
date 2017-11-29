@@ -167,6 +167,8 @@ static struct	psm_ops apix_ops = {
 	apix_intr_ops,		/* Advanced DDI Interrupt framework */
 	apic_state,		/* save, restore apic state for S3 */
 	apic_cpu_ops,		/* CPU control interface. */
+
+	apic_cached_ipivect,
 };
 
 struct psm_ops *psmops = &apix_ops;

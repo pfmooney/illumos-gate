@@ -1707,3 +1707,14 @@ apic_get_ioapicid(uchar_t ioapicindex)
 
 	return (apic_io_id[ioapicindex]);
 }
+
+int
+apic_cached_ipivect(int ipl, int type)
+{
+	uchar_t vector = 0;
+
+	if (type != -1 && ipl >= 0 && ipl <= MAXIPL) {
+		vector = apic_resv_vector[ipl];
+	}
+	return ((vector != 0) ? vector : -1);
+}

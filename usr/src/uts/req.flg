@@ -57,3 +57,5 @@ find_files "s.*" usr/src/common/tsol
 find_files "s.*" usr/src/common/util
 find_files "s.*" usr/src/common/zfs
 find_files "s.*" usr/src/psm/promif
+find_files "s.*" usr/src/compat/freebsd
+find_files "s.*" usr/contrib/freebsd

@@ -80,6 +80,7 @@ __FBSDID("$FreeBSD$");
 
 #include "ept.h"
 #include "vmx_cpufunc.h"
+#include "vmcs.h"
 #include "vmx.h"
 #include "vmx_msr.h"
 #include "x86.h"
@@ -959,8 +960,22 @@ vmx_vminit(struct vm *vm, pmap_t pmap)
 	}
 
 	for (i = 0; i < VM_MAXCPU; i++) {
+#ifndef __FreeBSD__
+		/*
+		 * Cache physical address lookups for various components which
+		 * may be required inside the critical_enter() section implied
+		 * by VMPTRLD() below.
+		 */
+		vm_paddr_t msr_bitmap_pa = vtophys(vmx->msr_bitmap);
+		vm_paddr_t apic_page_pa = vtophys(&vmx->apic_page[i]);
+		vm_paddr_t pir_desc_pa = vtophys(&vmx->pir_desc[i]);
+#endif /* __FreeBSD__ */
+
 		vmcs = &vmx->vmcs[i];
 		vmcs->identifier = vmx_revision();
+#ifndef __FreeBSD__
+		vmcs->vmcs_pa = (uint64_t)vtophys(vmcs);
+#endif
 		error = vmclear(vmcs);
 		if (error != 0) {
 			panic("vmx_vminit: vmclear error %d on vcpu %d\n",
@@ -974,14 +989,25 @@ vmx_vminit(struct vm *vm, pmap_t pmap)
 
 		VMPTRLD(vmcs);
 		error = 0;
+#ifdef __FreeBSD__
+		/*
+		 * The illumos vmx_enter_guest implementation avoids some of
+		 * the %rsp-manipulation games which are present in the stock
+		 * one from FreeBSD.
+		 */
 		error += vmwrite(VMCS_HOST_RSP, (u_long)&vmx->ctx[i]);
+#endif
 		error += vmwrite(VMCS_EPTP, vmx->eptp);
 		error += vmwrite(VMCS_PIN_BASED_CTLS, pinbased_ctls);
 		error += vmwrite(VMCS_PRI_PROC_BASED_CTLS, procbased_ctls);
 		error += vmwrite(VMCS_SEC_PROC_BASED_CTLS, procbased_ctls2);
 		error += vmwrite(VMCS_EXIT_CTLS, exit_ctls);
 		error += vmwrite(VMCS_ENTRY_CTLS, entry_ctls);
+#ifdef __FreeBSD__
 		error += vmwrite(VMCS_MSR_BITMAP, vtophys(vmx->msr_bitmap));
+#else
+		error += vmwrite(VMCS_MSR_BITMAP, msr_bitmap_pa);
+#endif
 		error += vmwrite(VMCS_VPID, vpid[i]);
 
 		/* exception bitmap */
@@ -993,8 +1019,12 @@ vmx_vminit(struct vm *vm, pmap_t pmap)
 
 		if (virtual_interrupt_delivery) {
 			error += vmwrite(VMCS_APIC_ACCESS, APIC_ACCESS_ADDRESS);
+#ifdef __FreeBSD__
 			error += vmwrite(VMCS_VIRTUAL_APIC,
 			    vtophys(&vmx->apic_page[i]));
+#else
+			error += vmwrite(VMCS_VIRTUAL_APIC, apic_page_pa);
+#endif
 			error += vmwrite(VMCS_EOI_EXIT0, 0);
 			error += vmwrite(VMCS_EOI_EXIT1, 0);
 			error += vmwrite(VMCS_EOI_EXIT2, 0);
@@ -1002,8 +1032,12 @@ vmx_vminit(struct vm *vm, pmap_t pmap)
 		}
 		if (posted_interrupts) {
 			error += vmwrite(VMCS_PIR_VECTOR, pirvec);
+#ifdef __FreeBSD__
 			error += vmwrite(VMCS_PIR_DESC,
 			    vtophys(&vmx->pir_desc[i]));
+#else
+			error += vmwrite(VMCS_PIR_DESC, pir_desc_pa);
+#endif
 		}
 		VMCLEAR(vmcs);
 		KASSERT(error == 0, ("vmx_vminit: error customizing the vmcs"));
@@ -1151,7 +1185,13 @@ vmx_set_pcpu_defaults(struct vmx *vmx, int vcpu, pmap_t pmap)
 	struct vmxstate *vmxstate;
 
 #ifndef __FreeBSD__
-	vmcs_write(VMCS_HOST_FS_BASE, vmm_get_host_fsbase());
+	/*
+	 * Regardless of whether the VM appears to have migrated between CPUs,
+	 * save the host sysenter stack pointer.  As it points to the kernel
+	 * stack of each thread, the correct value must be maintained for every
+	 * trip into the critical section.
+	 */
+	vmcs_write(VMCS_HOST_IA32_SYSENTER_ESP, rdmsr(MSR_SYSENTER_ESP_MSR));
 #endif
 
 	vmxstate = &vmx->state[vcpu];
@@ -1162,6 +1202,10 @@ vmx_set_pcpu_defaults(struct vmx *vmx, int vcpu, pmap_t pmap)
 
 	vmm_stat_incr(vmx->vm, vcpu, VCPU_MIGRATIONS, 1);
 
+#ifndef __FreeBSD__
+	/* Load the per-CPU IDT address */
+	vmcs_write(VMCS_HOST_IDTR_BASE, vmm_get_host_idtrbase());
+#endif
 	vmcs_write(VMCS_HOST_TR_BASE, vmm_get_host_trbase());
 	vmcs_write(VMCS_HOST_GDTR_BASE, vmm_get_host_gdtrbase());
 	vmcs_write(VMCS_HOST_GS_BASE, vmm_get_host_gsbase());
@@ -2630,6 +2674,9 @@ vmx_exit_inst_error(struct vmxctx *vmxctx, int rc, struct vm_exit *vmexit)
 	case VMX_VMRESUME_ERROR:
 	case VMX_VMLAUNCH_ERROR:
 	case VMX_INVEPT_ERROR:
+#ifndef __FreeBSD__
+	case VMX_VMWRITE_ERROR:
+#endif
 		vmexit->u.vmx.inst_type = rc;
 		break;
 	default:
@@ -2811,7 +2858,6 @@ vmx_run(void *arg, int vcpu, register_t rip, pmap_t pmap,
 	    vmexit->exitcode);
 
 	VMCLEAR(vmcs);
-	/* XXXJOY: It seems unsave to do this w/o preempt protection */
 	vmx_msr_guest_exit(vmx, vcpu);
 
 	return (0);

@@ -1692,6 +1692,9 @@ restart:
 #ifdef	__FreeBSD__
 	pcb = PCPU_GET(curpcb);
 	set_pcb_flags(pcb, PCB_FULL_IRET);
+#else
+	/* Force a trip through update_sregs to reload %fs/%gs and friends */
+	ttolwp(curthread)->lwp_pcb.pcb_rupdate = 1;
 #endif
 
 #ifndef	__FreeBSD__

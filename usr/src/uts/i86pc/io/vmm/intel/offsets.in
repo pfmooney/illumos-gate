@@ -37,13 +37,6 @@ vmxctx
 	guest_r14		VMXCTX_GUEST_R14
 	guest_r15		VMXCTX_GUEST_R15
 	guest_cr2		VMXCTX_GUEST_CR2
-	host_r15		VMXCTX_HOST_R15
-	host_r14		VMXCTX_HOST_R14
-	host_r13		VMXCTX_HOST_R13
-	host_r12		VMXCTX_HOST_R12
-	host_rbp		VMXCTX_HOST_RBP
-	host_rsp		VMXCTX_HOST_RSP
-	host_rbx		VMXCTX_HOST_RBX
 	inst_fail_status	VMXCTX_INST_FAIL_STATUS
 	pmap			VMXCTX_PMAP
 
@@ -66,3 +59,4 @@ cpu
 \#define	VMX_VMRESUME_ERROR	1
 \#define	VMX_VMLAUNCH_ERROR	2
 \#define	VMX_INVEPT_ERROR	3
+\#define	VMX_VMWRITE_ERROR	4

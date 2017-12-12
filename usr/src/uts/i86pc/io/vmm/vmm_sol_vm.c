@@ -817,7 +817,7 @@ vm_object_pager_none(vm_object_t vmo, uintptr_t off, pfn_t *lpfn, uint_t *lvl)
 static pfn_t
 vm_object_pager_heap(vm_object_t vmo, uintptr_t off, pfn_t *lpfn, uint_t *lvl)
 {
-	const uintptr_t kaddr = (uintptr_t)vmo->vmo_data + off;
+	const uintptr_t kaddr = ALIGN2PAGE((uintptr_t)vmo->vmo_data + off);
 	uint_t idx, level;
 	htable_t *ht;
 	x86pte_t pte;

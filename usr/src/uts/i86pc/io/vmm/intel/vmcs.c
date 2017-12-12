@@ -346,9 +346,9 @@ vmcs_init(struct vmcs *vmcs)
 {
 	int error, codesel, datasel, tsssel;
 	u_long cr0, cr4, efer;
-	uint64_t pat, idtrbase;
+	uint64_t pat;
 #ifdef	__FreeBSD__
-	uint64_t fsbase;
+	uint64_t fsbase, idtrbase;
 #endif
 
 	codesel = vmm_get_host_codesel();
@@ -422,19 +422,17 @@ vmcs_init(struct vmcs *vmcs)
 	fsbase = vmm_get_host_fsbase();
 	if ((error = vmwrite(VMCS_HOST_FS_BASE, fsbase)) != 0)
 		goto done;
-#endif
 
 	idtrbase = vmm_get_host_idtrbase();
 	if ((error = vmwrite(VMCS_HOST_IDTR_BASE, idtrbase)) != 0)
 		goto done;
 
-#ifndef	__FreeBSD__
-
+#else /* __FreeBSD__ */
+	/*
+	 * Configure host sysenter MSRs to be restored on VM exit.
+	 * The thread-specific MSR_INTC_SEP_ESP value is loaded in vmx_run.
+	 */
 	if ((error = vmwrite(VMCS_HOST_IA32_SYSENTER_CS, KCS_SEL)) != 0)
-		goto done;
-	/* Natively defined as MSR_INTC_SEP_ESP */
-	if ((error = vmwrite(VMCS_HOST_IA32_SYSENTER_ESP,
-	    rdmsr(MSR_SYSENTER_ESP_MSR))) != 0)
 		goto done;
 	/* Natively defined as MSR_INTC_SEP_EIP */
 	if ((error = vmwrite(VMCS_HOST_IA32_SYSENTER_EIP,

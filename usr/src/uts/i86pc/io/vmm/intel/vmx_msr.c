@@ -381,7 +381,6 @@ vmx_msr_guest_enter(struct vmx *vmx, int vcpuid)
 	host_msrs[IDX_MSR_CSTAR] = rdmsr(MSR_CSTAR);
 	host_msrs[IDX_MSR_STAR] = rdmsr(MSR_STAR);
 	host_msrs[IDX_MSR_SF_MASK] = rdmsr(MSR_SF_MASK);
-	host_msrs[IDX_MSR_KGSBASE] = rdmsr(MSR_KGSBASE);
 #endif /* __FreeBSD__ */
 
 	/* Save host MSRs (if any) and restore guest MSRs */
@@ -413,11 +412,7 @@ vmx_msr_guest_exit(struct vmx *vmx, int vcpuid)
 	wrmsr(MSR_STAR, host_msrs[IDX_MSR_STAR]);
 	wrmsr(MSR_SF_MASK, host_msrs[IDX_MSR_SF_MASK]);
 
-#ifdef __FreeBSD__
 	/* MSR_KGSBASE will be restored on the way back to userspace */
-#else
-	wrmsr(MSR_KGSBASE, host_msrs[IDX_MSR_KGSBASE]);
-#endif
 }
 
 int

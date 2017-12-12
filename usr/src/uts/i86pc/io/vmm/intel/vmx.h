@@ -51,6 +51,7 @@ struct vmxctx {
 	register_t	guest_r15;
 	register_t	guest_cr2;
 
+#ifdef __FreeBSD__
 	register_t	host_r15;		/* Host state */
 	register_t	host_r14;
 	register_t	host_r13;
@@ -58,6 +59,7 @@ struct vmxctx {
 	register_t	host_rbp;
 	register_t	host_rsp;
 	register_t	host_rbx;
+#endif /* __FreeBSD__ */
 	/*
 	 * XXX todo debug registers and fpu state
 	 */
@@ -132,6 +134,7 @@ CTASSERT((offsetof(struct vmx, pir_desc[0]) & 63) == 0);
 #define	VMX_VMRESUME_ERROR	1
 #define	VMX_VMLAUNCH_ERROR	2
 #define	VMX_INVEPT_ERROR	3
+#define	VMX_VMWRITE_ERROR	4
 int	vmx_enter_guest(struct vmxctx *ctx, struct vmx *vmx, int launched);
 void	vmx_call_isr(uintptr_t entry);
 

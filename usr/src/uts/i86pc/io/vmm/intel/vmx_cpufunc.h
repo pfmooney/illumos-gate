@@ -87,6 +87,7 @@ vmxon(char *region)
 	return (error);
 }
 
+#ifdef __FreeBSD__
 /* returns 0 on success and non-zero on failure */
 static __inline int
 vmclear(struct vmcs *vmcs)
@@ -102,6 +103,7 @@ vmclear(struct vmcs *vmcs)
 			 : "memory");
 	return (error);
 }
+#endif /* __FreeBSD__ */
 
 static __inline void
 vmxoff(void)
@@ -117,6 +119,7 @@ vmptrst(uint64_t *addr)
 	__asm __volatile("vmptrst %[addr]" :: [addr]"m" (*addr) : "memory");
 }
 
+#ifdef __FreeBSD__
 static __inline int
 vmptrld(struct vmcs *vmcs)
 {
@@ -131,6 +134,7 @@ vmptrld(struct vmcs *vmcs)
 			 : "memory");
 	return (error);
 }
+#endif /* __FreeBSD__ */
 
 static __inline int
 vmwrite(uint64_t reg, uint64_t val)
@@ -160,6 +164,7 @@ vmread(uint64_t r, uint64_t *addr)
 	return (error);
 }
 
+#ifdef __FreeBSD__
 static __inline void
 VMCLEAR(struct vmcs *vmcs)
 {
@@ -183,6 +188,7 @@ VMPTRLD(struct vmcs *vmcs)
 	if (err != 0)
 		panic("%s: vmptrld(%p) error %d", __func__, vmcs, err);
 }
+#endif /* __FreeBSD__ */
 
 #define	INVVPID_TYPE_ADDRESS		0UL
 #define	INVVPID_TYPE_SINGLE_CONTEXT	1UL

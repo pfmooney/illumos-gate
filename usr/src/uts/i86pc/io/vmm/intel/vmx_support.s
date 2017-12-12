@@ -77,10 +77,7 @@ vmx_enter_guest(struct vmxctx *ctx, struct vmx *vmx, int launched)
 #else /* lint */
 
 #include "vmx_assym.h"
-
-/* Be friendly to DTrace FBT's prologue/epilogue pattern matching */
-#define VENTER  push %rbp ; mov %rsp,%rbp
-#define VLEAVE  pop %rbp
+#include "vmcs.h"
 
 /*
  * Assumes that %rdi holds a pointer to the 'vmxctx'.
@@ -93,7 +90,6 @@ vmx_enter_guest(struct vmxctx *ctx, struct vmx *vmx, int launched)
  * host context in case of an error with 'vmlaunch' or 'vmresume'.
  */
 #define	VMX_GUEST_RESTORE						\
-	movq	%rdi,%rsp;						\
 	movq	VMXCTX_GUEST_CR2(%rdi),%rsi;				\
 	movq	%rsi,%cr2;						\
 	movq	VMXCTX_GUEST_RSI(%rdi),%rsi;				\
@@ -112,99 +108,86 @@ vmx_enter_guest(struct vmxctx *ctx, struct vmx *vmx, int launched)
 	movq	VMXCTX_GUEST_R15(%rdi),%r15;				\
 	movq	VMXCTX_GUEST_RDI(%rdi),%rdi; /* restore rdi the last */
 
-/*
- * Save and restore the host context.
- *
- * Assumes that %rdi holds a pointer to the 'vmxctx'.
- */
-#define	VMX_HOST_SAVE							\
-	movq    %r15, VMXCTX_HOST_R15(%rdi);				\
-	movq    %r14, VMXCTX_HOST_R14(%rdi);				\
-	movq    %r13, VMXCTX_HOST_R13(%rdi);				\
-	movq    %r12, VMXCTX_HOST_R12(%rdi);				\
-	movq    %rbp, VMXCTX_HOST_RBP(%rdi);				\
-	movq    %rsp, VMXCTX_HOST_RSP(%rdi);				\
-	movq    %rbx, VMXCTX_HOST_RBX(%rdi);				\
-
-#define	VMX_HOST_RESTORE						\
-	movq	VMXCTX_HOST_R15(%rdi), %r15;				\
-	movq	VMXCTX_HOST_R14(%rdi), %r14;				\
-	movq	VMXCTX_HOST_R13(%rdi), %r13;				\
-	movq	VMXCTX_HOST_R12(%rdi), %r12;				\
-	movq	VMXCTX_HOST_RBP(%rdi), %rbp;				\
-	movq	VMXCTX_HOST_RSP(%rdi), %rsp;				\
-	movq	VMXCTX_HOST_RBX(%rdi), %rbx;				\
+/* Stack layout (offset from %rsp) for vmx_enter_guest */
+#define	VMXSTK_TMPRDI	0x00	/* temp store %rdi on vmexit		*/
+#define	VMXSTK_R15	0x08	/* callee saved %r15			*/
+#define	VMXSTK_R14	0x10	/* callee saved %r14			*/
+#define	VMXSTK_R13	0x18	/* callee saved %r13			*/
+#define	VMXSTK_R12	0x20	/* callee saved %r12			*/
+#define	VMXSTK_RBX	0x28	/* callee saved %rbx			*/
+#define	VMXSTK_RDX	0x30	/* save-args %rdx (int launched)	*/
+#define	VMXSTK_RSI	0x38	/* save-args %rsi (struct vmx *vmx)	*/
+#define	VMXSTK_RDI	0x40	/* save-args %rdi (struct vmxctx *ctx)	*/
+#define	VMXSTK_FP	0x48	/* frame pointer %rbp			*/
+#define	VMXSTKSIZE	VMXSTK_FP
 
 /*
  * vmx_enter_guest(struct vmxctx *vmxctx, int launched)
- * %rdi: pointer to the 'vmxctx'
- * %rsi: pointer to the 'vmx'
- * %edx: launch state of the VMCS
  * Interrupts must be disabled on entry.
  */
 ENTRY(vmx_enter_guest)
-	VENTER
-	/*
-	 * Save host state before doing anything else.
-	 */
-	VMX_HOST_SAVE
+	pushq	%rbp
+	movq	%rsp, %rbp
+	subq	$VMXSTKSIZE, %rsp
+	movq	%r15, VMXSTK_R15(%rsp)
+	movq	%r14, VMXSTK_R14(%rsp)
+	movq	%r13, VMXSTK_R13(%rsp)
+	movq	%r12, VMXSTK_R12(%rsp)
+	movq	%rbx, VMXSTK_RBX(%rsp)
+	movq	%rdx, VMXSTK_RDX(%rsp)
+	movq	%rsi, VMXSTK_RSI(%rsp)
+	movq	%rdi, VMXSTK_RDI(%rsp)
 
-#ifdef __FreeBSD__
-	/*
-	 * Activate guest pmap on this cpu.
-	 */
-	movq	VMXCTX_PMAP(%rdi), %r11
-	movl	PCPU(CPUID), %eax
-	LK btsl	%eax, PM_ACTIVE(%r11)
-#else /* __FreeBSD__ */
-	movq	VMXCTX_PMAP(%rdi), %r11
-	pushq	%rdi
-	pushq	%rsi
-	pushq	%rdx
-	push	%r11
-	leaq	PM_ACTIVE(%r11), %rdi
+	movq	%rdi, %r12	/* vmxctx */
+	movq	%rsi, %r13	/* vmx */
+	movl	%edx, %r14d	/* launch state */
+	movq	VMXCTX_PMAP(%rdi), %rbx
+
+	/* Activate guest pmap on this cpu. */
+	leaq	PM_ACTIVE(%rbx), %rdi
 	movl	%gs:CPU_ID, %esi
 	call	cpuset_atomic_add
-	popq	%r11
-	popq	%rdx
-	popq	%rsi
-	popq	%rdi
-	movl	%gs:CPU_ID, %eax
-#endif /* __FreeBSD__ */
+	movq	%r12, %rdi
 
 	/*
 	 * If 'vmx->eptgen[curcpu]' is not identical to 'pmap->pm_eptgen'
 	 * then we must invalidate all mappings associated with this EPTP.
 	 */
-	movq	PM_EPTGEN(%r11), %r10
-	cmpq	%r10, VMX_EPTGEN(%rsi, %rax, 8)
+	movq	PM_EPTGEN(%rbx), %r10
+	movl	%gs:CPU_ID, %eax
+	cmpq	%r10, VMX_EPTGEN(%r13, %rax, 8)
 	je	guest_restore
 
 	/* Refresh 'vmx->eptgen[curcpu]' */
-	movq	%r10, VMX_EPTGEN(%rsi, %rax, 8)
+	movq	%r10, VMX_EPTGEN(%r13, %rax, 8)
 
 	/* Setup the invept descriptor on the host stack */
-	mov	%rsp, %r11
-	movq	VMX_EPTP(%rsi), %rax
-	movq	%rax, -16(%r11)
-	movq	$0x0, -8(%r11)
-	mov	$0x1, %eax		/* Single context invalidate */
-	invept	-16(%r11), %rax
+	pushq	$0x0
+	pushq	VMX_EPTP(%r13)
+	movl	$0x1, %eax	/* Single context invalidate */
+	invept	(%rsp), %rax
+	leaq	0x10(%rsp), %rsp
 	jbe	invept_error		/* Check invept instruction error */
 
 guest_restore:
-	cmpl	$0, %edx
+	/* Write the current %rsp into the VMCS to be restored on vmexit */
+	movl	$VMCS_HOST_RSP, %eax
+	vmwrite	%rsp, %rax
+	jbe	vmwrite_error
+
+	/* Check if vmresume is adequate or a full vmlaunch is required */
+	cmpl	$0, %r14d
 	je	do_launch
 
 	VMX_GUEST_RESTORE
 	vmresume
 	/*
-	 * In the common case 'vmresume' returns back to the host through
-	 * 'vmx_exit_guest' with %rsp pointing to 'vmxctx'.
-	 *
-	 * If there is an error we return VMX_VMRESUME_ERROR to the caller.
+	 * In the common case, 'vmresume' returns back to the host through
+	 * 'vmx_exit_guest'. If there is an error we return VMX_VMRESUME_ERROR
+	 * to the caller.
 	 */
-	movq	%rsp, %rdi		/* point %rdi back to 'vmxctx' */
+	leaq	VMXSTK_FP(%rsp), %rbp
+	movq	VMXSTK_RDI(%rsp), %rdi
 	movl	$VMX_VMRESUME_ERROR, %eax
 	jmp	decode_inst_error
 
@@ -212,19 +195,21 @@ do_launch:
 	VMX_GUEST_RESTORE
 	vmlaunch
 	/*
-	 * In the common case 'vmlaunch' returns back to the host through
-	 * 'vmx_exit_guest' with %rsp pointing to 'vmxctx'.
-	 *
-	 * If there is an error we return VMX_VMLAUNCH_ERROR to the caller.
+	 * In the common case, 'vmlaunch' returns back to the host through
+	 * 'vmx_exit_guest'. If there is an error we return VMX_VMLAUNCH_ERROR
+	 * to the caller.
 	 */
-	movq	%rsp, %rdi		/* point %rdi back to 'vmxctx' */
+	leaq	VMXSTK_FP(%rsp), %rbp
+	movq	VMXSTK_RDI(%rsp), %rdi
 	movl	$VMX_VMLAUNCH_ERROR, %eax
 	jmp	decode_inst_error
 
+vmwrite_error:
+	movl	$VMX_VMWRITE_ERROR, %eax
+	jmp	decode_inst_error
 invept_error:
 	movl	$VMX_INVEPT_ERROR, %eax
 	jmp	decode_inst_error
-
 decode_inst_error:
 	movl	$VM_FAIL_VALID, %r11d
 	jz	inst_error
@@ -232,33 +217,20 @@ decode_inst_error:
 inst_error:
 	movl	%r11d, VMXCTX_INST_FAIL_STATUS(%rdi)
 
-	/*
-	 * The return value is already populated in %eax so we cannot use
-	 * it as a scratch register beyond this point.
-	 */
-
-#ifdef __FreeBSD__
-	/*
-	 * Deactivate guest pmap from this cpu.
-	 */
-	movq	VMXCTX_PMAP(%rdi), %r11
-	movl	PCPU(CPUID), %r10d
-	LK btrl	%r10d, PM_ACTIVE(%r11)
-#endif /* __FreeBSD__ */
-
-	VMX_HOST_RESTORE
-
-#ifndef __FreeBSD__
-	/* This call must wait until after %rsp is fixed by VMX_HOST_RESTORE */
 	movq	VMXCTX_PMAP(%rdi), %rdi
 	leaq	PM_ACTIVE(%rdi), %rdi
 	movl	%gs:CPU_ID, %esi
-	pushq	%rax
+	movq	%rax, %r12
 	call	cpuset_atomic_del
-	popq	%rax
-#endif /* __FreeBSD__ */
+	movq	%r12, %rax
 
-	VLEAVE
+	movq	VMXSTK_RBX(%rsp), %rbx
+	movq	VMXSTK_R12(%rsp), %r12
+	movq	VMXSTK_R13(%rsp), %r13
+	movq	VMXSTK_R14(%rsp), %r14
+	movq	VMXSTK_R15(%rsp), %r15
+	addq	$VMXSTKSIZE, %rsp
+	popq	%rbp
 	ret
 
 /*
@@ -271,53 +243,48 @@ ALTENTRY(vmx_exit_guest)
 	/*
 	 * Save guest state that is not automatically saved in the vmcs.
 	 */
-	movq	%rdi,VMXCTX_GUEST_RDI(%rsp)
-	movq	%rsi,VMXCTX_GUEST_RSI(%rsp)
-	movq	%rdx,VMXCTX_GUEST_RDX(%rsp)
-	movq	%rcx,VMXCTX_GUEST_RCX(%rsp)
-	movq	%r8,VMXCTX_GUEST_R8(%rsp)
-	movq	%r9,VMXCTX_GUEST_R9(%rsp)
-	movq	%rax,VMXCTX_GUEST_RAX(%rsp)
-	movq	%rbx,VMXCTX_GUEST_RBX(%rsp)
-	movq	%rbp,VMXCTX_GUEST_RBP(%rsp)
-	movq	%r10,VMXCTX_GUEST_R10(%rsp)
-	movq	%r11,VMXCTX_GUEST_R11(%rsp)
-	movq	%r12,VMXCTX_GUEST_R12(%rsp)
-	movq	%r13,VMXCTX_GUEST_R13(%rsp)
-	movq	%r14,VMXCTX_GUEST_R14(%rsp)
-	movq	%r15,VMXCTX_GUEST_R15(%rsp)
+	movq	%rdi, VMXSTK_TMPRDI(%rsp)
+	movq	VMXSTK_RDI(%rsp), %rdi
+	movq	%rbp, VMXCTX_GUEST_RBP(%rdi)
+	leaq	VMXSTK_FP(%rsp), %rbp
 
-	movq	%cr2,%rdi
-	movq	%rdi,VMXCTX_GUEST_CR2(%rsp)
+	movq	%rsi, VMXCTX_GUEST_RSI(%rdi)
+	movq	%rdx, VMXCTX_GUEST_RDX(%rdi)
+	movq	%rcx, VMXCTX_GUEST_RCX(%rdi)
+	movq	%r8, VMXCTX_GUEST_R8(%rdi)
+	movq	%r9, VMXCTX_GUEST_R9(%rdi)
+	movq	%rax, VMXCTX_GUEST_RAX(%rdi)
+	movq	%rbx, VMXCTX_GUEST_RBX(%rdi)
+	movq	%r10, VMXCTX_GUEST_R10(%rdi)
+	movq	%r11, VMXCTX_GUEST_R11(%rdi)
+	movq	%r12, VMXCTX_GUEST_R12(%rdi)
+	movq	%r13, VMXCTX_GUEST_R13(%rdi)
+	movq	%r14, VMXCTX_GUEST_R14(%rdi)
+	movq	%r15, VMXCTX_GUEST_R15(%rdi)
 
-	movq	%rsp,%rdi
+	movq	%cr2, %rbx
+	movq	%rbx, VMXCTX_GUEST_CR2(%rdi)
+	movq	VMXSTK_TMPRDI(%rsp), %rdx
+	movq	%rdx, VMXCTX_GUEST_RDI(%rdi)
 
-#ifdef __FreeBSD__
-	/*
-	 * Deactivate guest pmap from this cpu.
-	 */
-	movq	VMXCTX_PMAP(%rdi), %r11
-	movl	PCPU(CPUID), %r10d
-	LK btrl	%r10d, PM_ACTIVE(%r11)
-#endif /* __FreeBSD__ */
-
-	VMX_HOST_RESTORE
-
-#ifndef __FreeBSD__
-	/* This call must wait until after %rsp is fixed by VMX_HOST_RESTORE */
-	movq	VMXCTX_PMAP(%rdi), %r11
-	leaq	PM_ACTIVE(%r11), %rdi
+	/* Deactivate guest pmap on this cpu. */
+	movq	VMXCTX_PMAP(%rdi), %rdi
+	leaq	PM_ACTIVE(%rdi), %rdi
 	movl	%gs:CPU_ID, %esi
 	call	cpuset_atomic_del
-#endif /* __FreeBSD__ */
-
 
 	/*
 	 * This will return to the caller of 'vmx_enter_guest()' with a return
 	 * value of VMX_GUEST_VMEXIT.
 	 */
 	movl	$VMX_GUEST_VMEXIT, %eax
-	VLEAVE
+	movq	VMXSTK_RBX(%rsp), %rbx
+	movq	VMXSTK_R12(%rsp), %r12
+	movq	VMXSTK_R13(%rsp), %r13
+	movq	VMXSTK_R14(%rsp), %r14
+	movq	VMXSTK_R15(%rsp), %r15
+	addq	$VMXSTKSIZE, %rsp
+	popq	%rbp
 	ret
 END(vmx_enter_guest)
 

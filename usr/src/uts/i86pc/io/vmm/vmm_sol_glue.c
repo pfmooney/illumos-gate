@@ -108,6 +108,14 @@ pmap_kextract(vm_offset_t va)
 {
 	pfn_t	pfn;
 
+	/*
+	 * Since hat_getpfnum() may block on an htable mutex, this is not at
+	 * all safe to run from a critical_enter/kpreempt_disable context.
+	 * The FreeBSD analog does not have the same locking constraints, so
+	 * close attention must be paid wherever this is called.
+	 */
+	ASSERT(curthread->t_preempt == 0);
+
 	pfn = hat_getpfnum(kas.a_hat, (caddr_t)va);
 	ASSERT(pfn != PFN_INVALID);
 	return (pfn << PAGE_SHIFT) | ((uintptr_t)va & PAGE_MASK);
@@ -261,13 +269,11 @@ void
 critical_enter(void)
 {
 	kpreempt_disable();
-	thread_affinity_set(curthread, CPU_CURRENT);
 }
 
 void
 critical_exit(void)
 {
-	thread_affinity_clear(curthread);
 	kpreempt_enable();
 }
 

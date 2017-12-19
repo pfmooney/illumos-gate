@@ -49,17 +49,36 @@
 int	cpusetobj_ffs(const cpuset_t *set);
 
 #else
+
+#include <sys/bitmap.h>
 #include <machine/atomic.h>
 
-typedef int cpuset_t;
+/* For now, assume NCPU of 256 */
+#define	CPU_SETSIZE			(256)
 
-#define	CPUSET(cpu)			(1UL << (cpu))
+typedef struct {
+	ulong_t _bits[BT_BITOUL(CPU_SETSIZE)];
+} cpuset_t;
 
-#define	CPU_SETSIZE			(sizeof (cpuset_t))
-#define	CPU_SET_ATOMIC(cpu, set)	atomic_set_int((u_int *)(set), CPUSET(cpu))
-#define	CPU_CLR_ATOMIC(cpu, set)	atomic_clear_int((u_int *)(set), CPUSET(cpu))
-#define	CPU_ISSET(cpu, set)		((*(set) & CPUSET(cpu)) != 0)
-#define	CPU_EMPTY(set)			(*(set) == 0)
+static __inline int cpuset_empty(const cpuset_t *set)
+{
+	uint_t i;
+
+	for (i = 0; i < BT_BITOUL(CPU_SETSIZE); i++) {
+		if (set->_bits[i] != 0)
+			return (0);
+	}
+	return (1);
+}
+
+
+#define	CPU_ISSET(cpu, setp)		BT_TEST((setp)->_bits, cpu)
+#define	CPU_EMPTY(setp)			cpuset_empty((setp))
+#define	CPU_SET_ATOMIC(cpu, setp)	\
+	atomic_set_long(&(BT_WIM((setp)->_bits, cpu)), BT_BIW(cpu))
+#define	CPU_CLR_ATOMIC(cpu, setp)	\
+	atomic_clear_long(&(BT_WIM((setp)->_bits, cpu)), BT_BIW(cpu))
+
 #endif
 
 #endif	/* _COMPAT_FREEBSD_SYS_CPUSET_H_ */

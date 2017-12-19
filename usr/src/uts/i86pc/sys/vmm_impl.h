@@ -32,15 +32,6 @@
 #define	VMM_CTL_MINOR_NAME	VMM_DRIVER_NAME VMM_CTL_MINOR_NODE
 #define	VMM_CTL_MINOR		0
 
-#define	VMM_IOC_BASE		(('V' << 16) | ('M' << 8))
-
-#define	VMM_CREATE_VM		(VMM_IOC_BASE | 0x01)
-#define	VMM_DESTROY_VM		(VMM_IOC_BASE | 0x02)
-
-struct vmm_ioctl {
-	char vmm_name[VM_MAX_NAMELEN];
-};
-
 #ifdef	_KERNEL
 
 /*

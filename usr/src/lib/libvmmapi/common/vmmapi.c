@@ -102,8 +102,32 @@ struct vmctx {
 #define	CREATE(x)  sysctlbyname("hw.vmm.create", NULL, NULL, (x), strlen((x)))
 #define	DESTROY(x) sysctlbyname("hw.vmm.destroy", NULL, NULL, (x), strlen((x)))
 #else
-#define	CREATE(x)	vmm_vm_create(x)
-#define	DESTROY(x)	vmm_vm_destroy(x)
+#define	CREATE(x)	vm_do_ctl(VMM_CREATE_VM, (x))
+#define	DESTROY(x)	vm_do_ctl(VMM_DESTROY_VM, (x))
+
+static int
+vm_do_ctl(int cmd, const char *name)
+{
+	const char vmm_ctl[] = "/devices/pseudo/vmm@0:ctl";
+	int ctl_fd;
+
+	ctl_fd = open(vmm_ctl, O_EXCL | O_RDWR);
+	if (ctl_fd < 0) {
+		return (-1);
+	}
+
+	if (ioctl(ctl_fd, cmd, name) == -1) {
+		int err = errno;
+
+		/* Do not lose ioctl errno through the close(2) */
+		(void) close(ctl_fd);
+		errno = err;
+		return (-1);
+	}
+	(void) close(ctl_fd);
+
+	return (0);
+}
 #endif
 
 static int
@@ -131,39 +155,6 @@ vm_device_open(const char *name)
 	free(vmfile);
         return (fd);
 }
-
-#ifndef	__FreeBSD__
-static int
-vmm_vm_create(const char *name)
-{
-	const char vmm_ctl[] = "/devices/pseudo/vmm@0:ctl";
-	struct vmm_ioctl vi;
-	int err = 0;
-	int ctl_fd;
-
-	(void) strlcpy(vi.vmm_name, name, sizeof (vi.vmm_name) - 1);
-
-	ctl_fd = open(vmm_ctl, O_EXCL | O_RDWR);
-	if (ctl_fd == -1) {
-		err = errno;
-		if ((errno == EPERM) || (errno == EACCES)) {
-			fprintf(stderr, "you do not have permission to "
-				"perform that operation.\n");
-		} else {
-			fprintf(stderr, "open: %s: %s\n", vmm_ctl,
-				strerror(errno));
-		}
-		return (err);
-	}
-	if (ioctl(ctl_fd, VMM_CREATE_VM, &vi) == -1) {
-		err = errno;
-		fprintf(stderr, "couldn't create vm \"%s\"", name);
-	}
-	close (ctl_fd);
-
-	return (err);
-}
-#endif
 
 int
 vm_create(const char *name)
@@ -194,38 +185,6 @@ err:
 	vm_destroy(vm);
 	return (NULL);
 }
-
-#ifndef        __FreeBSD__
-static int
-vmm_vm_destroy(const char *name)
-{
-	const char vmm_ctl[] = "/devices/pseudo/vmm@0:ctl";
-	struct vmm_ioctl vi;
-	int ctl_fd;
-	int err = 0;
-
-	(void) strlcpy(vi.vmm_name, name, sizeof (vi.vmm_name) - 1);
-
-	ctl_fd = open(vmm_ctl, O_EXCL | O_RDWR);
-	if (ctl_fd == -1) {
-		err = errno;
-		if ((errno == EPERM) || (errno == EACCES)) {
-			fprintf(stderr, "you do not have permission to "
-			       "perform that operation.\n");
-		} else {
-			fprintf(stderr, "open: %s: %s\n", vmm_ctl,
-			       strerror(errno));
-		}
-		return (err);
-	}
-	if (ioctl(ctl_fd, VMM_DESTROY_VM, &vi) == -1) {
-		err = errno;
-		fprintf(stderr, "couldn't destroy vm \"%s\"", name);
-	}
-	close (ctl_fd);
-	return (err);
-}
-#endif
 
 void
 vm_destroy(struct vmctx *vm)
@@ -559,7 +518,9 @@ vm_get_highmem_size(struct vmctx *ctx)
 void *
 vm_create_devmem(struct vmctx *ctx, int segid, const char *name, size_t len)
 {
+#ifdef	__FreeBSD__
 	char pathname[MAXPATHLEN];
+#endif
 	size_t len2;
 	char *base, *ptr;
 	int fd, error, flags;

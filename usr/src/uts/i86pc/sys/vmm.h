@@ -695,7 +695,19 @@ void vmm_sol_glue_cleanup(void);
 int vmm_mod_load(void);
 int vmm_mod_unload(void);
 
-#endif
-#endif
+/*
+ * Because of tangled headers, these are mirrored by vmm_drv.h to present the
+ * interface to driver consumers.
+ */
+typedef int (*vmm_rmem_cb_t)(void *, uintptr_t, uint_t, uint64_t *);
+typedef int (*vmm_wmem_cb_t)(void *, uintptr_t, uint_t, uint64_t);
+
+int vm_ioport_hook(struct vm *, uint_t, vmm_rmem_cb_t, vmm_wmem_cb_t, void *,
+    void **);
+void vm_ioport_unhook(struct vm *, void **);
+int vm_ioport_handle_hook(struct vm *, int, bool, int, int, uint32_t *);
+
+#endif /* _KERNEL */
+#endif /* __FreeBSD */
 
 #endif	/* _VMM_H_ */

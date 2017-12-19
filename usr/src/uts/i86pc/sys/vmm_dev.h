@@ -415,6 +415,12 @@ enum {
 #ifndef __FreeBSD__
 #define	VM_DEVMEM_GETOFFSET \
 	_IOW('v', IOCNUM_DEVMEM_GETOFFSET, struct vm_devmem_offset)
+
+/* ioctls used against ctl device for vm create/destroy */
+#define	VMM_IOC_BASE		(('V' << 16) | ('M' << 8))
+#define	VMM_CREATE_VM		(VMM_IOC_BASE | 0x01)
+#define	VMM_DESTROY_VM		(VMM_IOC_BASE | 0x02)
+
 #endif
 
 #endif

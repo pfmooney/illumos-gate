@@ -32,15 +32,6 @@
 #define	VMM_CTL_MINOR_NAME	VMM_DRIVER_NAME VMM_CTL_MINOR_NODE
 #define	VMM_CTL_MINOR		0
 
-#define	VMM_IOC_BASE		(('V' << 16) | ('M' << 8))
-
-#define	VMM_CREATE_VM		(VMM_IOC_BASE | 0x01)
-#define	VMM_DESTROY_VM		(VMM_IOC_BASE | 0x02)
-
-struct vmm_ioctl {
-	char vmm_name[VM_MAX_NAMELEN];
-};
-
 #ifdef	_KERNEL
 
 /*
@@ -60,13 +51,23 @@ struct vmm_devmem_entry {
 };
 typedef struct vmm_devmem_entry vmm_devmem_entry_t;
 
+enum vmm_softc_state {
+	VMM_HELD	= 1,	/* external driver(s) possess hold on VM */
+	VMM_CLEANUP	= 2,	/* request that holds are released */
+	VMM_PURGED	= 4,	/* all hold have been released */
+	VMM_BLOCK_HOOK	= 8	/* mem hook install temporarily blocked */
+};
+
 struct vmm_softc {
 	list_node_t	vmm_node;
 	struct vm	*vmm_vm;
 	minor_t		vmm_minor;
 	char		vmm_name[VM_MAX_NAMELEN];
+	uint_t		vmm_flags;
 	boolean_t	vmm_is_open;
 	list_t		vmm_devmem_list;
+	list_t		vmm_holds;
+	kcondvar_t	vmm_cv;
 };
 typedef struct vmm_softc vmm_softc_t;
 #endif

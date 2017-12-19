@@ -184,6 +184,10 @@ struct vm {
 	struct vmspace	*vmspace;		/* (o) guest's address space */
 	char		name[VM_MAX_NAMELEN];	/* (o) virtual machine name */
 	struct vcpu	vcpu[VM_MAXCPU];	/* (i) guest vcpus */
+#ifndef __FreeBSD__
+	krwlock_t	ioport_rwlock;
+	list_t		ioport_hooks;
+#endif /* __FreeBSD__ */
 };
 
 static int vmm_initialized;
@@ -249,6 +253,16 @@ SYSCTL_INT(_hw_vmm, OID_AUTO, trace_guest_exceptions, CTLFLAG_RDTUN,
 static void vm_free_memmap(struct vm *vm, int ident);
 static bool sysmem_mapping(struct vm *vm, struct mem_map *mm);
 static void vcpu_notify_event_locked(struct vcpu *vcpu, bool lapic_intr);
+
+#ifndef __FreeBSD__
+typedef struct vm_ioport_hook {
+	list_node_t	vmih_node;
+	uint_t		vmih_ioport;
+	void		*vmih_arg;
+	vmm_rmem_cb_t	vmih_rmem_cb;
+	vmm_wmem_cb_t	vmih_wmem_cb;
+} vm_ioport_hook_t;
+#endif /* __FreeBSD__ */
 
 #ifdef KTR
 static const char *
@@ -475,6 +489,15 @@ vm_init(struct vm *vm, bool create)
 	vm->vpmtmr = vpmtmr_init(vm);
 	if (create)
 		vm->vrtc = vrtc_init(vm);
+#ifndef __FreeBSD__
+	if (create) {
+		rw_init(&vm->ioport_rwlock, NULL, RW_DEFAULT, NULL);
+		list_create(&vm->ioport_hooks, sizeof (vm_ioport_hook_t),
+		    offsetof (vm_ioport_hook_t, vmih_node));
+	} else {
+		VERIFY(list_is_empty(&vm->ioport_hooks));
+	}
+#endif /* __FreeBSD__ */
 
 	CPU_ZERO(&vm->active_cpus);
 
@@ -2720,3 +2743,106 @@ vm_get_wiredcnt(struct vm *vm, int vcpu, struct vmm_stat_type *stat)
 
 VMM_STAT_FUNC(VMM_MEM_RESIDENT, "Resident memory", vm_get_rescnt);
 VMM_STAT_FUNC(VMM_MEM_WIRED, "Wired memory", vm_get_wiredcnt);
+
+#ifndef __FreeBSD__
+int
+vm_ioport_hook(struct vm *vm, uint_t ioport, vmm_rmem_cb_t rfunc,
+    vmm_wmem_cb_t wfunc, void *arg, void **cookie)
+{
+	list_t *ih = &vm->ioport_hooks;
+	vm_ioport_hook_t *hook, *node;
+
+	if (ioport == 0) {
+		return (EINVAL);
+	}
+
+	rw_enter(&vm->ioport_rwlock, RW_WRITER);
+	/*
+	 * Find the node position in the list which this region should be
+	 * inserted behind to maintain sorted order.
+	 */
+	for (node = list_tail(ih); node != NULL; node = list_prev(ih, node)) {
+		if (ioport == node->vmih_ioport) {
+			/* Reject duplicate port hook  */
+			rw_exit(&vm->ioport_rwlock);
+			return (EEXIST);
+		} else if (ioport > node->vmih_ioport) {
+			break;
+		}
+	}
+
+	hook = kmem_alloc(sizeof (*hook), KM_SLEEP);
+	hook->vmih_ioport = ioport;
+	hook->vmih_arg = arg;
+	hook->vmih_rmem_cb = rfunc;
+	hook->vmih_wmem_cb = wfunc;
+	if (node == NULL) {
+		list_insert_head(ih, hook);
+	} else {
+		list_insert_after(ih, node, hook);
+	}
+
+	*cookie = (void *)hook;
+	rw_exit(&vm->ioport_rwlock);
+	return (0);
+}
+
+void
+vm_ioport_unhook(struct vm *vm, void **cookie)
+{
+	vm_ioport_hook_t *hook;
+	list_t *ih = &vm->ioport_hooks;
+
+	rw_enter(&vm->ioport_rwlock, RW_WRITER);
+	hook = *cookie;
+	list_remove(ih, hook);
+	kmem_free(hook, sizeof (*hook));
+	*cookie = NULL;
+	rw_exit(&vm->ioport_rwlock);
+}
+
+int
+vm_ioport_handle_hook(struct vm *vm, int cpuid, bool in, int port, int bytes,
+    uint32_t *val)
+{
+	vm_ioport_hook_t *hook;
+	list_t *ih = &vm->ioport_hooks;
+	int err = 0;
+
+	rw_enter(&vm->ioport_rwlock, RW_READER);
+	for (hook = list_head(ih); hook != NULL; hook = list_next(ih, hook)) {
+		if (hook->vmih_ioport == port) {
+			break;
+		}
+	}
+	if (hook == NULL) {
+		err = ENOENT;
+		goto bail;
+	}
+
+	if (in) {
+		uint64_t tval;
+
+		if (hook->vmih_rmem_cb == NULL) {
+			err = ENOENT;
+			goto bail;
+		}
+		err = hook->vmih_rmem_cb(hook->vmih_arg, (uintptr_t)port,
+		    (uint_t)bytes, &tval);
+		*val = (uint32_t)tval;
+	} else {
+		if (hook->vmih_wmem_cb == NULL) {
+			err = ENOENT;
+			goto bail;
+		}
+		err = hook->vmih_wmem_cb(hook->vmih_arg, (uintptr_t)port,
+		    (uint_t)bytes, (uint64_t)*val);
+	}
+
+bail:
+	rw_exit(&vm->ioport_rwlock);
+	return (err);
+}
+
+
+#endif /* __FreeBSD__ */

@@ -105,6 +105,7 @@ emulate_inout_port(struct vm *vm, int vcpuid, struct vm_exit *vmexit,
 	uint32_t mask, val;
 	int error;
 
+#ifdef __FreeBSD__
 	/*
 	 * If there is no handler for the I/O port then punt to userspace.
 	 */
@@ -113,6 +114,28 @@ emulate_inout_port(struct vm *vm, int vcpuid, struct vm_exit *vmexit,
 		*retu = true;
 		return (0);
 	}
+#else /* __FreeBSD__ */
+	handler = NULL;
+	if (vmexit->u.inout.port < MAX_IOPORTS) {
+		handler = ioport_handler[vmexit->u.inout.port];
+	}
+	/* Look for hooks, if a standard handler is not present */
+	if (handler == NULL) {
+		mask = vie_size2mask(vmexit->u.inout.bytes);
+		if (!vmexit->u.inout.in) {
+			val = vmexit->u.inout.eax & mask;
+		}
+		error = vm_ioport_handle_hook(vm, vcpuid, vmexit->u.inout.in,
+		    vmexit->u.inout.port, vmexit->u.inout.bytes, &val);
+		if (error == 0) {
+			goto finish;
+		}
+
+		*retu = true;
+		return (0);
+	}
+
+#endif /* __FreeBSD__ */
 
 	mask = vie_size2mask(vmexit->u.inout.bytes);
 
@@ -133,6 +156,9 @@ emulate_inout_port(struct vm *vm, int vcpuid, struct vm_exit *vmexit,
 		return (EIO);
 	}
 
+#ifndef __FreeBSD__
+finish:
+#endif /* __FreeBSD__ */
 	if (vmexit->u.inout.in) {
 		vmexit->u.inout.eax &= ~mask;
 		vmexit->u.inout.eax |= val & mask;

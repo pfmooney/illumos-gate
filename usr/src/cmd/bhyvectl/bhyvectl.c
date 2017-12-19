@@ -583,15 +583,11 @@ enum {
 static void
 print_cpus(const char *banner, const cpuset_t *cpus)
 {
-#ifdef __FreeBSD__
 	int i;
-#endif
 	int first;
 
 	first = 1;
 	printf("%s:\t", banner);
-#ifdef __FreeBSD__
-	/* XXXJOY: punt for now on cpuset sizing */
 	if (!CPU_EMPTY(cpus)) {
 		for (i = 0; i < CPU_SETSIZE; i++) {
 			if (CPU_ISSET(i, cpus)) {
@@ -600,7 +596,6 @@ print_cpus(const char *banner, const cpuset_t *cpus)
 			}
 		}
 	} else
-#endif
 		printf(" (none)");
 	printf("\n");
 }

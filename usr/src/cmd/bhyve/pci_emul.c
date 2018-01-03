@@ -501,6 +501,11 @@ modify_bar_registration(struct pci_devinst *pi, int idx, int registration)
 		error = EINVAL;
 		break;
 	}
+#ifndef __FreeBSD__
+	if (pi->pi_d->pe_barupdate != NULL) {
+		pi->pi_d->pe_barupdate(pi, idx, registration);
+	}
+#endif /* __FreeBSD__ */
 	assert(error == 0);
 }
 

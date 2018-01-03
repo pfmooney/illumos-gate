@@ -69,6 +69,10 @@ struct pci_devemu {
 	uint64_t  (*pe_barread)(struct vmctx *ctx, int vcpu,
 				struct pci_devinst *pi, int baridx,
 				uint64_t offset, int size);
+
+#ifndef __FreeBSD__
+	void	(*pe_barupdate)(struct pci_devinst *pi, int idx, int reg);
+#endif /* __FreeBSD__ */
 };
 #define PCI_EMUL_SET(x)   DATA_SET(pci_devemu_set, x);
 

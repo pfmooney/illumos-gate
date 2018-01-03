@@ -19,25 +19,21 @@
 #define	VNA_IOC			(('V' << 16)|('C' << 8))
 #define	VNA_IOC_CREATE		(VNA_IOC | 1)
 #define	VNA_IOC_DELETE		(VNA_IOC | 2)
-#define	VNA_IOC_RX_RING_INIT	(VNA_IOC | 3)
-#define	VNA_IOC_TX_RING_INIT	(VNA_IOC | 4)
-#define	VNA_IOC_RX_RING_RESET	(VNA_IOC | 5)
-#define	VNA_IOC_TX_RING_RESET	(VNA_IOC | 6)
-#define	VNA_IOC_RX_RING_KICK	(VNA_IOC | 7)
-#define	VNA_IOC_TX_RING_KICK	(VNA_IOC | 8)
-#define	VNA_IOC_RX_INTR_CLR	(VNA_IOC | 9)
-#define	VNA_IOC_TX_INTR_CLR	(VNA_IOC | 10)
-#define	VNA_IOC_SET_FEATURES	(VNA_IOC | 11)
-#define	VNA_IOC_GET_FEATURES	(VNA_IOC | 12)
+#define	VNA_IOC_RING_INIT	(VNA_IOC | 3)
+#define	VNA_IOC_RING_RESET	(VNA_IOC | 4)
+#define	VNA_IOC_RING_KICK	(VNA_IOC | 5)
+#define	VNA_IOC_INTR_CLR	(VNA_IOC | 6)
+#define	VNA_IOC_SET_FEATURES	(VNA_IOC | 7)
+#define	VNA_IOC_GET_FEATURES	(VNA_IOC | 8)
+#define	VNA_IOC_SET_NOTIFY_IOP	(VNA_IOC | 9)
 
 typedef struct vioc_create {
 	datalink_id_t	c_linkid;
-	char		c_vmname[64];
-	size_t		c_lomem_size;
-	size_t		c_himem_size;
+	int		c_vmfd;
 } vioc_create_t;
 
 typedef struct vioc_ring_init {
+	uint16_t	ri_index;
 	uint16_t	ri_qsize;
 	uint64_t	ri_qaddr;
 } vioc_ring_init_t;

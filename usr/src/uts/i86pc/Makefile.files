@@ -112,6 +112,7 @@ CORE_OBJS +=			\
 	pmem.o			\
 	ppage.o			\
 	pwrnow.o		\
+	seg_vmm.o		\
 	speedstep.o		\
 	ssp.o			\
 	startup.o		\

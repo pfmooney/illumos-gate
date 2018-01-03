@@ -42,8 +42,6 @@
 
 #include <machine/asmacros.h>
 
-#include "vmx_assym.h"
-
 /* Porting note: This is named 'vmx_support.S' upstream. */
 #ifndef __FreeBSD__
 /* Cloned from sys/asm_linkage.h */
@@ -72,9 +70,13 @@ vmx_exit_guest()
 /*ARGSUSED*/
 int
 vmx_enter_guest(struct vmxctx *ctx, struct vmx *vmx, int launched)
-{}
+{
+	return (0);
+}
 
 #else /* lint */
+
+#include "vmx_assym.h"
 
 /* Be friendly to DTrace FBT's prologue/epilogue pattern matching */
 #define VENTER  push %rbp ; mov %rsp,%rbp
@@ -154,6 +156,21 @@ ENTRY(vmx_enter_guest)
 	movq	VMXCTX_PMAP(%rdi), %r11
 	movl	PCPU(CPUID), %eax
 	LK btsl	%eax, PM_ACTIVE(%r11)
+#else /* __FreeBSD__ */
+	movq	VMXCTX_PMAP(%rdi), %r11
+	pushq	%rdi
+	pushq	%rsi
+	pushq	%rdx
+	push	%r11
+	leaq	PM_ACTIVE(%r11), %rdi
+	movl	%gs:CPU_ID, %esi
+	call	cpuset_atomic_add
+	popq	%r11
+	popq	%rdx
+	popq	%rsi
+	popq	%rdi
+	movl	%gs:CPU_ID, %eax
+#endif /* __FreeBSD__ */
 
 	/*
 	 * If 'vmx->eptgen[curcpu]' is not identical to 'pmap->pm_eptgen'
@@ -162,10 +179,6 @@ ENTRY(vmx_enter_guest)
 	movq	PM_EPTGEN(%r11), %r10
 	cmpq	%r10, VMX_EPTGEN(%rsi, %rax, 8)
 	je	guest_restore
-#else /* __FreeBSD__ */
-	/* XXXJOY: Do proper pmap check and cpuset_add */
-#endif /* __FreeBSD__ */
-
 
 	/* Refresh 'vmx->eptgen[curcpu]' */
 	movq	%r10, VMX_EPTGEN(%rsi, %rax, 8)
@@ -231,11 +244,20 @@ inst_error:
 	movq	VMXCTX_PMAP(%rdi), %r11
 	movl	PCPU(CPUID), %r10d
 	LK btrl	%r10d, PM_ACTIVE(%r11)
-#else /* __FreeBSD__ */
-	/* XXXJOY do cpuset_del */
 #endif /* __FreeBSD__ */
 
 	VMX_HOST_RESTORE
+
+#ifndef __FreeBSD__
+	/* This call must wait until after %rsp is fixed by VMX_HOST_RESTORE */
+	movq	VMXCTX_PMAP(%rdi), %rdi
+	leaq	PM_ACTIVE(%rdi), %rdi
+	movl	%gs:CPU_ID, %esi
+	pushq	%rax
+	call	cpuset_atomic_del
+	popq	%rax
+#endif /* __FreeBSD__ */
+
 	VLEAVE
 	ret
 
@@ -277,11 +299,18 @@ ALTENTRY(vmx_exit_guest)
 	movq	VMXCTX_PMAP(%rdi), %r11
 	movl	PCPU(CPUID), %r10d
 	LK btrl	%r10d, PM_ACTIVE(%r11)
-#else /* __FreeBSD__ */
-	/* XXXJOY do cpuset_del */
 #endif /* __FreeBSD__ */
 
 	VMX_HOST_RESTORE
+
+#ifndef __FreeBSD__
+	/* This call must wait until after %rsp is fixed by VMX_HOST_RESTORE */
+	movq	VMXCTX_PMAP(%rdi), %r11
+	leaq	PM_ACTIVE(%r11), %rdi
+	movl	%gs:CPU_ID, %esi
+	call	cpuset_atomic_del
+#endif /* __FreeBSD__ */
+
 
 	/*
 	 * This will return to the caller of 'vmx_enter_guest()' with a return

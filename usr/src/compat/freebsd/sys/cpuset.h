@@ -32,9 +32,9 @@
 #define	CPU_AND(dst, src)		cpuset_and(			\
 						(cpuset_t *)(dst),	\
 						(cpuset_t *)(src))
-#define	CPU_CMP(set1, set2)		cpuset_isequal(			\
+#define	CPU_CMP(set1, set2)		(cpuset_isequal(		\
 						(cpuset_t *)(set1),	\
-						(cpuset_t *)(set2))
+						(cpuset_t *)(set2)) == 0)
 #define	CPU_SET_ATOMIC(cpu, set)	cpuset_atomic_add(		\
 						(cpuset_t *)(set),	\
 						(cpu))

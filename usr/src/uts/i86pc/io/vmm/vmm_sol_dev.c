@@ -21,10 +21,12 @@
 #include <sys/stat.h>
 #include <sys/vmsystm.h>
 #include <sys/ddi.h>
+#include <sys/mkdev.h>
 #include <sys/sunddi.h>
 #include <sys/fs/dv_node.h>
 #include <sys/pc_hvm.h>
 #include <sys/cpuset.h>
+#include <sys/id_space.h>
 
 #include <sys/vmm.h>
 #include <sys/vmm_instruction_emul.h>
@@ -40,15 +42,16 @@
 #include "io/vhpet.h"
 #include "vmm_lapic.h"
 #include "vmm_stat.h"
+#include "vm/vm_glue.h"
 
 static dev_info_t *vmm_dip;
 static void *vmm_statep;
 
-static SLIST_HEAD(, vmm_softc) head;
-
-static kmutex_t vmmdev_mtx;
-static uint_t vmmdev_inst_count = 0;
-static boolean_t vmmdev_load_failure;
+static kmutex_t		vmmdev_mtx;
+static list_t		vmmdev_list;
+static id_space_t	*vmmdev_minors;
+static uint_t		vmmdev_inst_count = 0;
+static boolean_t	vmmdev_load_failure;
 
 static const char *vmmdev_hvm_name = "bhyve";
 
@@ -221,108 +224,174 @@ vmmdev_init(void)
 int
 vmmdev_cleanup(void)
 {
-	VERIFY(SLIST_EMPTY(&head));
+	VERIFY(list_is_empty(&vmmdev_list));
 
 	vmm_trace_dmsg_free();
 	return (0);
 }
 
 static int
-vmmdev_get_memseg(struct vmm_softc *sc, struct vm_memseg *mseg)
+vmmdev_get_memseg(vmm_softc_t *sc, struct vm_memseg *mseg)
 {
 	int error;
 	bool sysmem;
 
-	error = vm_get_memseg(sc->vm, mseg->segid, &mseg->len, &sysmem, NULL);
+	error = vm_get_memseg(sc->vmm_vm, mseg->segid, &mseg->len, &sysmem,
+	    NULL);
 	if (error || mseg->len == 0)
 		return (error);
 
 	if (!sysmem) {
-#ifdef __FreeBSD__
-		/* XXXJOY: Punt on device mapping for now */
-		struct devmem_softc *dsc;
-		SLIST_FOREACH(dsc, &sc->devmem, link) {
-			if (dsc->segid == mseg->segid)
+		vmm_devmem_entry_t *de;
+		list_t *dl = &sc->vmm_devmem_list;
+
+		for (de = list_head(dl); de != NULL; de = list_next(dl, de)) {
+			if (de->vde_segid == mseg->segid) {
 				break;
+			}
 		}
-		KASSERT(dsc != NULL, ("%s: devmem segment %d not found",
-		    __func__, mseg->segid));
-		error = copystr(dsc->name, mseg->name, SPECNAMELEN + 1, NULL);
-#endif
+		if (de != NULL) {
+			(void) strlcpy(mseg->name, de->vde_name,
+			    sizeof (de->vde_name));
+		}
 	} else {
-		bzero(mseg->name, sizeof(mseg->name));
+		bzero(mseg->name, sizeof (mseg->name));
 	}
 
 	return (error);
 }
 
+/*
+ * The 'devmem' hack:
+ *
+ * On native FreeBSD, bhyve consumers are allowed to create 'devmem' segments
+ * in the vm which appear with their own name related to the vm under /dev.
+ * Since this would be a hassle from an sdev perspective and would require a
+ * new cdev interface (or complicate the existing one), we choose to implement
+ * this in a different manner.  When 'devmem' mappings are created, an
+ * identifying off_t is communicated back out to userspace.  That off_t,
+ * residing above the normal guest memory space, can be used to mmap the
+ * 'devmem' mapping from the already-open vm device.
+ */
+
 static int
-vmmdev_alloc_memseg(struct vmm_softc *sc, struct vm_memseg *mseg)
+vmmdev_devmem_create(vmm_softc_t *sc, struct vm_memseg *mseg, const char *name)
+{
+	off_t map_offset;
+	vmm_devmem_entry_t *entry;
+
+	if (list_is_empty(&sc->vmm_devmem_list)) {
+		map_offset = VM_DEVMEM_START;
+	} else {
+		entry = list_tail(&sc->vmm_devmem_list);
+		map_offset = entry->vde_off + entry->vde_len;
+		if (map_offset < entry->vde_off) {
+			/* Do not tolerate overflow */
+			return (ERANGE);
+		}
+		/*
+		 * XXXJOY: We could choose to search the list for duplicate
+		 * names and toss an error.  Since we're using the offset
+		 * method for now, it does not make much of a difference.
+		 */
+	}
+
+	entry = kmem_zalloc(sizeof (*entry), KM_SLEEP);
+	entry->vde_segid = mseg->segid;
+	entry->vde_len = mseg->len;
+	entry->vde_off = map_offset;
+	(void) strlcpy(entry->vde_name, name, sizeof (entry->vde_name));
+	list_insert_tail(&sc->vmm_devmem_list, entry);
+
+	return (0);
+}
+
+static boolean_t
+vmmdev_devmem_segid(vmm_softc_t *sc, off_t off, off_t len, int *segidp)
+{
+	list_t *dl = &sc->vmm_devmem_list;
+	vmm_devmem_entry_t *de = NULL;
+
+	VERIFY(off >= VM_DEVMEM_START);
+
+	for (de = list_head(dl); de != NULL; de = list_next(dl, de)) {
+		/* XXX: Only hit on direct offset/length matches for now */
+		if (de->vde_off == off && de->vde_len == len) {
+			break;
+		}
+	}
+	if (de == NULL) {
+		return (B_FALSE);
+	}
+
+	*segidp = de->vde_segid;
+	return (B_TRUE);
+}
+
+static void
+vmmdev_devmem_purge(vmm_softc_t *sc)
+{
+	vmm_devmem_entry_t *entry;
+
+	while ((entry = list_remove_head(&sc->vmm_devmem_list)) != NULL) {
+		kmem_free(entry, sizeof (*entry));
+	}
+}
+
+static int
+vmmdev_alloc_memseg(vmm_softc_t *sc, struct vm_memseg *mseg)
 {
 	int error;
-	bool sysmem;
-
-	error = 0;
-	sysmem = true;
+	bool sysmem = true;
 
 	if (VM_MEMSEG_NAME(mseg)) {
-#ifdef __FreeBSD__
 		sysmem = false;
-		name = malloc(SPECNAMELEN + 1, M_VMMDEV, M_WAITOK);
-		error = copystr(mseg->name, name, SPECNAMELEN + 1, 0);
-		if (error)
-			goto done;
-#else
-		/* XXXJOY: Punt on device mapping for now */
-		return (EINVAL);
-#endif
 	}
+	error = vm_alloc_memseg(sc->vmm_vm, mseg->segid, mseg->len, sysmem);
 
-	error = vm_alloc_memseg(sc->vm, mseg->segid, mseg->len, sysmem);
-	if (error)
-		goto done;
-
-#ifdef __FreeBSD__
-	if (VM_MEMSEG_NAME(mseg)) {
-		error = devmem_create_cdev(vm_name(sc->vm), mseg->segid, name);
-		if (error)
-			vm_free_memseg(sc->vm, mseg->segid);
-		else
-			name = NULL;	/* freed when 'cdev' is destroyed */
+	if (error == 0 && VM_MEMSEG_NAME(mseg)) {
+		/*
+		 * Rather than create a whole fresh device from which userspace
+		 * can mmap this segment, instead make it available at an
+		 * offset above where the main guest memory resides.
+		 */
+		error = vmmdev_devmem_create(sc, mseg, mseg->name);
+		if (error != 0) {
+			vm_free_memseg(sc->vmm_vm, mseg->segid);
+		}
 	}
-#endif
-done:
 	return (error);
 }
 
+
 static int
-vcpu_lock_one(struct vmm_softc *sc, int vcpu)
+vcpu_lock_one(vmm_softc_t *sc, int vcpu)
 {
 	int error;
 
 	if (vcpu < 0 || vcpu >= VM_MAXCPU)
 		return (EINVAL);
 
-	error = vcpu_set_state(sc->vm, vcpu, VCPU_FROZEN, true);
+	error = vcpu_set_state(sc->vmm_vm, vcpu, VCPU_FROZEN, true);
 	return (error);
 }
 
 static void
-vcpu_unlock_one(struct vmm_softc *sc, int vcpu)
+vcpu_unlock_one(vmm_softc_t *sc, int vcpu)
 {
 	enum vcpu_state state;
 
-	state = vcpu_get_state(sc->vm, vcpu, NULL);
+	state = vcpu_get_state(sc->vmm_vm, vcpu, NULL);
 	if (state != VCPU_FROZEN) {
-		panic("vcpu %s(%d) has invalid state %d", vm_name(sc->vm),
+		panic("vcpu %s(%d) has invalid state %d", vm_name(sc->vmm_vm),
 		    vcpu, state);
 	}
 
-	vcpu_set_state(sc->vm, vcpu, VCPU_IDLE, false);
+	vcpu_set_state(sc->vmm_vm, vcpu, VCPU_IDLE, false);
 }
 
 static int
-vcpu_lock_all(struct vmm_softc *sc)
+vcpu_lock_all(vmm_softc_t *sc)
 {
 	int error, vcpu;
 
@@ -341,7 +410,7 @@ vcpu_lock_all(struct vmm_softc *sc)
 }
 
 static void
-vcpu_unlock_all(struct vmm_softc *sc)
+vcpu_unlock_all(vmm_softc_t *sc)
 {
 	int vcpu;
 
@@ -350,7 +419,7 @@ vcpu_unlock_all(struct vmm_softc *sc)
 }
 
 int
-vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
+vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
     cred_t *credp, int *rvalp)
 {
 	int error, vcpu, state_changed, size, pincount;
@@ -445,6 +514,9 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 
 	case VM_GET_MEMSEG:
 	case VM_MMAP_GETNEXT:
+#ifndef __FreeBSD__
+	case VM_DEVMEM_GETOFFSET:
+#endif
 		/*
 		 * Lock a vcpu to make sure that the memory map cannot be
 		 * modified while it is being inspected.
@@ -466,7 +538,7 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		error = vm_run(sc->vm, &vmrun);
+		error = vm_run(sc->vmm_vm, &vmrun);
 		/*
 		 * XXXJOY: I think it's necessary to do copyout, even in the
 		 * face of errors, since the exit state is communicated out.
@@ -481,10 +553,10 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		error = vm_suspend(sc->vm, vmsuspend.how);
+		error = vm_suspend(sc->vmm_vm, vmsuspend.how);
 		break;
 	case VM_REINIT:
-		error = vm_reinit(sc->vm);
+		error = vm_reinit(sc->vmm_vm);
 		break;
 	case VM_STAT_DESC: {
 		if (ddi_copyin(datap, &statdesc, sizeof (statdesc), md)) {
@@ -507,7 +579,7 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			break;
 		}
 		hrt2tv(gethrtime(), &vmstats.tv);
-		error = vmm_stat_copy(sc->vm, vmstats.cpuid,
+		error = vmm_stat_copy(sc->vmm_vm, vmstats.cpuid,
 		    &vmstats.num_entries, vmstats.statbuf);
 		if (error == 0 &&
 		    ddi_copyout(&vmstats, datap, sizeof (vmstats), md)) {
@@ -549,7 +621,7 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		error = vm_inject_exception(sc->vm, vmexc.cpuid,
+		error = vm_inject_exception(sc->vmm_vm, vmexc.cpuid,
 		    vmexc.vector, vmexc.error_code_valid, vmexc.error_code,
 		    vmexc.restart_instruction);
 		break;
@@ -558,51 +630,53 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		error = vm_inject_nmi(sc->vm, vmnmi.cpuid);
+		error = vm_inject_nmi(sc->vmm_vm, vmnmi.cpuid);
 		break;
 	case VM_LAPIC_IRQ:
 		if (ddi_copyin(datap, &vmirq, sizeof (vmirq), md)) {
 			error = EFAULT;
 			break;
 		}
-		error = lapic_intr_edge(sc->vm, vmirq.cpuid, vmirq.vector);
+		error = lapic_intr_edge(sc->vmm_vm, vmirq.cpuid, vmirq.vector);
 		break;
 	case VM_LAPIC_LOCAL_IRQ:
 		if (ddi_copyin(datap, &vmirq, sizeof (vmirq), md)) {
 			error = EFAULT;
 			break;
 		}
-		error = lapic_set_local_intr(sc->vm, vmirq.cpuid, vmirq.vector);
+		error = lapic_set_local_intr(sc->vmm_vm, vmirq.cpuid,
+		    vmirq.vector);
 		break;
 	case VM_LAPIC_MSI:
 		if (ddi_copyin(datap, &vmmsi, sizeof (vmmsi), md)) {
 			error = EFAULT;
 			break;
 		}
-		error = lapic_intr_msi(sc->vm, vmmsi.addr, vmmsi.msg);
+		error = lapic_intr_msi(sc->vmm_vm, vmmsi.addr, vmmsi.msg);
+		break;
 	case VM_IOAPIC_ASSERT_IRQ:
 		if (ddi_copyin(datap, &ioapic_irq, sizeof (ioapic_irq), md)) {
 			error = EFAULT;
 			break;
 		}
-		error = vioapic_assert_irq(sc->vm, ioapic_irq.irq);
+		error = vioapic_assert_irq(sc->vmm_vm, ioapic_irq.irq);
 		break;
 	case VM_IOAPIC_DEASSERT_IRQ:
 		if (ddi_copyin(datap, &ioapic_irq, sizeof (ioapic_irq), md)) {
 			error = EFAULT;
 			break;
 		}
-		error = vioapic_deassert_irq(sc->vm, ioapic_irq.irq);
+		error = vioapic_deassert_irq(sc->vmm_vm, ioapic_irq.irq);
 		break;
 	case VM_IOAPIC_PULSE_IRQ:
 		if (ddi_copyin(datap, &ioapic_irq, sizeof (ioapic_irq), md)) {
 			error = EFAULT;
 			break;
 		}
-		error = vioapic_pulse_irq(sc->vm, ioapic_irq.irq);
+		error = vioapic_pulse_irq(sc->vmm_vm, ioapic_irq.irq);
 		break;
 	case VM_IOAPIC_PINCOUNT:
-		pincount = vioapic_pincount(sc->vm);
+		pincount = vioapic_pincount(sc->vmm_vm);
 		if (ddi_copyout(&pincount, datap, sizeof (int), md)) {
 			error = EFAULT;
 			break;
@@ -613,9 +687,10 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		error = vatpic_assert_irq(sc->vm, isa_irq.atpic_irq);
+		error = vatpic_assert_irq(sc->vmm_vm, isa_irq.atpic_irq);
 		if (error == 0 && isa_irq.ioapic_irq != -1) {
-			error = vioapic_assert_irq(sc->vm, isa_irq.ioapic_irq);
+			error = vioapic_assert_irq(sc->vmm_vm,
+			    isa_irq.ioapic_irq);
 		}
 		break;
 	case VM_ISA_DEASSERT_IRQ:
@@ -623,9 +698,9 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		error = vatpic_deassert_irq(sc->vm, isa_irq.atpic_irq);
+		error = vatpic_deassert_irq(sc->vmm_vm, isa_irq.atpic_irq);
 		if (error == 0 && isa_irq.ioapic_irq != -1) {
-			error = vioapic_deassert_irq(sc->vm,
+			error = vioapic_deassert_irq(sc->vmm_vm,
 			    isa_irq.ioapic_irq);
 		}
 		break;
@@ -634,9 +709,10 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		error = vatpic_pulse_irq(sc->vm, isa_irq.atpic_irq);
+		error = vatpic_pulse_irq(sc->vmm_vm, isa_irq.atpic_irq);
 		if (error == 0 && isa_irq.ioapic_irq != -1) {
-			error = vioapic_pulse_irq(sc->vm, isa_irq.ioapic_irq);
+			error = vioapic_pulse_irq(sc->vmm_vm,
+			    isa_irq.ioapic_irq);
 		}
 		break;
 	case VM_ISA_SET_IRQ_TRIGGER:
@@ -645,7 +721,7 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		error = vatpic_set_irq_trigger(sc->vm,
+		error = vatpic_set_irq_trigger(sc->vmm_vm,
 		    isa_irq_trigger.atpic_irq, isa_irq_trigger.trigger);
 		break;
 	case VM_MMAP_GETNEXT:
@@ -653,8 +729,8 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		error = vm_mmap_getnext(sc->vm, &mm.gpa, &mm.segid, &mm.segoff,
-		    &mm.len, &mm.prot, &mm.flags);
+		error = vm_mmap_getnext(sc->vmm_vm, &mm.gpa, &mm.segid,
+		    &mm.segoff, &mm.len, &mm.prot, &mm.flags);
 		if (error == 0 && ddi_copyout(&mm, datap, sizeof (mm), md)) {
 			error = EFAULT;
 			break;
@@ -665,7 +741,7 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		error = vm_mmap_memseg(sc->vm, mm.gpa, mm.segid, mm.segoff,
+		error = vm_mmap_memseg(sc->vmm_vm, mm.gpa, mm.segid, mm.segoff,
 		    mm.len, mm.prot, mm.flags);
 		break;
 	case VM_ALLOC_MEMSEG:
@@ -692,7 +768,7 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		error = vm_get_register(sc->vm, vmreg.cpuid, vmreg.regnum,
+		error = vm_get_register(sc->vmm_vm, vmreg.cpuid, vmreg.regnum,
 		    &vmreg.regval);
 		if (error == 0 &&
 		    ddi_copyout(&vmreg, datap, sizeof (vmreg), md)) {
@@ -705,7 +781,7 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		error = vm_set_register(sc->vm, vmreg.cpuid, vmreg.regnum,
+		error = vm_set_register(sc->vmm_vm, vmreg.cpuid, vmreg.regnum,
 		    vmreg.regval);
 		break;
 	case VM_SET_SEGMENT_DESCRIPTOR:
@@ -713,16 +789,16 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		error = vm_set_seg_desc(sc->vm, vmsegd.cpuid, vmsegd.regnum,
-		    &vmsegd.desc);
+		error = vm_set_seg_desc(sc->vmm_vm, vmsegd.cpuid,
+		    vmsegd.regnum, &vmsegd.desc);
 		break;
 	case VM_GET_SEGMENT_DESCRIPTOR:
 		if (ddi_copyin(datap, &vmsegd, sizeof (vmsegd), md)) {
 			error = EFAULT;
 			break;
 		}
-		error = vm_get_seg_desc(sc->vm, vmsegd.cpuid, vmsegd.regnum,
-		    &vmsegd.desc);
+		error = vm_get_seg_desc(sc->vmm_vm, vmsegd.cpuid,
+		    vmsegd.regnum, &vmsegd.desc);
 		if (error == 0 &&
 		    ddi_copyout(&vmsegd, datap, sizeof (vmsegd), md)) {
 			error = EFAULT;
@@ -734,8 +810,8 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		error = vm_get_capability(sc->vm, vmcap.cpuid, vmcap.captype,
-		    &vmcap.capval);
+		error = vm_get_capability(sc->vmm_vm, vmcap.cpuid,
+		    vmcap.captype, &vmcap.capval);
 		if (error == 0 &&
 		    ddi_copyout(&vmcap, datap, sizeof (vmcap), md)) {
 			error = EFAULT;
@@ -747,7 +823,7 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		error = vm_set_capability(sc->vm, vmcap.cpuid,
+		error = vm_set_capability(sc->vmm_vm, vmcap.cpuid,
 		    vmcap.captype, vmcap.capval);
 		break;
 	case VM_SET_X2APIC_STATE:
@@ -755,14 +831,15 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		error = vm_set_x2apic_state(sc->vm, x2apic.cpuid, x2apic.state);
+		error = vm_set_x2apic_state(sc->vmm_vm, x2apic.cpuid,
+		    x2apic.state);
 		break;
 	case VM_GET_X2APIC_STATE:
 		if (ddi_copyin(datap, &x2apic, sizeof (x2apic), md)) {
 			error = EFAULT;
 			break;
 		}
-		error = vm_get_x2apic_state(sc->vm, x2apic.cpuid,
+		error = vm_get_x2apic_state(sc->vmm_vm, x2apic.cpuid,
 		    &x2apic.state);
 		if (error == 0 &&
 		    ddi_copyout(&x2apic, datap, sizeof (x2apic), md)) {
@@ -777,7 +854,7 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 		}
 #ifdef __FreeBSD__
 		/* XXXJOY: add function? */
-		pmap_get_mapping(vmspace_pmap(vm_get_vmspace(sc->vm)),
+		pmap_get_mapping(vmspace_pmap(vm_get_vmspace(sc->vmm_vm)),
 		    gpapte.gpa, gpapte.pte, &gpapte.ptenum);
 #endif
 		error = 0;
@@ -799,7 +876,7 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		error = vm_gla2gpa(sc->vm, gg.vcpuid, &gg.paging, gg.gla,
+		error = vm_gla2gpa(sc->vmm_vm, gg.vcpuid, &gg.paging, gg.gla,
 		    gg.prot, &gg.gpa, &gg.fault);
 		KASSERT(error == 0 || error == EFAULT,
 		    ("%s: vm_gla2gpa unknown error %d", __func__, error));
@@ -814,7 +891,7 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		error = vm_activate_cpu(sc->vm, vac.vcpuid);
+		error = vm_activate_cpu(sc->vmm_vm, vac.vcpuid);
 		break;
 
 	case VM_GET_CPUS: {
@@ -840,9 +917,9 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 		}
 
 		if (vm_cpuset.which == VM_ACTIVE_CPUS) {
-			tempset = vm_active_cpus(sc->vm);
+			tempset = vm_active_cpus(sc->vmm_vm);
 		} else if (vm_cpuset.which == VM_SUSPENDED_CPUS) {
-			tempset = vm_suspended_cpus(sc->vm);
+			tempset = vm_suspended_cpus(sc->vmm_vm);
 		} else {
 			error = EINVAL;
 		}
@@ -860,14 +937,14 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		error = vm_exit_intinfo(sc->vm, vmii.vcpuid, vmii.info1);
+		error = vm_exit_intinfo(sc->vmm_vm, vmii.vcpuid, vmii.info1);
 		break;
 	case VM_GET_INTINFO:
 		if (ddi_copyin(datap, &vmii, sizeof (vmii), md)) {
 			error = EFAULT;
 			break;
 		}
-		error = vm_get_intinfo(sc->vm, vmii.vcpuid, &vmii.info1,
+		error = vm_get_intinfo(sc->vmm_vm, vmii.vcpuid, &vmii.info1,
 		    &vmii.info2);
 		if (error == 0 &&
 		    ddi_copyout(&vmii, datap, sizeof (vmii), md)) {
@@ -880,14 +957,16 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		error = vrtc_nvram_write(sc->vm, rtcdata.offset, rtcdata.value);
+		error = vrtc_nvram_write(sc->vmm_vm, rtcdata.offset,
+		    rtcdata.value);
 		break;
 	case VM_RTC_READ:
 		if (ddi_copyin(datap, &rtcdata, sizeof (rtcdata), md)) {
 			error = EFAULT;
 			break;
 		}
-		error = vrtc_nvram_read(sc->vm, rtcdata.offset, &rtcdata.value);
+		error = vrtc_nvram_read(sc->vmm_vm, rtcdata.offset,
+		    &rtcdata.value);
 		if (error == 0 &&
 		    ddi_copyout(&rtcdata, datap, sizeof (rtcdata), md)) {
 			error = EFAULT;
@@ -899,10 +978,10 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		error = vrtc_set_time(sc->vm, rtctime.secs);
+		error = vrtc_set_time(sc->vmm_vm, rtctime.secs);
 		break;
 	case VM_RTC_GETTIME:
-		rtctime.secs = vrtc_get_time(sc->vm);
+		rtctime.secs = vrtc_get_time(sc->vmm_vm);
 		if (ddi_copyout(&rtctime, datap, sizeof (rtctime), md)) {
 			error = EFAULT;
 			break;
@@ -910,8 +989,35 @@ vmmdev_do_ioctl(struct vmm_softc *sc, int cmd, intptr_t arg, int md,
 		break;
 
 	case VM_RESTART_INSTRUCTION:
-		error = vm_restart_instruction(sc->vm, vcpu);
+		error = vm_restart_instruction(sc->vmm_vm, vcpu);
 		break;
+#ifndef __FreeBSD__
+	case VM_DEVMEM_GETOFFSET: {
+		struct vm_devmem_offset vdo;
+		list_t *dl = &sc->vmm_devmem_list;
+		vmm_devmem_entry_t *de = NULL;
+
+		if (ddi_copyin(datap, &vdo, sizeof (vdo), md) != 0) {
+			error = EFAULT;
+			break;
+		}
+
+		for (de = list_head(dl); de != NULL; de = list_next(dl, de)) {
+			if (de->vde_segid == vdo.segid) {
+				break;
+			}
+		}
+		if (de != NULL) {
+			vdo.offset = de->vde_off;
+			if (ddi_copyout(&vdo, datap, sizeof (vdo), md) != 0) {
+				error = EFAULT;
+			}
+		} else {
+			error = ENOENT;
+		}
+	}
+		break;
+#endif
 	default:
 		error = ENOTTY;
 		break;
@@ -928,20 +1034,6 @@ done:
 	KASSERT(error >= 0, ("vmmdev_ioctl: invalid error return %d", error));
 	return (error);
 }
-
-static minor_t
-vmm_find_free_minor(void)
-{
-	minor_t		minor;
-
-	for (minor = 1; ; minor++) {
-		if (ddi_get_soft_state(vmm_statep, minor) == NULL)
-			break;
-	}
-
-	return (minor);
-}
-
 
 static boolean_t
 vmmdev_mod_incr()
@@ -989,9 +1081,9 @@ vmmdev_mod_decr(void)
 static int
 vmmdev_do_vm_create(dev_info_t *dip, char *name)
 {
-	struct vmm_softc	*sc = NULL;
-	minor_t			minor;
-	int			error = ENOMEM;
+	vmm_softc_t	*sc = NULL;
+	minor_t		minor;
+	int		error = ENOMEM;
 
 	if (strlen(name) >= VM_MAX_NAMELEN) {
 		return (EINVAL);
@@ -1003,7 +1095,16 @@ vmmdev_do_vm_create(dev_info_t *dip, char *name)
 		return (ENXIO);
 	}
 
-	minor = vmm_find_free_minor();
+	/* Look for duplicates names */
+	for (sc = list_head(&vmmdev_list); sc != NULL;
+	    sc = list_next(&vmmdev_list, sc)) {
+		if (strncmp(name, sc->vmm_name, sizeof (sc->vmm_name)) == 0) {
+			mutex_exit(&vmmdev_mtx);
+			return (EEXIST);
+		}
+	}
+
+	minor = id_alloc(vmmdev_minors);
 	if (ddi_soft_state_zalloc(vmm_statep, minor) != DDI_SUCCESS) {
 		goto fail;
 	} else if ((sc = ddi_get_soft_state(vmm_statep, minor)) == NULL) {
@@ -1014,18 +1115,21 @@ vmmdev_do_vm_create(dev_info_t *dip, char *name)
 		goto fail;
 	}
 
-	error = vm_create(name, &sc->vm);
+	error = vm_create(name, &sc->vmm_vm);
 	if (error == 0) {
 		/* Complete VM intialization and report success. */
-		strcpy(sc->name, name);
-		sc->minor = minor;
-		SLIST_INSERT_HEAD(&head, sc, link);
+		strcpy(sc->vmm_name, name);
+		sc->vmm_minor = minor;
+		list_create(&sc->vmm_devmem_list, sizeof (vmm_devmem_entry_t),
+		    offsetof(vmm_devmem_entry_t, vde_node));
+		list_insert_tail(&vmmdev_list, sc);
 		mutex_exit(&vmmdev_mtx);
 		return (0);
 	}
 
 	ddi_remove_minor_node(dip, name);
 fail:
+	id_free(vmmdev_minors, minor);
 	vmmdev_mod_decr();
 	if (sc != NULL) {
 		ddi_soft_state_free(vmm_statep, minor);
@@ -1034,26 +1138,32 @@ fail:
 	return (error);
 }
 
-static struct vmm_softc *
-vmm_lookup(char *name)
+static vmm_softc_t *
+vmm_lookup(const char *name)
 {
-	struct vmm_softc	*sc;
+	list_t *vml = &vmmdev_list;
+	vmm_softc_t *sc;
 
-	SLIST_FOREACH(sc, &head, link) {
-		if (strcmp(sc->name, name) == 0) {
+	ASSERT(MUTEX_HELD(&vmmdev_mtx));
+
+	for (sc = list_head(vml); sc != NULL; sc = list_next(vml, sc)) {
+		if (strncmp(sc->vmm_name, name, sizeof (sc->vmm_name)) == 0) {
 			break;
 		}
 	}
 
 	return (sc);
-
 }
 
 struct vm *
 vm_lookup_by_name(char *name)
 {
-	struct vmm_softc	*sc;
-
+#if 0
+	vmm_softc_t	*sc;
+	/*
+	 * XXXJOY: This is racy (since no hold is placed on the vm object) and
+	 * should be improved for the viona linkage.
+	 */
 	mutex_enter(&vmmdev_mtx);
 
 	if ((sc = vmm_lookup(name)) == NULL) {
@@ -1063,14 +1173,17 @@ vm_lookup_by_name(char *name)
 
 	mutex_exit(&vmmdev_mtx);
 
-	return (sc->vm);
+	return (sc->vmm_vm);
+#endif
+	return (NULL);
 }
 
 static int
-vmmdev_do_vm_destroy(dev_info_t *dip, char *name)
+vmmdev_do_vm_destroy(dev_info_t *dip, const char *name)
 {
-	struct vmm_softc	*sc;
-	dev_info_t		*pdip = ddi_get_parent(dip);
+	vmm_softc_t	*sc;
+	dev_info_t	*pdip = ddi_get_parent(dip);
+	minor_t		minor;
 
 	mutex_enter(&vmmdev_mtx);
 
@@ -1078,15 +1191,20 @@ vmmdev_do_vm_destroy(dev_info_t *dip, char *name)
 		mutex_exit(&vmmdev_mtx);
 		return (ENOENT);
 	}
-	if (sc->open) {
+	if (sc->vmm_is_open) {
 		mutex_exit(&vmmdev_mtx);
 		return (EBUSY);
 	}
 
-	vm_destroy(sc->vm);
-	SLIST_REMOVE(&head, sc, vmm_softc, link);
-	ddi_remove_minor_node(dip, name);
-	ddi_soft_state_free(vmm_statep, sc->minor);
+	/* Clean up devmem entries */
+	vmmdev_devmem_purge(sc);
+
+	vm_destroy(sc->vmm_vm);
+	list_remove(&vmmdev_list, sc);
+	ddi_remove_minor_node(dip, sc->vmm_name);
+	minor = sc->vmm_minor;
+	ddi_soft_state_free(vmm_statep, minor);
+	id_free(vmmdev_minors, minor);
 	(void) devfs_clean(pdip, NULL, DV_CLEAN_FORCE);
 	vmmdev_mod_decr();
 
@@ -1099,8 +1217,8 @@ vmmdev_do_vm_destroy(dev_info_t *dip, char *name)
 static int
 vmm_open(dev_t *devp, int flag, int otyp, cred_t *credp)
 {
-	minor_t			minor;
-	struct vmm_softc	*sc;
+	minor_t		minor;
+	vmm_softc_t	*sc;
 
 	minor = getminor(*devp);
 	if (minor == VMM_CTL_MINOR) {
@@ -1121,11 +1239,11 @@ vmm_open(dev_t *devp, int flag, int otyp, cred_t *credp)
 		return (ENXIO);
 	}
 
-	if (sc->open) {
+	if (sc->vmm_is_open) {
 		mutex_exit(&vmmdev_mtx);
 		return (EBUSY);
 	}
-	sc->open = B_TRUE;
+	sc->vmm_is_open = B_TRUE;
 	mutex_exit(&vmmdev_mtx);
 
 	return (0);
@@ -1134,8 +1252,8 @@ vmm_open(dev_t *devp, int flag, int otyp, cred_t *credp)
 static int
 vmm_close(dev_t dev, int flag, int otyp, cred_t *credp)
 {
-	minor_t			minor;
-	struct vmm_softc	*sc;
+	minor_t		minor;
+	vmm_softc_t	*sc;
 
 	minor = getminor(dev);
 	if (minor == VMM_CTL_MINOR)
@@ -1148,7 +1266,7 @@ vmm_close(dev_t dev, int flag, int otyp, cred_t *credp)
 		return (ENXIO);
 	}
 
-	sc->open = B_FALSE;
+	sc->vmm_is_open = B_FALSE;
 	mutex_exit(&vmmdev_mtx);
 
 	return (0);
@@ -1158,7 +1276,7 @@ static int
 vmm_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
     int *rvalp)
 {
-	struct vmm_softc	*sc;
+	vmm_softc_t	*sc;
 	struct vmm_ioctl	kvi;
 	minor_t			minor;
 
@@ -1193,32 +1311,56 @@ static int
 vmm_segmap(dev_t dev, off_t off, struct as *as, caddr_t *addrp, off_t len,
     unsigned int prot, unsigned int maxprot, unsigned int flags, cred_t *credp)
 {
-	struct segdev_crargs	dev_a;
-	int			error;
+	vmm_softc_t *sc;
+	const minor_t minor = getminor(dev);
+	struct vm *vm;
+	int err;
+	vm_object_t vmo = NULL;
+	struct vmspace *vms;
 
-	as_rangelock(as);
-
-	error = choose_addr(as, addrp, len, off, ADDR_VACALIGN, flags);
-	if (error != 0) {
-		as_rangeunlock(as);
-		return (error);
+	if (minor == VMM_CTL_MINOR) {
+		return (ENODEV);
+	}
+	if (off < 0 || (off + len) <= 0) {
+		return (EINVAL);
+	}
+	if ((prot & PROT_USER) == 0) {
+		return (EACCES);
 	}
 
-	dev_a.mapfunc = NULL; /* XXXJOY: fix this to do proper mapping */
-	dev_a.dev = dev;
-	dev_a.offset = off;
-	dev_a.type = (flags & MAP_TYPE);
-	dev_a.prot = (uchar_t)prot;
-	dev_a.maxprot = (uchar_t)maxprot;
-	dev_a.hat_attr = 0;
-	dev_a.hat_flags = HAT_LOAD_NOCONSIST;
-	dev_a.devmap_data = NULL;
+	sc = ddi_get_soft_state(vmm_statep, minor);
+	ASSERT(sc);
 
-	error = as_map(as, *addrp, len, segdev_create, &dev_a);
+	/* Get a read lock on the guest memory map by freezing any vcpu. */
+	if ((err = vcpu_lock_all(sc)) != 0) {
+		return (err);
+	}
 
-	as_rangeunlock(as);
+	vm = sc->vmm_vm;
+	vms = vm_get_vmspace(vm);
+	if (off >= VM_DEVMEM_START) {
+		int segid;
 
-	return (error);
+		/* Mapping a devmem "device" */
+		if (!vmmdev_devmem_segid(sc, off, len, &segid)) {
+			err = ENODEV;
+			goto out;
+		}
+		err = vm_get_memseg(vm, segid, NULL, NULL, &vmo);
+		if (err != 0) {
+			goto out;
+		}
+		err = vm_segmap_obj(vms, vmo, as, addrp, prot, maxprot, flags);
+	} else {
+		/* Mapping a part of the guest physical space */
+		err = vm_segmap_space(vms, off, as, addrp, len, prot, maxprot,
+		    flags);
+	}
+
+
+out:
+	vcpu_unlock_all(sc);
+	return (err);
 }
 
 static int
@@ -1245,6 +1387,9 @@ vmm_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 
 	ddi_report_dev(dip);
 
+	/* XXX: This needs updating */
+	vmm_arena_init();
+
 	return (DDI_SUCCESS);
 }
 
@@ -1260,11 +1405,16 @@ vmm_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 
 	/* Ensure that all resources have been cleaned up */
 	mutex_enter(&vmmdev_mtx);
-	if (!SLIST_EMPTY(&head) || vmmdev_inst_count != 0) {
+	if (!list_is_empty(&vmmdev_list) || vmmdev_inst_count != 0) {
 		mutex_exit(&vmmdev_mtx);
 		return (DDI_FAILURE);
 	}
 	mutex_exit(&vmmdev_mtx);
+
+	/* XXX: This needs updating */
+	if (!vmm_arena_fini()) {
+		return (DDI_FAILURE);
+	}
 
 	/* Remove the control node. */
 	ddi_remove_minor_node(dip, VMM_CTL_MINOR_NODE);
@@ -1323,8 +1473,12 @@ _init(void)
 	int	error;
 
 	mutex_init(&vmmdev_mtx, NULL, MUTEX_DRIVER, NULL);
+	list_create(&vmmdev_list, sizeof (vmm_softc_t),
+	    offsetof(vmm_softc_t, vmm_node));
+	vmmdev_minors = id_space_create("vmm_minors", VMM_CTL_MINOR + 1,
+	    MAXMIN32);
 
-	error = ddi_soft_state_init(&vmm_statep, sizeof (struct vmm_softc), 0);
+	error = ddi_soft_state_init(&vmm_statep, sizeof (vmm_softc_t), 0);
 	if (error) {
 		return (error);
 	}

@@ -428,6 +428,21 @@ vmcs_init(struct vmcs *vmcs)
 	if ((error = vmwrite(VMCS_HOST_IDTR_BASE, idtrbase)) != 0)
 		goto done;
 
+#ifndef	__FreeBSD__
+
+	if ((error = vmwrite(VMCS_HOST_IA32_SYSENTER_CS, KCS_SEL)) != 0)
+		goto done;
+	/* Natively defined as MSR_INTC_SEP_ESP */
+	if ((error = vmwrite(VMCS_HOST_IA32_SYSENTER_ESP,
+	    rdmsr(MSR_SYSENTER_ESP_MSR))) != 0)
+		goto done;
+	/* Natively defined as MSR_INTC_SEP_EIP */
+	if ((error = vmwrite(VMCS_HOST_IA32_SYSENTER_EIP,
+	    rdmsr(MSR_SYSENTER_EIP_MSR))) != 0)
+		goto done;
+
+#endif /* __FreeBSD__ */
+
 	/* instruction pointer */
 	if ((error = vmwrite(VMCS_HOST_RIP, (u_long)vmx_exit_guest)) != 0)
 		goto done;

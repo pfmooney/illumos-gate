@@ -233,6 +233,13 @@ struct vm_rtc_data {
 	uint8_t		value;
 };
 
+#ifndef __FreeBSD__
+struct vm_devmem_offset {
+	int		segid;
+	off_t		offset;
+};
+#endif
+
 enum {
 	/* general routines */
 	IOCNUM_ABIVERS = 0,
@@ -303,6 +310,11 @@ enum {
 	IOCNUM_RTC_WRITE = 101,
 	IOCNUM_RTC_SETTIME = 102,
 	IOCNUM_RTC_GETTIME = 103,
+
+#ifndef __FreeBSD__
+	/* illumos-custom ioctls */
+	IOCNUM_DEVMEM_GETOFFSET = 256,
+#endif
 };
 
 #define	VM_RUN		\
@@ -399,4 +411,10 @@ enum {
 	_IOR('v', IOCNUM_RTC_GETTIME, struct vm_rtc_time)
 #define	VM_RESTART_INSTRUCTION \
 	_IOW('v', IOCNUM_RESTART_INSTRUCTION, int)
+
+#ifndef __FreeBSD__
+#define	VM_DEVMEM_GETOFFSET \
+	_IOW('v', IOCNUM_DEVMEM_GETOFFSET, struct vm_devmem_offset)
+#endif
+
 #endif

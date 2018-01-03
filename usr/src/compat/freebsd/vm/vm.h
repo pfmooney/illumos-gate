@@ -33,12 +33,8 @@ typedef u_char vm_prot_t;
 #define	VM_PROT_ALL		(VM_PROT_READ|VM_PROT_WRITE|VM_PROT_EXECUTE)
 #define	VM_PROT_RW		(VM_PROT_READ|VM_PROT_WRITE)
 
-/*
- * So long as page manipulation remains opaque, handled by glue functions
- * provided by us, it will remain save to refer to the native page type here.
- */
-struct page;
-typedef struct page *vm_page_t;
+struct vm_page;
+typedef struct vm_page *vm_page_t;
 
 enum obj_type { OBJT_DEFAULT, OBJT_SWAP, OBJT_VNODE, OBJT_DEVICE, OBJT_PHYS,
     OBJT_DEAD, OBJT_SG, OBJT_MGTDEVICE };

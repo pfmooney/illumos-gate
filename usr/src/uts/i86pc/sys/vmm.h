@@ -688,11 +688,13 @@ int vm_restart_instruction(void *vm, int vcpuid);
 
 #ifndef	__FreeBSD__
 #ifdef	_KERNEL
-extern void vmm_sol_glue_init(void);
-extern void vmm_sol_glue_cleanup(void);
 
-extern int vmm_mod_load(void);
-extern int vmm_mod_unload(void);
+void vmm_sol_glue_init(void);
+void vmm_sol_glue_cleanup(void);
+
+int vmm_mod_load(void);
+int vmm_mod_unload(void);
+
 #endif
 #endif
 

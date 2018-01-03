@@ -563,6 +563,7 @@ vm_create_devmem(struct vmctx *ctx, int segid, const char *name, size_t len)
 	size_t len2;
 	char *base, *ptr;
 	int fd, error, flags;
+	off_t mapoff;
 
 	fd = -1;
 	ptr = MAP_FAILED;
@@ -577,9 +578,6 @@ vm_create_devmem(struct vmctx *ctx, int segid, const char *name, size_t len)
 
 #ifdef	__FreeBSD__
 	strlcpy(pathname, "/dev/vmm.io/", sizeof(pathname));
-#else
-	strlcpy(pathname, "/devicese/pseudo/vmm@0:io/", sizeof(pathname));
-#endif
 	strlcat(pathname, ctx->name, sizeof(pathname));
 	strlcat(pathname, ".", sizeof(pathname));
 	strlcat(pathname, name, sizeof(pathname));
@@ -587,6 +585,19 @@ vm_create_devmem(struct vmctx *ctx, int segid, const char *name, size_t len)
 	fd = open(pathname, O_RDWR);
 	if (fd < 0)
 		goto done;
+#else
+	{
+		struct vm_devmem_offset vdo;
+
+		vdo.segid = segid;
+		error = ioctl(ctx->fd, VM_DEVMEM_GETOFFSET, &vdo);
+		if (error == 0) {
+			mapoff = vdo.offset;
+		} else {
+			goto done;
+		}
+	}
+#endif
 
 	/*
 	 * Stake out a contiguous region covering the device memory and the
@@ -602,8 +613,14 @@ vm_create_devmem(struct vmctx *ctx, int segid, const char *name, size_t len)
 	if ((ctx->memflags & VM_MEM_F_INCORE) == 0)
 		flags |= MAP_NOCORE;
 
+#ifdef	__FreeBSD__
 	/* mmap the devmem region in the host address space */
 	ptr = mmap(base + VM_MMAP_GUARD_SIZE, len, PROT_RW, flags, fd, 0);
+#else
+	/* mmap the devmem region in the host address space */
+	ptr = mmap(base + VM_MMAP_GUARD_SIZE, len, PROT_RW, flags, ctx->fd,
+	    mapoff);
+#endif
 done:
 	if (fd >= 0)
 		close(fd);

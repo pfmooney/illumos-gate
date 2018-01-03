@@ -76,6 +76,8 @@
 #include <sys/systm.h>
 #include <sys/ddidmareq.h>
 #include <sys/id_space.h>
+#include <sys/psm_defs.h>
+#include <sys/smp_impldefs.h>
 
 #include <machine/cpufunc.h>
 #include <machine/fpu.h>
@@ -346,8 +348,16 @@ vmm_glue_callout_init(struct callout *c, int mpsafe)
 	when.cyt_interval = CY_INFINITY;
 
 	mutex_enter(&cpu_lock);
-	c->c_cyc_id = cyclic_add(&hdlr, &when);
+#if 0
+	/*
+	 * XXXJOY: according to the freebsd sources, callouts do not begin
+	 * their life in the ACTIVE state.
+	 */
 	c->c_flags |= CALLOUT_ACTIVE;
+#else
+	bzero(c, sizeof (*c));
+#endif
+	c->c_cyc_id = cyclic_add(&hdlr, &when);
 	mutex_exit(&cpu_lock);
 }
 
@@ -370,10 +380,11 @@ vmm_glue_callout_reset_sbt(struct callout *c, sbintime_t sbt, sbintime_t pr,
 	c->c_arg = arg;
 	c->c_flags |= (CALLOUT_ACTIVE | CALLOUT_PENDING);
 
-	if (flags & C_ABSOLUTE)
+	if (flags & C_ABSOLUTE) {
 		cyclic_reprogram(c->c_cyc_id, target);
-	else
+	} else {
 		cyclic_reprogram(c->c_cyc_id, target + gethrtime());
+	}
 
 	return (0);
 }
@@ -401,19 +412,16 @@ vmm_glue_callout_drain(struct callout *c)
 	return (0);
 }
 
-static int
-ipi_cpu_justreturn(xc_arg_t a1, xc_arg_t a2, xc_arg_t a3)
-{
-	return (0);
-}
-
 void
 ipi_cpu(int cpu, u_int ipi)
 {
-	cpuset_t	set;
-
-	CPUSET_ONLY(set, cpu);
-	xc_call_nowait(NULL, NULL, NULL, CPUSET2BV(set), ipi_cpu_justreturn);
+	/*
+	 * This was previously implemented as an invocation of asynchronous
+	 * no-op crosscalls to interrupt the target CPU.  Since even nowait
+	 * crosscalls can block in certain circumstances, a direct poke_cpu()
+	 * is safer when called from delicate contexts.
+	 */
+	poke_cpu(cpu);
 }
 
 #define	SC_TABLESIZE	256			/* Must be power of 2. */
@@ -811,6 +819,39 @@ vmm_sol_glue_cleanup(void)
 	fpu_save_area_cleanup();
 	kmem_cache_destroy(vmm_sleepq_cache);
 }
+
+int idtvec_justreturn;
+
+int
+lapic_ipi_alloc(int *id)
+{
+	/* Only poke_cpu() equivalent is supported */
+	VERIFY(id == &idtvec_justreturn);
+
+	/*
+	 * This is only used by VMX to allocate a do-nothing vector for
+	 * interrupting other running CPUs.  The cached poke_cpu() vector
+	 * as an "allocation" is perfect for this.
+	 */
+	if (psm_cached_ipivect != NULL) {
+		return (psm_cached_ipivect(XC_CPUPOKE_PIL, PSM_INTR_POKE));
+	}
+
+	return (-1);
+}
+
+void
+lapic_ipi_free(int vec)
+{
+	VERIFY(vec > 0);
+
+	/*
+	 * A cached vector was used in the first place.
+	 * No deallocation is necessary
+	 */
+	return;
+}
+
 
 /* From FreeBSD's sys/kern/subr_clock.c */
 

@@ -22,5 +22,20 @@
 #undef	XFEATURE_AVX512
 #endif
 
+#ifdef _SYS_CONTROLREGS_H
+/* Our CR4 defines conflict with BSD header */
+#undef	CR4_VME
+#undef	CR4_PVI
+#undef	CR4_TSD
+#undef	CR4_DE
+#undef	CR4_PSE
+#undef	CR4_PAE
+#undef	CR4_MCE
+#undef	CR4_PGE
+#undef	CR4_PCE
+#undef	CR4_VMXE
+#undef	CR4_SMEP
+#endif /* _SYS_CONTROLREGS_H */
+
 #include <x86/specialreg.h>
 #endif /* _COMPAT_FREEBSD_AMD64_MACHINE_SPECIALREG_H_ */

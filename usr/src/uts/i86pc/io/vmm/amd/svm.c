@@ -314,7 +314,7 @@ svm_msr_index(uint64_t msr, int *index, int *bit)
 	*bit = (msr % 4) * 2;
 	base = 0;
 
-	if (msr >= MSR_PENTIUM_START && msr <= MSR_PENTIUM_END) {
+	if (msr <= MSR_PENTIUM_END) {
 		*index = msr / 4;
 		return (0);
 	}
@@ -859,7 +859,7 @@ svm_handle_inst_emul(struct vmcb *vmcb, uint64_t gpa, struct vm_exit *vmexit)
 	 */
 	if (decode_assist() && !disable_npf_assist) {
 		inst_len = ctrl->inst_len;
-		inst_bytes = ctrl->inst_bytes;
+		inst_bytes = (char *)ctrl->inst_bytes;
 	} else {
 		inst_len = 0;
 		inst_bytes = NULL;

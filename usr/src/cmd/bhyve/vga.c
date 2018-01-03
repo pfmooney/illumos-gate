@@ -917,8 +917,13 @@ vga_port_in_handler(struct vmctx *ctx, int in, int port, int bytes,
 	case GEN_INPUT_STS1_MONO_PORT:
 	case GEN_INPUT_STS1_COLOR_PORT:
 		sc->vga_atc.atc_flipflop = 0;
+#ifdef __FreeBSD__
 		sc->vga_sts1 = GEN_IS1_VR | GEN_IS1_DE;
 		//sc->vga_sts1 ^= (GEN_IS1_VR | GEN_IS1_DE);
+#else
+		/* XXXJOY: Something apparently wants to see this toggled */
+		sc->vga_sts1 ^= (GEN_IS1_VR | GEN_IS1_DE);
+#endif
 		*val = sc->vga_sts1;
 		break;
 	case GEN_FEATURE_CTRL_PORT:

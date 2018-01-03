@@ -32,9 +32,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/malloc.h>
-#ifdef __FreeBSD__
 #include <sys/sglist.h>
-#endif
 #include <sys/lock.h>
 #include <sys/rwlock.h>
 
@@ -44,9 +42,7 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm_map.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
-#ifdef __FreeBSD__
 #include <vm/vm_pager.h>
-#endif
 
 #include <machine/md_var.h>
 
@@ -63,7 +59,6 @@ vm_object_t
 vmm_mmio_alloc(struct vmspace *vmspace, vm_paddr_t gpa, size_t len,
 	       vm_paddr_t hpa)
 {
-#ifdef __FreeBSD__
 	int error;
 	vm_object_t obj;
 	struct sglist *sg;
@@ -110,10 +105,6 @@ vmm_mmio_alloc(struct vmspace *vmspace, vm_paddr_t gpa, size_t len,
 	sglist_free(sg);
 
 	return (obj);
-#else /* __FreeBSD__ */
-	/* XXXJOY: Disabled until the VM shim is complete */
-	return (NULL);
-#endif /* __FreeBSD__ */
 }
 
 void

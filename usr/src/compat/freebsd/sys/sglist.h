@@ -13,16 +13,17 @@
  * Copyright 2017 Joyent, Inc.
  */
 
+#ifndef _COMPAT_FREEBSD_SYS_SGLIST_H_
+#define	_COMPAT_FREEBSD_SYS_SGLIST_H_
 
-#ifndef	_VM_PAGE_
-#define	_VM_PAGE_
+#ifdef _KERNEL
 
-#include "vm_glue.h"
+struct sglist;
 
-void vm_page_lock(vm_page_t);
-void vm_page_unhold(vm_page_t);
-void vm_page_unlock(vm_page_t);
+struct sglist *sglist_alloc(int, int);
+void sglist_free(struct sglist *);
+int sglist_append_phys(struct sglist *, vm_paddr_t, size_t);
 
-#define	VM_PAGE_TO_PHYS(page)	(mmu_ptob((uintptr_t)((page)->vmp_pfn)))
+#endif /* _KERNEL */
 
-#endif /* _VM_PAGE_ */
+#endif	/* _COMPAT_FREEBSD_SYS_SGLIST_H_ */

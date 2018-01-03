@@ -42,13 +42,33 @@ struct vmm_ioctl {
 };
 
 #ifdef	_KERNEL
-struct vmm_softc {
-	boolean_t			open;
-	minor_t				minor;
-	struct vm			*vm;
-	char				name[VM_MAX_NAMELEN];
-	SLIST_ENTRY(vmm_softc)		link;
+
+/*
+ * Rather than creating whole character devices for devmem mappings, they are
+ * available by mmap(2)ing the vmm handle at a specific offset.  These offsets
+ * begin just above the maximum allow guest physical address.
+ */
+#include <vm/vm_param.h>
+#define	VM_DEVMEM_START	(VM_MAXUSER_ADDRESS + 1)
+
+struct vmm_devmem_entry {
+	list_node_t	vde_node;
+	int		vde_segid;
+	char		vde_name[SPECNAMELEN + 1];
+	size_t		vde_len;
+	off_t		vde_off;
 };
+typedef struct vmm_devmem_entry vmm_devmem_entry_t;
+
+struct vmm_softc {
+	list_node_t	vmm_node;
+	struct vm	*vmm_vm;
+	minor_t		vmm_minor;
+	char		vmm_name[VM_MAX_NAMELEN];
+	boolean_t	vmm_is_open;
+	list_t		vmm_devmem_list;
+};
+typedef struct vmm_softc vmm_softc_t;
 #endif
 
 /*

@@ -18,6 +18,7 @@
 
 #include "intel/vmx_cpufunc.h"
 #include "intel/vmx.h"
+#include "vm/vm_glue.h"
 
 vmxctx
 	guest_rdi		VMXCTX_GUEST_RDI
@@ -49,6 +50,13 @@ vmxctx
 vmx
 	eptgen		VMX_EPTGEN
 	eptp		VMX_EPTP
+
+pmap
+	pm_active	PM_ACTIVE
+	pm_eptgen	PM_EPTGEN
+
+cpu
+	cpu_id
 
 \#define	VM_SUCCESS		0
 \#define	VM_FAIL_INVALID		1

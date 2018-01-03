@@ -5203,6 +5203,7 @@ f usr/lib/devfsadm/linkmod/SUNW_sgen_link.so 0755 root sys
 f usr/lib/devfsadm/linkmod/SUNW_smp_link.so 0755 root sys
 f usr/lib/devfsadm/linkmod/SUNW_tape_link.so 0755 root sys
 f usr/lib/devfsadm/linkmod/SUNW_usb_link.so 0755 root sys
+f usr/lib/devfsadm/linkmod/SUNW_viona_link_i386.so 0755 root sys
 f usr/lib/devfsadm/linkmod/SUNW_vscan_link.so 0755 root sys
 f usr/lib/devfsadm/linkmod/SUNW_xen_link.so 0755 root sys
 f usr/lib/devfsadm/linkmod/SUNW_zfs_link.so 0755 root sys

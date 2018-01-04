@@ -39,6 +39,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/ioctl.h>
 #include <sys/disk.h>
 #include <sys/limits.h>
+#include <sys/uio.h>
 
 #include <assert.h>
 #include <err.h>

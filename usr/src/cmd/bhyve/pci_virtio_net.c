@@ -350,7 +350,6 @@ pci_vtnet_tap_rx(struct pci_vtnet_softc *sc)
 	int len;
 #else
 	size_t len;
-	uint8_t *buf;
 	int ret;
 #endif
 	uint16_t idx;
@@ -405,18 +404,20 @@ pci_vtnet_tap_rx(struct pci_vtnet_softc *sc)
 		 * Get a pointer to the rx header, and use the
 		 * data immediately following it for the packet buffer.
 		 */
+		vrx = iov[0].iov_base;
 		riov = rx_iov_trim(iov, &n, sc->rx_vhdrlen);
 #ifdef	__FreeBSD__
 		len = readv(sc->vsc_tapfd, riov, n);
-
-		if (len < 0 && errno == EWOULDBLOCK) {
 #else
-		vrx = iov[0].iov_base;
-		buf = (uint8_t *)(vrx + 1);
-		ret = dlpi_recv(sc->vsc_dhp, NULL, NULL, buf,
-		    &len, 0, NULL);
+		len = riov[0].iov_len;
+		ret = dlpi_recv(sc->vsc_dhp, NULL, NULL,
+		    (uint8_t *)riov[0].iov_base, &len, 0, NULL);
 		if (ret != DLPI_SUCCESS) {
+			errno = EWOULDBLOCK;
+			len = 0;
+		}
 #endif
+		if (len <= 0 && errno == EWOULDBLOCK) {
 			/*
 			 * No more packets, but still some avail ring
 			 * entries.  Interrupt if needed/appropriate.
@@ -679,7 +680,9 @@ pci_vtnet_poll_thread(void *param)
 			continue;
 		}
 		pthread_mutex_lock(&sc->vsc_mtx);
+		sc->rx_in_progress = 1;
 		pci_vtnet_tap_rx(sc);
+		sc->rx_in_progress = 0;
 		pthread_mutex_unlock(&sc->vsc_mtx);
 	}
 

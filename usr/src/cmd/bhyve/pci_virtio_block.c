@@ -181,9 +181,8 @@ pci_vtblk_reset(void *vsc)
 }
 
 static void
-pci_vtblk_done(struct blockif_req *br, int err)
+pci_vtblk_done_locked(struct pci_vtblk_ioreq *io, int err)
 {
-	struct pci_vtblk_ioreq *io = br->br_param;
 	struct pci_vtblk_softc *sc = io->io_sc;
 
 	/* convert errno into a virtio block error return */
@@ -198,9 +197,18 @@ pci_vtblk_done(struct blockif_req *br, int err)
 	 * Return the descriptor back to the host.
 	 * We wrote 1 byte (our status) to host.
 	 */
-	pthread_mutex_lock(&sc->vsc_mtx);
 	vq_relchain(&sc->vbsc_vq, io->io_idx, 1);
 	vq_endchains(&sc->vbsc_vq, 0);
+}
+
+static void
+pci_vtblk_done(struct blockif_req *br, int err)
+{
+	struct pci_vtblk_ioreq *io = br->br_param;
+	struct pci_vtblk_softc *sc = io->io_sc;
+
+	pthread_mutex_lock(&sc->vsc_mtx);
+	pci_vtblk_done_locked(io, err);
 	pthread_mutex_unlock(&sc->vsc_mtx);
 }
 
@@ -281,10 +289,10 @@ pci_vtblk_proc(struct pci_vtblk_softc *sc, struct vqueue_info *vq)
 		memset(iov[1].iov_base, 0, iov[1].iov_len);
 		strncpy(iov[1].iov_base, sc->vbsc_ident,
 		    MIN(iov[1].iov_len, sizeof(sc->vbsc_ident)));
-		pci_vtblk_done(&io->io_req, 0);
+		pci_vtblk_done_locked(io, 0);
 		return;
 	default:
-		pci_vtblk_done(&io->io_req, EOPNOTSUPP);
+		pci_vtblk_done_locked(io, EOPNOTSUPP);
 		return;
 	}
 	assert(err == 0);

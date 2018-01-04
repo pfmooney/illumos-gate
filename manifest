@@ -731,6 +731,7 @@ f kernel/drv/amd64/urf 0755 root sys
 f kernel/drv/amd64/vgatext 0755 root sys
 f kernel/drv/amd64/vioblk 0755 root sys
 f kernel/drv/amd64/vioif 0755 root sys
+f kernel/drv/amd64/vmm 0755 root sys
 f kernel/drv/amd64/vmxnet 0755 root sys
 f kernel/drv/amd64/vmxnet3s 0755 root sys
 f kernel/drv/amd64/vnd 0755 root sys
@@ -864,6 +865,7 @@ f kernel/drv/uhci.conf 0644 root sys
 f kernel/drv/usbftdi.conf 0644 root sys
 f kernel/drv/usbser_edge.conf 0644 root sys
 f kernel/drv/usbskel.conf 0644 root sys
+f kernel/drv/vmm.conf 0644 root sys
 f kernel/drv/vmxnet.conf 0644 root sys
 f kernel/drv/vmxnet3s.conf 0644 root sys
 f kernel/drv/vnd.conf 0644 root sys
@@ -4586,7 +4588,6 @@ f usr/kernel/drv/amd64/sppp 0755 root sys
 f usr/kernel/drv/amd64/sppptun 0755 root sys
 f usr/kernel/drv/amd64/timerfd 0755 root sys
 f usr/kernel/drv/amd64/viona 0755 root sys
-f usr/kernel/drv/amd64/vmm 0755 root sys
 f usr/kernel/drv/amd64/zcons 0755 root sys
 f usr/kernel/drv/amd64/zfd 0755 root sys
 f usr/kernel/drv/bpf.conf 0644 root sys
@@ -4613,7 +4614,6 @@ f usr/kernel/drv/sppp.conf 0644 root sys
 f usr/kernel/drv/sppptun.conf 0644 root sys
 f usr/kernel/drv/timerfd.conf 0644 root sys
 f usr/kernel/drv/viona.conf 0644 root sys
-f usr/kernel/drv/vmm.conf 0644 root sys
 d usr/kernel/fs 0755 root sys
 d usr/kernel/fs/amd64 0755 root sys
 f usr/kernel/fs/amd64/fdfs 0755 root sys

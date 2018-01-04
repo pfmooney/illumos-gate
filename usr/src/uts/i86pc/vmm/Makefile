@@ -11,7 +11,7 @@
 
 #
 # Copyright 2013 Pluribus Networks Inc.
-# Copyright 2017 Joyent, Inc.
+# Copyright 2018 Joyent, Inc.
 #
 
 #
@@ -25,7 +25,7 @@ UTSBASE	= ../..
 MODULE		= vmm
 OBJECTS		= $(VMM_OBJS:%=$(OBJS_DIR)/%)
 LINTS		= $(VMM_OBJS:%.o=$(LINTS_DIR)/%.ln)
-ROOTMODULE	= $(USR_DRV_DIR)/$(MODULE)
+ROOTMODULE	= $(ROOT_DRV_DIR)/$(MODULE)
 CONF_SRCDIR	= $(UTSBASE)/i86pc/io/vmm
 
 #

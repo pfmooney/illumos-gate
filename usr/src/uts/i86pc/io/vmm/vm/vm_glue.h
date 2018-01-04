@@ -73,6 +73,7 @@ int vm_segmap_obj(struct vmspace *, vm_object_t, struct as *, caddr_t *,
     uint_t, uint_t, uint_t);
 int vm_segmap_space(struct vmspace *, off_t , struct as *, caddr_t *, off_t,
     uint_t, uint_t, uint_t);
+void *vmspace_find_kva(struct vmspace *, uintptr_t, size_t);
 void vmm_arena_init(void);
 boolean_t vmm_arena_fini(void);
 

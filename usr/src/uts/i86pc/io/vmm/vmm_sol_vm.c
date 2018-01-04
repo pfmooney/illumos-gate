@@ -207,6 +207,31 @@ vmspace_resident_count(struct vmspace *vms)
 	return (0);
 }
 
+void *
+vmspace_find_kva(struct vmspace *vms, uintptr_t addr, size_t size)
+{
+	vmspace_mapping_t *vmsm;
+	void *result = NULL;
+
+	mutex_enter(&vms->vms_lock);
+	vmsm = vm_mapping_find(vms, addr, size);
+	if (vmsm != NULL) {
+		struct vm_object *vmo = vmsm->vmsm_object;
+
+		switch (vmo->vmo_type) {
+		case OBJT_DEFAULT:
+			result = (void *)((uintptr_t)vmo->vmo_data +
+			    VMSM_OFFSET(vmsm, addr));
+			break;
+		default:
+			break;
+		}
+	}
+	mutex_exit(&vms->vms_lock);
+
+	return (result);
+}
+
 static int
 vmspace_pmap_wire(struct vmspace *vms, uintptr_t addr, pfn_t pfn, uint_t lvl,
     uint_t prot, vm_memattr_t attr)

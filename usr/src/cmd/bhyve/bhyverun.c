@@ -128,6 +128,7 @@ int bcons_wait = 0;
 int bcons_connected = 0;
 pthread_mutex_t bcons_wait_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t bcons_wait_done = PTHREAD_COND_INITIALIZER;
+void (*vm_started_cb)(void) = NULL;
 #endif
 
 static cpuset_t cpumask;
@@ -880,9 +881,9 @@ main(int argc, char *argv[])
 	memflags = 0;
 
 #ifdef	__FreeBSD__
-	optstr = "abehuwxACHIPSWYp:g:c:s:m:l:U:";
+	optstr = "abehuwxACHIPSWYp:g:c:s:m:l:B:U:";
 #else
-	optstr = "abehuwxACHIPSWYg:c:s:m:l:U:";
+	optstr = "abehuwxACHIPSWYg:c:s:m:l:B:U:";
 #endif
 	while ((c = getopt(argc, argv, optstr)) != -1) {
 		switch (c) {
@@ -894,6 +895,12 @@ main(int argc, char *argv[])
 			break;
 		case 'b':
 			bvmcons = 1;
+			break;
+		case 'B':
+			if (smbios_parse(optarg) != 0) {
+				errx(EX_USAGE, "invalid SMBIOS "
+				    "configuration '%s'", optarg);
+			}
 			break;
 #ifdef	__FreeBSD__
 		case 'p':
@@ -1106,6 +1113,10 @@ main(int argc, char *argv[])
 #ifdef	__FreeBSD__
 	mevent_dispatch();
 #else
+	if (vm_started_cb != NULL) {
+		vm_started_cb();
+	}
+
 	pthread_exit(NULL);
 #endif
 

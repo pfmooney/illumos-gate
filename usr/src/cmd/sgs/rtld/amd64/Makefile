@@ -21,6 +21,7 @@
 
 #
 # Copyright (c) 2004, 2010, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2018, Joyent, Inc.
 #
 
 BASEPLAT =	amd64
@@ -70,6 +71,7 @@ ADBSUB=		$(ADBSUB64)
 CPPFLAGS +=	-D_ELF64
 LINTFLAGS64 +=	$(VAR_LINTFLAGS64)
 SONAME=		/lib/amd64/ld.so.1
+BHYVEROOTLIBDIR64= $(ROOT)/lib/brand/bhyve/root/lib/$(MACH64)
 
 SGSMSGTARG +=	$(SGSMSGINTEL) $(SGSMSGINTEL64) $(SGSMSG64)
 
@@ -84,7 +86,7 @@ CONVLIBDIR =	$(CONVLIBDIR64)
 
 all:		$(RTLD)
 
-install:	all $(ROOTDYNLIB64)
+install:	all $(ROOTDYNLIB64) $(BHYVEROOTLIBS64)
 
 lint:		$(LINTOUT64)
 

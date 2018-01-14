@@ -108,7 +108,7 @@ struct vmctx {
 static int
 vm_do_ctl(int cmd, const char *name)
 {
-	const char vmm_ctl[] = "/devices/pseudo/vmm@0:ctl";
+	const char vmm_ctl[] = "/dev/vmm/ctl";
 	int ctl_fd;
 
 	ctl_fd = open(vmm_ctl, O_EXCL | O_RDWR);
@@ -136,18 +136,10 @@ vm_device_open(const char *name)
         int fd, len;
         char *vmfile;
 
-#ifdef	__FreeBSD__
 	len = strlen("/dev/vmm/") + strlen(name) + 1;
-#else
-	len = strlen("/devices/pseudo/vmm@0:") + strlen(name) + 1;
-#endif
 	vmfile = malloc(len);
 	assert(vmfile != NULL);
-#ifdef	__FreeBSD__
 	snprintf(vmfile, len, "/dev/vmm/%s", name);
-#else
-	snprintf(vmfile, len, "/devices/pseudo/vmm@0:%s", name);
-#endif
 
         /* Open the device file */
         fd = open(vmfile, O_RDWR, 0);

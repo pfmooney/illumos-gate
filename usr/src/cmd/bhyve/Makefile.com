@@ -11,6 +11,7 @@
 
 #
 # Copyright 2015 Pluribus Networks Inc.
+# Copyright (c) 2018, Joyent, Inc.
 #
 
 PROG= bhyve
@@ -60,7 +61,8 @@ SRCS =	acpi.c			\
 	vmm_instruction_emul.c	\
 	xmsr.c			\
 	spinup_ap.c		\
-	bhyve_sol_glue.c
+	bhyve_sol_glue.c	\
+	zhyve.c
 
 OBJS = $(SRCS:.c=.o)
 
@@ -82,9 +84,12 @@ CPPFLAGS =	-I$(COMPAT)/freebsd -I$(CONTRIB)/freebsd \
 		-I$(SRC)/uts/i86pc \
 		-I$(SRC)/lib/libdladm/common \
 		-DWITHOUT_CAPSICUM
-LDLIBS +=	-lsocket -lnsl -ldlpi -ldladm -lkstat -lmd -luuid -lvmmapi -lz
+LDLIBS +=	-lsocket -lnsl -ldlpi -ldladm -lmd -luuid -lvmmapi -lz -lnvpair
 
 POST_PROCESS += ; $(GENSETDEFS) $@
+
+# Real main is in zhyve.c
+bhyverun.o :=	CPPFLAGS += -Dmain=bhyve_main
 
 all: $(PROG)
 

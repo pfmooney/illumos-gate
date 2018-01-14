@@ -98,6 +98,12 @@ ROOTUSRSBIN32=	$(ROOTUSRSBIN)/$(MACH32)
 ROOTUSRSBIN64=	$(ROOTUSRSBIN)/$(MACH64)
 ROOTVARSMB=	$(ROOT)/var/smb
 
+#
+# There is no need to maintain the $(MACH) directories in the bhyve brand's
+# alternate root.  All executables should be 64-bit.  32-bit libs are not
+# installed there.
+#
+BHYVEUSRSBIN=	$(ROOT)/usr/lib/brand/bhyve/root/usr/sbin
 
 #
 # Like ROOTLIBDIR in $(SRC)/Makefile.lib, any lower-level Makefiles that

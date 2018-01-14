@@ -21,9 +21,11 @@
 
 #
 # Copyright (c) 1994, 2010, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2018, Joyent, Inc.
 #
 
 RTLD=		ld.so.1
+BHYVELIBS=	$(RTLD)
 
 AVLOBJ=		avl.o
 DTROBJ=		dtrace_data.o

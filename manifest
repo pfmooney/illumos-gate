@@ -10288,7 +10288,6 @@ h usr/sbin/audlinks=usr/sbin/devfsadm
 s usr/sbin/automount=../lib/fs/autofs/automount
 s usr/sbin/autopush=../../sbin/autopush
 h usr/sbin/bhyve=usr/lib/isaexec
-f usr/sbin/bhyveconsole 0555 root bin
 h usr/sbin/bhyvectl=usr/lib/isaexec
 f usr/sbin/cfgadm 0555 root bin
 f usr/sbin/check-hostname 0555 root mail
@@ -10358,7 +10357,6 @@ s usr/sbin/hostconfig=../../sbin/hostconfig
 f usr/sbin/hotplug 0555 root bin
 f usr/sbin/iasl 0555 root bin
 d usr/sbin/i86 0755 root bin
-f usr/sbin/i86/bhyveconsole 0555 root bin
 f usr/sbin/idmap 0555 root bin
 f usr/sbin/if_mpadm 0555 root bin
 s usr/sbin/ifconfig=../../sbin/ifconfig

@@ -1244,7 +1244,7 @@ vmm_lookup(const char *name)
 }
 
 static int
-vmmdev_do_vm_create(dev_info_t *dip, char *name)
+vmmdev_do_vm_create(char *name, cred_t *cr)
 {
 	vmm_softc_t	*sc = NULL;
 	minor_t		minor;
@@ -1285,7 +1285,7 @@ vmmdev_do_vm_create(dev_info_t *dip, char *name)
 	} else if ((sc = ddi_get_soft_state(vmm_statep, minor)) == NULL) {
 		ddi_soft_state_free(vmm_statep, minor);
 		goto fail;
-	} else if (ddi_create_minor_node(dip, name, S_IFCHR, minor,
+	} else if (ddi_create_minor_node(vmm_dip, name, S_IFCHR, minor,
 	    DDI_PSEUDO, 0) != DDI_SUCCESS) {
 		goto fail;
 	}
@@ -1300,12 +1300,17 @@ vmmdev_do_vm_create(dev_info_t *dip, char *name)
 		list_create(&sc->vmm_holds, sizeof (vmm_hold_t),
 		    offsetof(vmm_hold_t, vmh_node));
 		cv_init(&sc->vmm_cv, NULL, CV_DEFAULT, NULL);
+
+		sc->vmm_zone = crgetzone(cr);
+		zone_hold(sc->vmm_zone);
+		vmm_zsd_add_vm(sc);
+
 		list_insert_tail(&vmmdev_list, sc);
 		mutex_exit(&vmmdev_mtx);
 		return (0);
 	}
 
-	ddi_remove_minor_node(dip, name);
+	ddi_remove_minor_node(vmm_dip, name);
 fail:
 	id_free(vmmdev_minors, minor);
 	vmmdev_mod_decr();
@@ -1527,24 +1532,22 @@ done:
 }
 
 static int
-vmmdev_do_vm_destroy(dev_info_t *dip, const char *name)
+vmm_do_vm_destroy_locked(vmm_softc_t *sc, boolean_t clean_zsd)
 {
-	vmm_softc_t	*sc;
-	dev_info_t	*pdip = ddi_get_parent(dip);
+	dev_info_t	*pdip = ddi_get_parent(vmm_dip);
 	minor_t		minor;
 
-	mutex_enter(&vmmdev_mtx);
+	ASSERT(MUTEX_HELD(&vmmdev_mtx));
 
-	if ((sc = vmm_lookup(name)) == NULL) {
-		mutex_exit(&vmmdev_mtx);
-		return (ENOENT);
-	}
 	if (sc->vmm_is_open) {
-		mutex_exit(&vmmdev_mtx);
 		return (EBUSY);
 	}
+
+	if (clean_zsd) {
+		vmm_zsd_rem_vm(sc);
+	}
+
 	if (vmm_drv_purge(sc) != 0) {
-		mutex_exit(&vmmdev_mtx);
 		return (EINTR);
 	}
 
@@ -1553,16 +1556,48 @@ vmmdev_do_vm_destroy(dev_info_t *dip, const char *name)
 
 	vm_destroy(sc->vmm_vm);
 	list_remove(&vmmdev_list, sc);
-	ddi_remove_minor_node(dip, sc->vmm_name);
+	ddi_remove_minor_node(vmm_dip, sc->vmm_name);
 	minor = sc->vmm_minor;
+	zone_rele(sc->vmm_zone);
 	ddi_soft_state_free(vmm_statep, minor);
 	id_free(vmmdev_minors, minor);
 	(void) devfs_clean(pdip, NULL, DV_CLEAN_FORCE);
 	vmmdev_mod_decr();
 
+	return (0);
+}
+
+int
+vmm_do_vm_destroy(vmm_softc_t *sc, boolean_t clean_zsd)
+{
+	int 		err;
+
+	mutex_enter(&vmmdev_mtx);
+	err = vmm_do_vm_destroy_locked(sc, clean_zsd);
 	mutex_exit(&vmmdev_mtx);
 
-	return (0);
+	return (err);
+}
+
+/* ARGSUSED */
+static int
+vmmdev_do_vm_destroy(const char *name, cred_t *cr)
+{
+	vmm_softc_t	*sc;
+	int		err;
+
+	mutex_enter(&vmmdev_mtx);
+
+	// XXX-mg lookup needs to be zone aware */
+	if ((sc = vmm_lookup(name)) == NULL) {
+		mutex_exit(&vmmdev_mtx);
+		return (ENOENT);
+	}
+	err = vmm_do_vm_destroy_locked(sc, B_TRUE);
+
+	mutex_exit(&vmmdev_mtx);
+
+	return (err);
 }
 
 
@@ -1650,11 +1685,11 @@ vmm_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
 		case VMM_CREATE_VM:
 			if ((mode & FWRITE) == 0)
 				return (EPERM);
-			return (vmmdev_do_vm_create(vmm_dip, name));
+			return (vmmdev_do_vm_create(name, credp));
 		case VMM_DESTROY_VM:
 			if ((mode & FWRITE) == 0)
 				return (EPERM);
-			return (vmmdev_do_vm_destroy(vmm_dip, name));
+			return (vmmdev_do_vm_destroy(name, credp));
 		default:
 			/* No other actions are legal on ctl device */
 			return (ENOTTY);
@@ -1970,6 +2005,8 @@ _init(void)
 		return (error);
 	}
 
+	vmm_zsd_init();
+
 	error = mod_install(&modlinkage);
 	if (error) {
 		ddi_soft_state_fini(&vmm_statep);
@@ -1987,6 +2024,9 @@ _fini(void)
 	if (error) {
 		return (error);
 	}
+
+	vmm_zsd_fini();
+
 	ddi_soft_state_fini(&vmm_statep);
 
 	return (0);

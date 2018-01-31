@@ -1903,8 +1903,10 @@ main(int argc, char *argv[])
 	if (!error && set_x2apic_state)
 		error = vm_set_x2apic_state(ctx, vcpu, x2apic_state);
 
+#ifdef __FreeBSD__
 	if (!error && unassign_pptdev)
 		error = vm_unassign_pptdev(ctx, bus, slot, func);
+#endif /* __FreeBSD__ */
 
 	if (!error && set_exception_bitmap) {
 		if (cpu_intel)

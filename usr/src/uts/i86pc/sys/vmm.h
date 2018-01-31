@@ -198,8 +198,8 @@ int vm_alloc_memseg(struct vm *vm, int ident, size_t len, bool sysmem);
 void vm_free_memseg(struct vm *vm, int ident);
 int vm_map_mmio(struct vm *vm, vm_paddr_t gpa, size_t len, vm_paddr_t hpa);
 int vm_unmap_mmio(struct vm *vm, vm_paddr_t gpa, size_t len);
-int vm_assign_pptdev(struct vm *vm, int bus, int slot, int func);
-int vm_unassign_pptdev(struct vm *vm, int bus, int slot, int func);
+int vm_assign_pptdev(struct vm *vm, dev_t dev);
+int vm_unassign_pptdev(struct vm *vm, dev_t dev);
 
 /*
  * APIs that inspect the guest memory map require only a *single* vcpu to

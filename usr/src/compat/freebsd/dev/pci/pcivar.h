@@ -44,7 +44,7 @@ pci_get_bdf(device_t dev)
 #define	pci_save_state(dev)	pci_save_config_regs(dev)
 #define	pci_restore_state(dev)	pci_restore_config_regs(dev)
 
-bool pcie_flr(device_t, u_int, bool);
+boolean_t pcie_flr(device_t, u_int, boolean_t);
 int pcie_get_max_completion_timeout(device_t);
 
 

@@ -112,8 +112,8 @@ out:
 	return (timo);
 }
 
-bool
-pcie_flr(device_t dev, u_int max_delay, bool force)
+boolean_t
+pcie_flr(device_t dev, u_int max_delay, boolean_t force)
 {
 	dev_info_t *dip = dev;
 	bool ret = false;

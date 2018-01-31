@@ -5210,6 +5210,7 @@ f usr/lib/devfsadm/linkmod/SUNW_lx_link_i386.so 0755 root sys
 f usr/lib/devfsadm/linkmod/SUNW_misc_link.so 0755 root sys
 f usr/lib/devfsadm/linkmod/SUNW_misc_link_i386.so 0755 root sys
 f usr/lib/devfsadm/linkmod/SUNW_port_link.so 0755 root sys
+f usr/lib/devfsadm/linkmod/SUNW_ppt_link_i386.so 0755 root sys
 f usr/lib/devfsadm/linkmod/SUNW_ramdisk_link.so 0755 root sys
 f usr/lib/devfsadm/linkmod/SUNW_sgen_link.so 0755 root sys
 f usr/lib/devfsadm/linkmod/SUNW_smp_link.so 0755 root sys

@@ -19,9 +19,11 @@ PROGS =		attach detach statechange uninstall
 
 PROG1 =		boot
 OBJS1 =		boot.o
-PROGS +=	$(PROG1)
+PROG2 =		bhhwcompat
+OBJS2 =		bhhwcompat.o
+PROGS +=	$(PROG1) $(PROG2)
 OBJS +=		$(OBJS1)
-CLEANFILES +=	$(PROG1) $(OBJS1)
+CLEANFILES +=	$(PROG1) $(OBJS1) $(PROG2) $(OBJS2)
 $(PROG1) :=	LDLIBS += -lnvpair
 
 TEMPLATES =	SYSbhyve.xml
@@ -36,6 +38,10 @@ all: $(PROGS)
 
 $(PROG1): $(OBJS1)
 	$(LINK.c) -o $@ $(OBJS1) $(LDFLAGS) $(LDLIBS)
+	$(POST_PROCESS)
+
+$(PROG2): $(OBJS2)
+	$(LINK.c) -o $@ $(OBJS2) $(LDFLAGS) $(LDLIBS)
 	$(POST_PROCESS)
 
 install: $(ROOTPROGS) $(ROOTXMLDOCS) $(ROOTTEMPLATES)

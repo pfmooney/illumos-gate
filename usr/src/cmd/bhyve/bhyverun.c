@@ -125,10 +125,10 @@ static char *progname;
 static const int BSP = 0;
 
 #ifndef	__FreeBSD__
-int bcons_wait = 0;
-int bcons_connected = 0;
-pthread_mutex_t bcons_wait_lock = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t bcons_wait_done = PTHREAD_COND_INITIALIZER;
+int console_wait = 0;
+int console_connected = 0;
+pthread_mutex_t console_wait_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t console_wait_done = PTHREAD_COND_INITIALIZER;
 #endif
 
 static cpuset_t cpumask;
@@ -1083,16 +1083,16 @@ main(int argc, char *argv[])
 
 #ifndef	__FreeBSD__
 	/*
-	 * If applicable, wait for bhyveconsole
+	 * If applicable, wait for connection to console
 	 */
-	if (bcons_wait) {
-		printf("Waiting for bhyveconsole connection...\n");
-		(void) pthread_mutex_lock(&bcons_wait_lock);
-		while (!bcons_connected) {
-			(void) pthread_cond_wait(&bcons_wait_done,
-			    &bcons_wait_lock);
+	if (console_wait) {
+		printf("Waiting for console connection...\n");
+		(void) pthread_mutex_lock(&console_wait_lock);
+		while (!console_connected) {
+			(void) pthread_cond_wait(&console_wait_done,
+			    &console_wait_lock);
 		}
-		(void) pthread_mutex_unlock(&bcons_wait_lock);
+		(void) pthread_mutex_unlock(&console_wait_lock);
 	}
 #endif
 

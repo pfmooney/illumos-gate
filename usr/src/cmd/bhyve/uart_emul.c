@@ -828,7 +828,12 @@ uart_sock_server_event(struct uart_softc *sc)
 		return;
 	}
 
-	uart_sock_accept_client(sc);
+	if (uart_sock_accept_client(sc) == 0) {
+		pthread_mutex_lock(&console_wait_lock);
+		console_connected = B_TRUE;
+		pthread_cond_signal(&console_wait_done);
+		pthread_mutex_unlock(&console_wait_lock);
+	}
 }
 
 static void *
@@ -1006,6 +1011,10 @@ uart_sock_backend(struct uart_softc *sc, const char *inopts)
 	    opt = strsep(&nextopt, ",")) {
 		if (path == NULL && *opt == '/') {
 			path = opt;
+			continue;
+		}
+		if (!strcmp(opt, "wait")) {
+			console_wait = true;
 			continue;
 		}
 		/*

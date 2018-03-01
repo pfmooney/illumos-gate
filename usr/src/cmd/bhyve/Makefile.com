@@ -81,7 +81,7 @@ CPPFLAGS =	-I$(COMPAT)/freebsd -I$(CONTRIB)/freebsd \
 		-I$(SRC)/uts/common \
 		-I$(SRC)/uts/i86pc \
 		-DWITHOUT_CAPSICUM
-LDLIBS +=	-lsocket -lnsl -ldlpi -lkstat -lmd -luuid -lvmmapi -lz
+LDLIBS +=	-lsocket -lnsl -ldlpi -lmd -luuid -lvmmapi -lz
 
 POST_PROCESS += ; $(GENSETDEFS) $@
 

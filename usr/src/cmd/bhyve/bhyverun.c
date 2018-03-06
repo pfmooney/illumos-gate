@@ -881,9 +881,9 @@ main(int argc, char *argv[])
 	memflags = 0;
 
 #ifdef	__FreeBSD__
-	optstr = "abehuwxACHIPSWYp:g:c:s:m:l:U:";
+	optstr = "abehuwxACHIPSWYp:g:c:s:m:l:B:U:";
 #else
-	optstr = "abehuwxACHIPSWYg:c:s:m:l:U:";
+	optstr = "abehuwxACHIPSWYg:c:s:m:l:B:U:";
 #endif
 	while ((c = getopt(argc, argv, optstr)) != -1) {
 		switch (c) {
@@ -895,6 +895,12 @@ main(int argc, char *argv[])
 			break;
 		case 'b':
 			bvmcons = 1;
+			break;
+		case 'B':
+			if (smbios_parse(optarg) != 0) {
+				errx(EX_USAGE, "invalid SMBIOS "
+				    "configuration '%s'", optarg);
+			}
 			break;
 #ifdef	__FreeBSD__
 		case 'p':

@@ -1652,7 +1652,7 @@ vmm_is_supported(intptr_t arg)
 
 	r = vmx_x86_supported(&msg);
 	if (r != 0 && arg != NULL) {
-		if (copyoutstr(msg, (char *)arg, strlen(msg), NULL) != 0)
+		if (copyoutstr(msg, (char *)arg, strlen(msg) + 1, NULL) != 0)
 			return (EFAULT);
 	}
 	return (r);

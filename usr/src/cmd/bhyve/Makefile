@@ -19,6 +19,14 @@ include ../Makefile.cmd
 include ../Makefile.cmd.64
 include ../Makefile.ctf
 
+SUBDIRS = test
+
+all	:=	TARGET = all
+install	:=	TARGET = install
+clean	:=	TARGET = clean
+clobber	:=	TARGET = clobber
+lint	:=	TARGET = lint
+
 SRCS =	acpi.c			\
 	atkbdc.c		\
 	bhyvegc.c		\
@@ -32,6 +40,7 @@ SRCS =	acpi.c			\
 	inout.c			\
 	ioapic.c		\
 	mem.c			\
+	mevent.c		\
 	mptbl.c			\
 	pci_ahci.c		\
 	pci_e82545.c		\
@@ -70,6 +79,11 @@ OBJS = $(SRCS:.c=.o)
 CLEANFILES =	$(PROG)
 CLOBBERFILES =	$(ROOTUSRSBINPROG)
 
+MEVENT_TEST_PROG = mevent_test
+MEVENT_TEST_SRCS = mevent.c mevent_test.c
+MEVENT_TEST_OBJS = $(MEVENT_TEST_SRCS:.c=.o)
+CLEANFILES +=	$(MEVENT_TEST_PROG) $(MEVENT_TEST_OBJS)
+
 CFLAGS +=	$(CCVERBOSE) -_gcc=-Wimplicit-function-declaration -_gcc=-Wno-parentheses
 CPPFLAGS =	-I$(COMPAT)/freebsd -I$(CONTRIB)/freebsd \
 		-I$(COMPAT)/freebsd/amd64 -I$(CONTRIB)/freebsd/amd64 \
@@ -88,18 +102,29 @@ POST_PROCESS += ; $(GENSETDEFS) $@
 
 .KEEP_STATE:
 
-all: $(PROG)
+all: $(PROG) $(MEVENT_TEST_PROG) $(SUBDIRS)
 
 $(PROG): $(OBJS)
 	$(LINK.c) -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS)
 	$(POST_PROCESS)
 
-install: all $(ROOTUSRSBINPROG)
+$(MEVENT_TEST_PROG): $(MEVENT_TEST_OBJS)
+	$(LINK.c) -o $@ $(MEVENT_TEST_OBJS) -lsocket
 
-clean:
+install: all $(ROOTUSRSBINPROG) $(SUBDIRS)
+
+clean: $(SUBDIRS)
 	$(RM) $(OBJS) $(CLEANFILES)
 
-lint:	lint_SRCS
+clobber: clean $(SUBDIRS)
+	$(RM) $(CLOBBERFILES)
+
+lint:	lint_SRCS $(SUBDIRS)
+
+$(SUBDIRS): FRC
+	@cd $@; pwd; $(MAKE) $(TARGET)
+
+FRC:
 
 include ../Makefile.targ
 

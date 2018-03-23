@@ -24,6 +24,7 @@
 # Copyright 2015, OmniTI Computer Consulting, Inc. All rights reserved.
 # Copyright 2018 OmniOS Community Edition (OmniOSce) Association.
 # Copyright 2019 Peter Tribble.
+# Copyright 2018 Joyent, Inc.
 #
 
 # This file provides exceptions to the usual rules applied to ELF objects by

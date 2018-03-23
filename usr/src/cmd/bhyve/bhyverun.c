@@ -1122,13 +1122,6 @@ main(int argc, char *argv[])
 	 * Head off to the main event dispatch loop
 	 */
 	mevent_dispatch();
-#ifndef __FreeBSD
-	if (vm_started_cb != NULL) {
-		vm_started_cb();
-	}
-#endif
-
-	pthread_exit(NULL);
 
 	exit(1);
 }

@@ -52,6 +52,7 @@ SRCS =	acpi.c			\
 	pci_passthru.c		\
 	pci_uart.c		\
 	pci_virtio_block.c	\
+	pci_virtio_console.c	\
 	pci_virtio_net.c	\
 	pci_virtio_rnd.c	\
 	pci_xhci.c		\
@@ -76,13 +77,13 @@ SRCS =	acpi.c			\
 
 OBJS = $(SRCS:.c=.o)
 
-CLEANFILES =	$(PROG)
 CLOBBERFILES =	$(ROOTUSRSBINPROG)
 
 MEVENT_TEST_PROG = mevent_test
 MEVENT_TEST_SRCS = mevent.c mevent_test.c
 MEVENT_TEST_OBJS = $(MEVENT_TEST_SRCS:.c=.o)
-CLEANFILES +=	$(MEVENT_TEST_PROG) $(MEVENT_TEST_OBJS)
+
+CLEANFILES =	$(PROG) $(MEVENT_TEST_PROG) $(MEVENT_TEST_OBJS)
 
 CFLAGS +=	$(CCVERBOSE) -_gcc=-Wimplicit-function-declaration -_gcc=-Wno-parentheses
 CPPFLAGS =	-I$(COMPAT)/freebsd -I$(CONTRIB)/freebsd \
@@ -96,7 +97,11 @@ CPPFLAGS =	-I$(COMPAT)/freebsd -I$(CONTRIB)/freebsd \
 		-I$(SRC)/uts/common \
 		-I$(SRC)/uts/i86pc \
 		-DWITHOUT_CAPSICUM
-LDLIBS +=	-lsocket -lnsl -ldlpi -lmd -luuid -lvmmapi -lz -lnvpair
+
+# Disable the crypto code until it is wired up
+CPPFLAGS +=	-DNO_OPENSSL
+
+LDLIBS +=	-lsocket -lnsl -ldlpi -lmd -luuid -lvmmapi -lz
 
 POST_PROCESS += ; $(GENSETDEFS) $@
 

@@ -888,7 +888,11 @@ mark_provisioned(void)
 int
 main(int argc, char *argv[])
 {
+#ifdef __FreeBSD__
 	int c, error, gdb_port, err, bvmcons;
+#else
+	int c, error, err, bvmcons;
+#endif
 	int max_vcpus, mptgen, memflags;
 	int rtc_localtime;
 	struct vmctx *ctx;
@@ -898,7 +902,9 @@ main(int argc, char *argv[])
 
 	bvmcons = 0;
 	progname = basename(argv[0]);
+#ifdef __FreeBSD__
 	gdb_port = 0;
+#endif
 	guest_ncpus = 1;
 	memsize = 256 * MB;
 	mptgen = 1;
@@ -942,7 +948,12 @@ main(int argc, char *argv[])
 			memflags |= VM_MEM_F_INCORE;
 			break;
 		case 'g':
+#ifdef __FreeBSD__
 			gdb_port = atoi(optarg);
+#else
+			if (dbgport_parse(optarg) != 0)
+				exit(1);
+#endif
 			break;
 		case 'l':
 			if (lpc_device_parse(optarg) != 0) {
@@ -1069,8 +1080,12 @@ main(int argc, char *argv[])
 	if (init_pci(ctx) != 0)
 		exit(1);
 
+#ifdef __FreeBSD__
 	if (gdb_port != 0)
 		init_dbgport(gdb_port);
+#else
+	dbgport_init();
+#endif
 
 	if (bvmcons)
 		init_bvmcons();

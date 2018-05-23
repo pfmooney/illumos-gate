@@ -31,6 +31,7 @@
 #ifndef _DBGPORT_H_
 #define	_DBGPORT_H_
 
-void	init_dbgport(int port);
+void	dbgport_init();
+int	dbgport_parse(char *);
 
 #endif

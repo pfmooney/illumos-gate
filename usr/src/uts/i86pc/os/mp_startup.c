@@ -1700,7 +1700,7 @@ mp_startup_common(boolean_t boot)
 	bzero(new_x86_featureset, BT_SIZEOFMAP(NUM_X86_FEATURES));
 	cpuid_pass1(cp, new_x86_featureset);
 
-	if (boot && get_hwenv() == HW_NATIVE &&
+	if (boot && /* XXX: get_hwenv() == HW_NATIVE &&  */
 	    cpuid_getvendor(CPU) == X86_VENDOR_Intel &&
 	    cpuid_getfamily(CPU) == 6 &&
 	    (cpuid_getmodel(CPU) == 0x2d || cpuid_getmodel(CPU) == 0x3e) &&

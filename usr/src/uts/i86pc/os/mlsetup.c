@@ -221,7 +221,7 @@ mlsetup(struct regs *rp)
 	 * that do not virtualise TSC that way to handle writes to TSC
 	 * correctly, either.
 	 */
-	if (get_hwenv() == HW_NATIVE &&
+	if (/* XXX: get_hwenv() == HW_NATIVE && */
 	    cpuid_getvendor(CPU) == X86_VENDOR_Intel &&
 	    cpuid_getfamily(CPU) == 6 &&
 	    (cpuid_getmodel(CPU) == 0x2d || cpuid_getmodel(CPU) == 0x3e) &&

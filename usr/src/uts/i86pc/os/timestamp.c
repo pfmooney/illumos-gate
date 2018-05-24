@@ -484,7 +484,7 @@ tsc_sync_master(processorid_t slave)
 	int hwtype;
 
 	hwtype = get_hwenv();
-	if (!tsc_master_slave_sync_needed || (hwtype & HW_VIRTUAL) != 0)
+	if (!tsc_master_slave_sync_needed /* XXX: || (hwtype & HW_VIRTUAL) != 0 */)
 		return;
 
 	flags = clear_int_flag();
@@ -559,7 +559,7 @@ tsc_sync_slave(void)
 	int hwtype;
 
 	hwtype = get_hwenv();
-	if (!tsc_master_slave_sync_needed || (hwtype & HW_VIRTUAL) != 0)
+	if (!tsc_master_slave_sync_needed /* XXX: || (hwtype & HW_VIRTUAL) != 0 */)
 		return;
 
 	flags = clear_int_flag();

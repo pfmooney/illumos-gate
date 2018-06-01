@@ -135,6 +135,9 @@ struct vcpu {
 	uint64_t	nextrip;	/* (x) next instruction to execute */
 #ifndef __FreeBSD__
 	uint64_t	tsc_offset;	/* (x) offset from host TSC */
+	uint64_t	pvc_wall_gpa;	/* (x) GPA of PV wall clock struct */
+	uint64_t	pvc_sys_gpa;	/* (x) GPA of PV system time struct */
+	hrtime_t	pvc_sys_upt;	/* (x) hrtime of last systime update */
 #endif
 };
 
@@ -204,6 +207,9 @@ struct vm {
 	uint16_t	threads;		/* (o) num of threads/core */
 	uint16_t	maxcpus;		/* (o) max pluggable cpus */
 #ifndef __FreeBSD__
+	hrtime_t	systime_offset;		/* (i) systime offset */
+	timespec_t	wallclock;		/* (i) wall clock at "boot" */
+
 	krwlock_t	ioport_rwlock;
 	list_t		ioport_hooks;
 #endif /* __FreeBSD__ */
@@ -552,6 +558,10 @@ vm_init(struct vm *vm, bool create)
 	for (i = 0; i < VM_MAXCPU; i++) {
 		vm->vcpu[i].tsc_offset = tsc_off;
 	}
+
+	/* Record system-wide pvclock offsets at "boot" time */
+	vm->systime_offset = gethrtime();
+	gethrestime(&vm->wallclock);
 #endif /* __FreeBSD__ */
 }
 
@@ -1750,6 +1760,149 @@ vm_handle_reqidle(struct vm *vm, int vcpuid, bool *retu)
 }
 
 #ifndef __FreeBSD__
+
+#define	MSR_KVM_WALL_CLOCK_NEW	0x4b564d00
+#define	MSR_KVM_SYSTEM_TIME_NEW	0x4b564d01
+#define	PVCLOCK_TSC_STABLE_BIT	(1 << 0)
+#define	PVCLOCK_GUEST_STOPPED	(1 << 1)
+
+#define	PVCLOCK_UPDATE_MIN_INTVL	MSEC2NSEC(500)
+
+struct pvclock_wall_clock {
+	uint32_t	version;
+	uint32_t	sec;
+	uint32_t	nsec;
+	uint32_t	_pad;
+};
+
+struct pvclock_vcpu_time_info {
+	uint32_t	version;
+	uint32_t	_pad0;
+	uint64_t	tsc_timestamp;
+	uint64_t	system_time;
+	uint32_t	tsc_to_system_mul;
+	int8_t		tsc_shift;
+	uint8_t		flags;
+	uint8_t		_pad[2];
+};
+
+static void
+vm_populate_pvclock_wall(struct vm *vm, struct pvclock_wall_clock *wall)
+{
+	uint32_t ver;
+
+	/*
+	 * Increment the version to signal updated data, taking into account
+	 * the possibility that the guest initialized it to an odd value.
+	 * (Odd value indicates that an update is in progress.)
+	 */
+	ver = wall->version;
+	ver += ((ver & 0x1) != 0) ? 2 : 1;
+	wall->version = ver;
+	membar_producer();
+
+	wall->sec = vm->wallclock.tv_sec;
+	wall->nsec = vm->wallclock.tv_nsec;
+
+	membar_producer();
+	wall->version = ver + 1;
+}
+
+static void
+vm_populate_pvclock_systime(struct vm *vm, int vcpuid, void *held_addr)
+{
+	struct vcpu *cpu = &vm->vcpu[vcpuid];
+	struct pvclock_vcpu_time_info *tinfo;
+	void *cookie;
+	uint64_t tsc, hrtime;
+	uint32_t scale, ver;
+	uint8_t shift;
+	/* locally defined to avoid include conflicts from machsystm */
+	extern hrtime_t tsc_gethrtime_params(uint64_t *, uint32_t *, uint8_t *);
+
+	if ((cpu->pvc_sys_gpa & 0x1) == 0) {
+		return;
+	}
+	if (gethrtime() <= cpu->pvc_sys_upt + PVCLOCK_UPDATE_MIN_INTVL) {
+		return;
+	}
+	if (held_addr == NULL) {
+		const uint64_t addr = cpu->pvc_sys_gpa & ~0x1UL;
+
+		tinfo = vm_gpa_hold(vm, vcpuid, addr, sizeof (*tinfo),
+		    VM_PROT_RW, &cookie);
+		/*
+		 * The mapping _should_ have been verified already.  If the
+		 * address in question does not resolve to valid guest memory
+		 * (such if the mappings were somehow changed while live), then
+		 * alter the MSR value to indicate a disabled state.
+		 */
+		if (tinfo == NULL) {
+			cpu->pvc_sys_gpa &= ~0x1UL;
+			return;
+		}
+	} else {
+		tinfo = held_addr;
+	}
+
+	hrtime = tsc_gethrtime_params(&tsc, &scale, &shift);
+	VERIFY(shift <= INT8_MAX);
+
+	/*
+	 * Increment the version to signal updated data, taking into account
+	 * the possibility that the guest initialized it to an odd value.
+	 * (Odd value indicates that an update is in progress.)
+	 */
+	ver = tinfo->version;
+	ver += ((ver & 0x1) != 0) ? 2 : 1;
+	tinfo->version = ver;
+	membar_producer();
+
+	tinfo->tsc_timestamp = tsc + cpu->tsc_offset;
+	tinfo->system_time = hrtime - vm->systime_offset;
+	tinfo->tsc_to_system_mul = scale;
+	tinfo->tsc_shift = (int8_t)shift;
+	tinfo->flags = PVCLOCK_TSC_STABLE_BIT;
+
+	membar_producer();
+	tinfo->version = ver + 1;
+	cpu->pvc_sys_upt = hrtime;
+
+	if (held_addr == NULL) {
+		vm_gpa_release(cookie);
+	}
+}
+
+
+static int
+vm_handle_rdmsr(struct vm *vm, int vcpuid, struct vm_exit *vme)
+{
+	struct vcpu *cpu = &vm->vcpu[vcpuid];
+	const uint32_t code = vme->u.msr.code;
+	uint64_t val = 0;
+	int res = 0;
+
+	switch (code) {
+	case MSR_KVM_WALL_CLOCK_NEW:
+		val = cpu->pvc_wall_gpa;
+		break;
+	case MSR_KVM_SYSTEM_TIME_NEW:
+		val = cpu->pvc_sys_gpa;
+		break;
+	default:
+		res = -1;
+		break;
+	}
+
+	if (res == 0) {
+		const uint32_t high = val >> 32;
+		const uint32_t low = val;
+
+		VERIFY0(vm_set_register(vm, vcpuid, VM_REG_GUEST_RDX, high));
+		VERIFY0(vm_set_register(vm, vcpuid, VM_REG_GUEST_RAX, low));
+	}
+	return (res);
+}
 static int
 vm_handle_wrmsr(struct vm *vm, int vcpuid, struct vm_exit *vme)
 {
@@ -1758,6 +1911,67 @@ vm_handle_wrmsr(struct vm *vm, int vcpuid, struct vm_exit *vme)
 	const uint64_t val = vme->u.msr.wval;
 
 	switch (code) {
+	case MSR_KVM_WALL_CLOCK_NEW: {
+		void *cookie;
+		struct pvclock_wall_clock *wall;
+
+		if (val == 0) {
+			cpu->pvc_wall_gpa = 0;
+			return (0);
+		}
+
+		/*
+		 * Make sure the offset is not so deep that the structure will
+		 * spill into another page (and upset vm_gpa_hold).
+		 */
+		if (PAGE_SIZE - (val & PAGE_MASK) < sizeof (*wall)) {
+			return (-1);
+		}
+
+		wall = vm_gpa_hold(vm, vcpuid, val, sizeof (*wall), VM_PROT_RW,
+		    &cookie);
+		if (wall == NULL) {
+			return (-1);
+		}
+
+		cpu->pvc_wall_gpa = val;
+		vm_populate_pvclock_wall(vm, wall);
+		vm_gpa_release(cookie);
+
+		return (0);
+	}
+	case MSR_KVM_SYSTEM_TIME_NEW: {
+		const uint64_t addr = val & ~0x1UL;
+		struct pvclock_vcpu_time_info *tinfo;
+		void *cookie;
+
+		/* The low bit is used to enable the functionality */
+		if ((val & 0x1) == 0) {
+			cpu->pvc_sys_gpa = val;
+			return (0);
+		}
+
+		/*
+		 * Make sure the offset is not so deep that the structure will
+		 * spill into another page (and upset vm_gpa_hold).
+		 */
+		if (PAGE_SIZE - (addr & PAGE_MASK) < sizeof (*tinfo)) {
+			return (-1);
+		}
+
+		tinfo = vm_gpa_hold(vm, vcpuid, addr, sizeof (*tinfo),
+		    VM_PROT_RW, &cookie);
+		if (tinfo == NULL) {
+			return (-1);
+		}
+
+		cpu->pvc_sys_gpa = val;
+		cpu->pvc_sys_upt = 0;
+		vm_populate_pvclock_systime(vm, vcpuid, tinfo);
+		vm_gpa_release(cookie);
+
+		return (0);
+	}
 	case MSR_TSC:
 		cpu->tsc_offset = val - rdtsc();
 		return (0);
@@ -2034,6 +2248,9 @@ restart:
 		vtc.vtc_status |= VTCS_FPU_RESTORED;
 	}
 	vtc.vtc_status |= VTCS_FPU_CTX_CRITICAL;
+
+	/* If a pvclock entry is associated with the vCPU, update it. */
+	vm_populate_pvclock_systime(vm, vcpuid, NULL);
 #endif
 
 	vcpu_require_state(vm, vcpuid, VCPU_RUNNING);
@@ -2095,6 +2312,11 @@ restart:
 			vm_inject_ud(vm, vcpuid);
 			break;
 #ifndef __FreeBSD__
+		case VM_EXITCODE_RDMSR:
+			if (vm_handle_rdmsr(vm, vcpuid, vme) != 0) {
+				retu = true;
+			}
+			break;
 		case VM_EXITCODE_WRMSR:
 			if (vm_handle_wrmsr(vm, vcpuid, vme) != 0) {
 				retu = true;

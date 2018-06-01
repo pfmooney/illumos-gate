@@ -88,6 +88,17 @@ log2(u_int x)
 	return (fls(x << (1 - powerof2(x))) - 1);
 }
 
+#ifndef __FreeBSD__
+/*
+ * Default to presenting the KVM identification via cpuid for now.
+ * This allows existing images to detect and utilize PV clock data.
+ */
+static volatile boolean_t vmm_kvm_cpuid = B_TRUE;
+
+#define	KVM_FEATURE_CLOCKSOURCE2	(1 << 3)
+#define	KVM_FEATURE_CLOCKSOURCE_STABLE	(1 << 24)
+#endif
+
 int
 x86_emulate_cpuid(struct vm *vm, int vcpu_id,
 		  uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
@@ -109,8 +120,18 @@ x86_emulate_cpuid(struct vm *vm, int vcpu_id,
 		if (*eax > cpu_exthigh)
 			*eax = cpu_exthigh;
 	} else if (*eax >= 0x40000000) {
+#ifdef __FreeBSD__
 		if (*eax > CPUID_VM_HIGH)
 			*eax = CPUID_VM_HIGH;
+#else /* __FreeBSD__ */
+		if (vmm_kvm_cpuid) {
+			if (*eax > 0x40000001)
+				*eax = 0x40000001;
+		} else {
+			if (*eax > CPUID_VM_HIGH)
+				*eax = CPUID_VM_HIGH;
+		}
+#endif /* __FreeBSD__ */
 	} else if (*eax > cpu_high) {
 		*eax = cpu_high;
 	}
@@ -479,12 +500,38 @@ x86_emulate_cpuid(struct vm *vm, int vcpu_id,
 			}
 			break;
 
+#ifdef __FreeBSD__
 		case 0x40000000:
 			regs[0] = CPUID_VM_HIGH;
 			bcopy(bhyve_id, &regs[1], 4);
 			bcopy(bhyve_id + 4, &regs[2], 4);
 			bcopy(bhyve_id + 8, &regs[3], 4);
 			break;
+#else
+		case 0x40000000:
+			if (!vmm_kvm_cpuid) {
+				regs[0] = CPUID_VM_HIGH;
+				bcopy(bhyve_id, &regs[1], 4);
+				bcopy(bhyve_id + 4, &regs[2], 4);
+				bcopy(bhyve_id + 8, &regs[3], 4);
+			} else {
+				const char kvm_id[12] = "KVMKVMKVM\0\0";
+
+				regs[0] = 0x40000001;
+				bcopy(kvm_id, &regs[1], 4);
+				bcopy(kvm_id + 4, &regs[2], 4);
+				bcopy(kvm_id + 8, &regs[3], 4);
+			}
+			break;
+		case 0x40000001:
+			if (vmm_kvm_cpuid) {
+				regs[0] = KVM_FEATURE_CLOCKSOURCE2 |
+				    KVM_FEATURE_CLOCKSOURCE_STABLE;
+				regs[1] = regs[2] = regs[3] = 0;
+			}
+			break;
+
+#endif /* __FreeBSD__ */
 
 		default:
 			/*

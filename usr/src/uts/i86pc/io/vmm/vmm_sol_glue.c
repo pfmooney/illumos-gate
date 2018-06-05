@@ -51,10 +51,12 @@
 #include <sys/id_space.h>
 #include <sys/psm_defs.h>
 #include <sys/smp_impldefs.h>
+#include <sys/modhash.h>
 
 #include <machine/cpufunc.h>
 #include <machine/fpu.h>
 #include <machine/md_var.h>
+#include <machine/pmap.h>
 #include <machine/specialreg.h>
 #include <machine/vmm.h>
 #include <sys/vmm_impl.h>
@@ -141,10 +143,49 @@ smp_rendezvous(void (* setup_func)(void *), void (* action_func)(void *),
 struct kmem_item {
 	void			*addr;
 	size_t			size;
-	LIST_ENTRY(kmem_item)	next;
 };
 static kmutex_t kmem_items_lock;
-static LIST_HEAD(, kmem_item) kmem_items;
+
+static mod_hash_t *vmm_alloc_hash;
+uint_t vmm_alloc_hash_nchains = 16381;
+uint_t vmm_alloc_hash_size = PAGESIZE;
+
+static void
+vmm_alloc_hash_valdtor(mod_hash_val_t val)
+{
+	struct kmem_item *i = (struct kmem_item *)val;
+
+	kmem_free(i->addr, i->size);
+	kmem_free(i, sizeof (struct kmem_item));
+}
+
+static void
+vmm_alloc_init(void)
+{
+	vmm_alloc_hash = mod_hash_create_ptrhash("vmm_alloc_hash",
+	    vmm_alloc_hash_nchains, vmm_alloc_hash_valdtor,
+	    vmm_alloc_hash_size);
+
+	VERIFY(vmm_alloc_hash != NULL);
+}
+
+static uint_t
+vmm_alloc_check(mod_hash_key_t key, mod_hash_val_t *val, void *unused)
+{
+	struct kmem_item *i = (struct kmem_item *)val;
+
+	cmn_err(CE_PANIC, "!vmm_alloc_check: hash not empty: %p, %d", i->addr,
+	    i->size);
+
+	return (MH_WALK_TERMINATE);
+}
+
+static void
+vmm_alloc_cleanup(void)
+{
+	mod_hash_walk(vmm_alloc_hash, vmm_alloc_check, NULL);
+	mod_hash_destroy_ptrhash(vmm_alloc_hash);
+}
 
 void *
 malloc(unsigned long size, struct malloc_type *mtp, int flags)
@@ -157,17 +198,28 @@ malloc(unsigned long size, struct malloc_type *mtp, int flags)
 		kmem_flag = KM_NOSLEEP;
 
 	if (flags & M_ZERO) {
-		p = kmem_zalloc(size + sizeof (struct kmem_item), kmem_flag);
+		p = kmem_zalloc(size, kmem_flag);
 	} else {
-		p = kmem_alloc(size + sizeof (struct kmem_item), kmem_flag);
+		p = kmem_alloc(size, kmem_flag);
+	}
+
+	if (p == NULL)
+		return (NULL);
+
+	i = kmem_zalloc(sizeof (struct kmem_item), kmem_flag);
+
+	if (i == NULL) {
+		kmem_free(p, size);
+		return (NULL);
 	}
 
 	mutex_enter(&kmem_items_lock);
-	i = p + size;
 	i->addr = p;
 	i->size = size;
 
-	LIST_INSERT_HEAD(&kmem_items, i, next);
+	VERIFY(mod_hash_insert(vmm_alloc_hash,
+	    (mod_hash_key_t)PHYS_TO_DMAP(vtophys(p)), (mod_hash_val_t)i) == 0);
+
 	mutex_exit(&kmem_items_lock);
 
 	return (p);
@@ -176,18 +228,10 @@ malloc(unsigned long size, struct malloc_type *mtp, int flags)
 void
 free(void *addr, struct malloc_type *mtp)
 {
-	struct kmem_item	*i;
-
 	mutex_enter(&kmem_items_lock);
-	LIST_FOREACH(i, &kmem_items, next) {
-		if (i->addr == addr)
-			break;
-	}
-	ASSERT(i != NULL);
-	LIST_REMOVE(i, next);
+	VERIFY(mod_hash_destroy(vmm_alloc_hash,
+	    (mod_hash_key_t)PHYS_TO_DMAP(vtophys(addr))) == 0);
 	mutex_exit(&kmem_items_lock);
-
-	kmem_free(addr, i->size + sizeof (struct kmem_item));
 }
 
 extern void *contig_alloc(size_t, ddi_dma_attr_t *, uintptr_t, int);
@@ -602,6 +646,7 @@ fpusave(void *arg)
 void
 vmm_sol_glue_init(void)
 {
+	vmm_alloc_init();
 	vmm_cpuid_init();
 	fpu_save_area_init();
 	unr_idx = 0;
@@ -611,6 +656,7 @@ void
 vmm_sol_glue_cleanup(void)
 {
 	fpu_save_area_cleanup();
+	vmm_alloc_cleanup();
 }
 
 

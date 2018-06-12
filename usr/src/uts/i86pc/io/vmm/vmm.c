@@ -1255,7 +1255,14 @@ save_guest_fpustate(struct vcpu *vcpu)
 	/* save guest FPU state */
 	fpu_stop_emulating();
 	fpusave(vcpu->guestfpu);
+#ifdef __FreeBSD__
 	fpu_start_emulating();
+#else
+	/*
+	 * When the host state has been restored, we should not re-enable
+	 * CR0.TS on illumos for eager FPU.
+	 */
+#endif
 }
 
 static VMM_STAT(VCPU_IDLE_TICKS, "number of ticks vcpu was idle");
@@ -1988,7 +1995,7 @@ restart:
 	set_pcb_flags(pcb, PCB_FULL_IRET);
 #else
 	/* Force a trip through update_sregs to reload %fs/%gs and friends */
-	ttolwp(curthread)->lwp_pcb.pcb_rupdate = 1;
+	PCB_SET_UPDATE_SEGS(&ttolwp(curthread)->lwp_pcb);
 #endif
 
 #ifdef	__FreeBSD__

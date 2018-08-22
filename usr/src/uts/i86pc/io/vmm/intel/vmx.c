@@ -58,6 +58,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/smp_impldefs.h>
 #include <sys/smt.h>
 #include <sys/hma.h>
+#include <sys/trap.h>
 #endif
 
 #include <vm/vm.h>
@@ -2393,7 +2394,7 @@ vmx_exit_process(struct vmx *vmx, int vcpu, struct vm_exit *vmexit)
 #ifdef __FreeBSD__
 		__asm __volatile("int $18");
 #else
-		panic("XXX vector to MCE handler");
+		vmx_call_trap(T_MCE);
 #endif
 		return (1);
 	}
@@ -2682,7 +2683,7 @@ vmx_exit_process(struct vmx *vmx, int vcpu, struct vm_exit *vmexit)
 #ifdef __FreeBSD__
 			__asm __volatile("int $18");
 #else
-			panic("XXX vector to MCE handler");
+			vmx_call_trap(T_MCE);
 #endif
 			return (1);
 		}
@@ -2887,7 +2888,7 @@ vmx_exit_handle_nmi(struct vmx *vmx, int vcpuid, struct vm_exit *vmexit)
 #ifdef __FreeBSD__
 		__asm __volatile("int $2");
 #else
-		panic("XXX vector to NMI handler");
+		vmx_call_trap(T_NMIFLT);
 #endif
 	}
 }

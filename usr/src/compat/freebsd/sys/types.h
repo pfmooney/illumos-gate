@@ -11,6 +11,7 @@
 
 /*
  * Copyright 2014 Pluribus Networks Inc.
+ * Copyright 2018 Joyent, Inc.
  */
 
 #ifndef _COMPAT_FREEBSD_SYS_TYPES_H_
@@ -75,8 +76,8 @@ typedef char		vm_memattr_t;
 typedef _Bool bool;
 #endif
 
-#if defined(_KERNEL) && !defined(offsetof)
-#define	offsetof(s, m)	((size_t)(&(((s *)0)->m)))
+#if defined(_KERNEL)
+typedef struct __dev_info **device_t;
 #endif
 
 #include_next <sys/types.h>

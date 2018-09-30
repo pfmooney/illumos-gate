@@ -102,7 +102,8 @@ CPPFLAGS =	-I$(COMPAT)/freebsd -I$(CONTRIB)/freebsd \
 # Disable the crypto code until it is wired up
 CPPFLAGS +=	-DNO_OPENSSL
 
-LDLIBS +=	-lsocket -lnsl -ldlpi -lmd -luuid -lvmmapi -lz
+$(PROG) := LDLIBS += -lsocket -lnsl -ldlpi -lmd -luuid -lvmmapi -lz
+$(MEVENT_TEST_PROG) := LDLIBS += -lsocket
 
 POST_PROCESS += ; $(GENSETDEFS) $@
 
@@ -115,7 +116,7 @@ $(PROG): $(OBJS)
 	$(POST_PROCESS)
 
 $(MEVENT_TEST_PROG): $(MEVENT_TEST_OBJS)
-	$(LINK.c) -o $@ $(MEVENT_TEST_OBJS) -lsocket
+	$(LINK.c) -o $@ $(MEVENT_TEST_OBJS) $(LDFLAGS) $(LDLIBS)
 
 install: all $(ROOTUSRSBINPROG) $(SUBDIRS)
 

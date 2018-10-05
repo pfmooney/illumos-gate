@@ -128,9 +128,9 @@ struct virtio_blk_hdr {
 #define	VBH_OP_WRITE		1
 #define	VBH_OP_FLUSH		4
 #define	VBH_OP_FLUSH_OUT	5
-#define	VBH_OP_IDENT		8		
+#define	VBH_OP_IDENT		8
 #define	VBH_FLAG_BARRIER	0x80000000	/* OR'ed into vbh_type */
-	uint32_t       	vbh_type;
+	uint32_t	vbh_type;
 	uint32_t	vbh_ioprio;
 	uint64_t	vbh_sector;
 } __packed;
@@ -144,8 +144,8 @@ static int pci_vtblk_debug;
 
 struct pci_vtblk_ioreq {
 	struct blockif_req		io_req;
-	struct pci_vtblk_softc	       *io_sc;
-	uint8_t			       *io_status;
+	struct pci_vtblk_softc		*io_sc;
+	uint8_t				*io_status;
 	uint16_t			io_idx;
 };
 
@@ -170,7 +170,7 @@ static int pci_vtblk_cfgwrite(void *, int, int, uint32_t);
 static struct virtio_consts vtblk_vi_consts = {
 	"vtblk",		/* our name */
 	1,			/* we support 1 virtqueue */
-	sizeof(struct vtblk_config), /* config reg size */
+	sizeof(struct vtblk_config),	/* config reg size */
 	pci_vtblk_reset,	/* reset */
 	pci_vtblk_notify,	/* device-wide qnotify */
 	pci_vtblk_cfgread,	/* read PCI config */
@@ -276,7 +276,7 @@ pci_vtblk_proc(struct pci_vtblk_softc *sc, struct vqueue_info *vq)
 	}
 	io->io_req.br_resid = iolen;
 
-	DPRINTF(("virtio-block: %s op, %zd bytes, %d segs, offset %ld\n\r", 
+	DPRINTF(("virtio-block: %s op, %zd bytes, %d segs, offset %ld\n\r",
 		 writeop ? "write" : "read/ident", iolen, i - 1,
 		 io->io_req.br_offset));
 
@@ -331,36 +331,36 @@ pci_vtblk_init(struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 	off_t size;
 	int i, sectsz, sts, sto;
 
-#if !defined(__FreeBSD__) && !defined(__JOYENT__)
-	char *tmpopts, *opt, *nextopt, *path = NULL, *serial = NULL;
+	if (opts == NULL) {
+		printf("virtio-block: backing device required\n");
+		return (1);
+	}
 
-	if ((tmpopts = strdup(opts)) == NULL)
+#if !defined(__FreeBSD__) && !defined(__JOYENT__)
+	char *newopts, *opt, *nextopt, *serial = NULL;
+	size_t optsz = strlen(opts) + 1;
+
+	if ((newopts = calloc(optsz, sizeof(char))) == NULL)
 		return (-1);
 
-	for (nextopt = tmpopts, opt = strsep(&nextopt, ",");
+	for (nextopt = opts, opt = strsep(&nextopt, ",");
 	    opt != NULL; opt = strsep(&nextopt, ",")) {
-		if (path == NULL && *opt == '/') {
-			path = opt;
-			continue;
-		}
 		if (!strncmp(opt, "serial=", 7)) {
 			serial = opt + 7;
 			continue;
 		}
 
-		printf("virtio-block: unknown option '%s'\n", opt);
-		free(tmpopts);
-		return (-1);
+		/*
+		 * Any options not handled here must be passed on to
+		 * blockif_open
+		 */
+		if (*newopts != '\0')
+			strlcat(newopts, ",", optsz);
+		strlcat(newopts, opt, optsz);
 	}
-	if (path == NULL) {
+	if (*newopts == '\0') {
 		printf("virtio-block: backing device required\n");
-		free(tmpopts);
-		return (1);
-	}
-	opts = path;
-#else
-	if (opts == NULL) {
-		printf("virtio-block: backing device required\n");
+		free(newopts);
 		return (1);
 	}
 #endif
@@ -369,12 +369,14 @@ pci_vtblk_init(struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 	 * The supplied backing file has to exist
 	 */
 	snprintf(bident, sizeof(bident), "%d:%d", pi->pi_slot, pi->pi_func);
-	bctxt = blockif_open(opts, bident);
-	if (bctxt == NULL) {       	
-		perror("Could not open backing file");
 #if !defined(__FreeBSD__) && !defined(__JOYENT__)
-		free(tmpopts);
+	bctxt = blockif_open(newopts, bident);
+	free(newopts);
+#else
+	bctxt = blockif_open(opts, bident);
 #endif
+	if (bctxt == NULL) {
+		perror("Could not open backing file");
 		return (1);
 	}
 
@@ -407,7 +409,7 @@ pci_vtblk_init(struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 	 */
 	MD5Init(&mdctx);
 	MD5Update(&mdctx, opts, strlen(opts));
-	MD5Final(digest, &mdctx);	
+	MD5Final(digest, &mdctx);
 	sprintf(sc->vbsc_ident, "BHYVE-%02X%02X-%02X%02X-%02X%02X",
 	    digest[0], digest[1], digest[2], digest[3], digest[4], digest[5]);
 #if !defined(__FreeBSD__) && !defined(__JOYENT__)
@@ -415,7 +417,6 @@ pci_vtblk_init(struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 		bzero(sc->vbsc_ident, sizeof(sc->vbsc_ident));
 		strlcpy(sc->vbsc_ident, serial, sizeof(sc->vbsc_ident));
 	}
-	free(tmpopts);
 #endif
 
 	/* setup virtio block config space */

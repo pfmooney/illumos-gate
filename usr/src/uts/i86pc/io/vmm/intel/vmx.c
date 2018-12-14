@@ -2642,7 +2642,7 @@ vmx_exit_process(struct vmx *vmx, int vcpu, struct vm_exit *vmexit)
 #ifdef __FreeBSD__
 		__asm __volatile("int $18");
 #else
-		vmx_call_trap(T_MCE);
+		vmm_call_trap(T_MCE);
 #endif
 		return (1);
 	}
@@ -2931,7 +2931,7 @@ vmx_exit_process(struct vmx *vmx, int vcpu, struct vm_exit *vmexit)
 #ifdef __FreeBSD__
 			__asm __volatile("int $18");
 #else
-			vmx_call_trap(T_MCE);
+			vmm_call_trap(T_MCE);
 #endif
 			return (1);
 		}
@@ -3149,7 +3149,7 @@ vmx_exit_handle_nmi(struct vmx *vmx, int vcpuid, struct vm_exit *vmexit)
 #ifdef __FreeBSD__
 		__asm __volatile("int $2");
 #else
-		vmx_call_trap(T_NMIFLT);
+		vmm_call_trap(T_NMIFLT);
 #endif
 	}
 }

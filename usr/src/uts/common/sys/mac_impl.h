@@ -915,6 +915,13 @@ typedef struct mac_direct_rxs_s {
 	void		*mdrx_arg_v6;
 } mac_direct_rxs_t;
 
+typedef struct mac_lro_state_s mac_lro_state_t;
+
+extern void mac_lro_alloc(mac_lro_state_t **, uint_t *);
+extern void mac_lro_free(mac_lro_state_t *, uint_t);
+extern void mac_sw_lro(mac_lro_state_t *, uint_t, mblk_t **, mblk_t **, int *,
+    size_t *);
+
 #ifdef	__cplusplus
 }
 #endif

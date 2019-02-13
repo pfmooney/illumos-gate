@@ -31,6 +31,7 @@
 #include <inet/tcp_impl.h>
 #include <inet/cc.h>
 #include <sys/sunddi.h>
+#include <sys/policy.h>
 
 /* Max size IP datagram is 64k - 1 */
 #define	TCP_MSS_MAX_IPV4 (IP_MAXPACKET - (sizeof (ipha_t) + sizeof (tcpha_t)))
@@ -302,6 +303,72 @@ tcp_get_cc_algorithm(netstack_t *stack, mod_prop_info_t *pinfo,
 	}
 	if (nbytes >= psize)
 		return (ENOBUFS);
+	return (0);
+}
+
+static int
+tcp_set_lro(netstack_t *stack, cred_t *cr, mod_prop_info_t *pinfo,
+    const char *ifname, const void *pr_val, uint_t flags)
+{
+	int ret;
+	boolean_t enable;
+
+	/* XXX Double check if framework doesn't do this for us */
+	if ((ret = secpolicy_ip_config(cr, B_FALSE)) != 0) {
+		return (0);
+	}
+
+	if ((ret = mod_boolean_value(pr_val, pinfo, flags, &enable)) != 0) {
+		return (ret);
+	}
+
+	if (ifname == NULL || ifname[0] == '\0') {
+		return (ENOTSUP);
+	}
+
+	return (ip_set_lmp(stack, ifname, IP_LMP_TCP_LRO, &enable,
+	    sizeof (enable)));
+}
+
+
+static int
+tcp_get_lro(netstack_t *stack, mod_prop_info_t *pinfo, const char *ifname,
+    void *pval, uint_t psize, uint_t flags)
+{
+	size_t	nbytes;
+
+	bzero(pval, psize);
+	if ((flags & MOD_PROP_PERM) != 0) {
+		nbytes = snprintf(pval, psize, "%u", MOD_PROP_PERM_RW);
+	} else if ((flags & MOD_PROP_POSSIBLE) != 0) {
+		nbytes = snprintf(pval, psize, "%u,%u", B_FALSE, B_TRUE);
+	} else if ((flags & MOD_PROP_DEFAULT) != 0) {
+		nbytes = snprintf(pval, psize, "%u", pinfo->prop_def_bval);
+	} else {
+		int ret;
+		boolean_t value;
+		size_t len = sizeof (value);
+
+		if (ifname == NULL) {
+			return (EINVAL);
+		}
+
+		if ((ret = ip_get_lmp(stack, ifname, IP_LMP_TCP_LRO, &value,
+		    &len)) != 0) {
+			return (ret);
+		}
+
+		if (len != sizeof (boolean_t)) {
+			return (EIO);
+		}
+
+		nbytes = snprintf(pval, psize, "%u", value);
+	}
+
+	if (nbytes >= psize) {
+		return (ENOBUFS);
+	}
+
 	return (0);
 }
 
@@ -603,6 +670,9 @@ mod_prop_info_t tcp_propinfo_tbl[] = {
 	/* "L" value from RFC 3465 */
 	{ "_abc_l_var", MOD_PROTO_TCP,
 	    mod_set_uint32, mod_get_uint32, {1, UINT32_MAX, 2}, {2} },
+
+	{ "lro", MOD_PROTO_TCP, tcp_set_lro, tcp_get_lro,
+	    {B_FALSE}, {B_FALSE} },
 
 	{ "?", MOD_PROTO_TCP, NULL, mod_get_allprop, {0}, {0} },
 

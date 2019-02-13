@@ -356,6 +356,8 @@ typedef struct dld_ioc_led {
 #define	DLD_CAPAB_POLL		0x00000002
 #define	DLD_CAPAB_PERIM		0x00000003
 #define	DLD_CAPAB_LSO		0x00000004
+#define	DLD_CAPAB_IPCHECK	0x00000005
+#define	DLD_CAPAB_LRO		0x00000006
 
 #define	DLD_ENABLE		0x00000001
 #define	DLD_DISABLE		0x00000002
@@ -437,6 +439,16 @@ typedef struct dld_capab_lso_s {
 	uint_t  lso_max_tcpv4;	/* maximum TCPv4 payload */
 	uint_t  lso_max_tcpv6;	/* maximum TCPv6 payload */
 } dld_capab_lso_t;
+
+/*
+ * LRO Capability
+ */
+
+#define	DLD_CAPAB_LRO_TCP	0x01	/* LRO on TCP */
+
+typedef struct dld_capab_lro_s {
+	uint_t	lro_flags;
+} dld_capab_lro_t;
 
 int	dld_getinfo(dev_info_t *, ddi_info_cmd_t, void *, void **);
 int	dld_devt_to_instance(dev_t);

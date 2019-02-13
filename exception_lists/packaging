@@ -818,6 +818,16 @@ usr/lib/sparcv9/libsff.so		sparc
 usr/lib/libsff.so
 
 #
+# private bhyve files
+#
+lib/amd64/libvmmapi.so			i386
+usr/include/bhyve.h			i386
+usr/include/vmmapi.h			i386
+usr/platform/i86pc/include/sys/vmm.h	i386
+usr/platform/i86pc/include/sys/vmm_impl.h	i386
+usr/platform/i86pc/include/sys/vmm_instruction_emul.h	i386
+
+#
 # libcustr is private
 #
 usr/include/libcustr.h
@@ -887,12 +897,3 @@ opt/onbld/man/man1onbld/sgsmsg.1onbld
 # The built link-editor demos are not delivered
 #
 opt/SUNWonld/
-
-#
-# private bhyve header files
-#
-usr/include/bhyve.h
-usr/include/vmmapi.h
-usr/platform/i86pc/include/sys/vmm.h
-usr/platform/i86pc/include/sys/vmm_impl.h
-usr/platform/i86pc/include/sys/vmm_instruction_emul.h

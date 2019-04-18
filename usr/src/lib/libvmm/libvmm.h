@@ -112,8 +112,8 @@ int vmm_set_desc(vmm_t *, int, int, vmm_desc_t *);
 
 vmm_mode_t vmm_vcpu_mode(vmm_t *, int);
 vmm_isa_t vmm_vcpu_isa(vmm_t *, int);
-int vmm_vtol(vmm_t *, int, int, uint64_t, uint64_t *);
-int vmm_vtop(vmm_t *, int, int, uint64_t, uint64_t *);
+int vmm_vtol(vmm_t *, int, int, uint64_t, uint64_t *, vmm_mode_t);
+int vmm_vtop(vmm_t *, int, int, uint64_t, uint64_t *, uint64_t, vmm_mode_t);
 
 #ifdef __cplusplus
 }

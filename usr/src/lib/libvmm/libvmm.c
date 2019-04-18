@@ -710,7 +710,8 @@ vmm_vcpu_isa(vmm_t *vmm, int vcpu)
  *
  */
 int
-vmm_vtol(vmm_t *vmm, int vcpu, int seg, uint64_t vaddr, uint64_t *laddr)
+vmm_vtol(vmm_t *vmm, int vcpu, int seg, uint64_t vaddr, uint64_t *laddr,
+    vmm_mode_t mode)
 {
 	vmm_desc_t desc;
 	uint64_t limit;
@@ -718,7 +719,11 @@ vmm_vtol(vmm_t *vmm, int vcpu, int seg, uint64_t vaddr, uint64_t *laddr)
 	if (vmm_get_desc(vmm, vcpu, seg, &desc) != 0)
 		return (-1);
 
-	switch (vmm_vcpu_mode(vmm, vcpu)) {
+	if (mode == VMM_MODE_UNKNOWN) {
+		mode = vmm_vcpu_mode(vmm, vcpu);
+	}
+
+	switch (mode) {
 	case VMM_MODE_REAL:
 		if (seg == VMM_DESC_FS || seg == VMM_DESC_GS)
 			goto fault;
@@ -755,36 +760,53 @@ vmm_vtol(vmm_t *vmm, int vcpu, int seg, uint64_t vaddr, uint64_t *laddr)
  * according to the mode the vCPU is in.
  */
 int
-vmm_vtop(vmm_t *vmm, int vcpu, int seg, uint64_t vaddr, uint64_t *paddr)
+vmm_vtop(vmm_t *vmm, int vcpu, int seg, uint64_t vaddr, uint64_t *paddr,
+    uint64_t cr3, vmm_mode_t mode)
 {
 	vmm_mmu_t mmu = { 0 };
 	int ret = 0;
-
-	if (vmm_vtol(vmm, vcpu, seg, vaddr, &vaddr) != 0)
-		return (-1);
 
 	if (vmm_get_regset(vmm, vcpu, ARRAY_SIZE(vmm_mmu_regnum),
 	    vmm_mmu_regnum, (uint64_t *)&mmu) != 0)
 		return (-1);
 
-	if ((mmu.vm_cr0 & CR0_PG) == 0) {
-		/* no paging, physical equals virtual */
-		*paddr = vaddr;
-		return (0);
+	if (cr3 == 0) {
+		/* Default to using the CPU state to determine translation */
+		cr3 = mmu.vm_cr3;
+		mode = vmm_vcpu_mmu_mode(vmm, vcpu, &mmu);
+
+		if ((mmu.vm_cr0 & CR0_PG) == 0) {
+			/* no paging, physical equals virtual */
+			if (vmm_vtol(vmm, vcpu, seg, vaddr, &vaddr, mode) != 0)
+				return (-1);
+			*paddr = vaddr;
+			return (0);
+		}
+	} else {
+		/*
+		 * If a cr3 value override is provided, allow the vCPU
+		 * addressing mode to be overridden as well.
+		 */
+		if (mode == VMM_MODE_UNKNOWN) {
+			mode = vmm_vcpu_mmu_mode(vmm, vcpu, &mmu);
+		}
 	}
 
-	switch (vmm_vcpu_mmu_mode(vmm, vcpu, &mmu)) {
+	if (vmm_vtol(vmm, vcpu, seg, vaddr, &vaddr, mode) != 0)
+		return (-1);
+
+	switch (mode) {
 	case VMM_MODE_PROT:
 		/* protected mode, no PAE: 2-level paging, 32bit PTEs */
-		ret = vmm_pte2paddr(vmm, mmu.vm_cr3, B_TRUE, 2, vaddr, paddr);
+		ret = vmm_pte2paddr(vmm, cr3, B_TRUE, 2, vaddr, paddr);
 		break;
 	case VMM_MODE_PAE:
 		/* protected mode with PAE: 3-level paging, 64bit PTEs */
-		ret = vmm_pte2paddr(vmm, mmu.vm_cr3, B_FALSE, 3, vaddr, paddr);
+		ret = vmm_pte2paddr(vmm, cr3, B_FALSE, 3, vaddr, paddr);
 		break;
 	case VMM_MODE_LONG:
 		/* long mode: 4-level paging, 64bit PTEs */
-		ret = vmm_pte2paddr(vmm, mmu.vm_cr3, B_FALSE, 4, vaddr, paddr);
+		ret = vmm_pte2paddr(vmm, cr3, B_FALSE, 4, vaddr, paddr);
 		break;
 	default:
 		ret = -1;
@@ -802,7 +824,8 @@ vmm_vread(vmm_t *vmm, int vcpu, int seg, void *buf, size_t len, uintptr_t addr)
 	uint64_t boundary;
 
 	while (len != 0) {
-		if (vmm_vtop(vmm, vcpu, seg, addr, &paddr) != 0) {
+		if (vmm_vtop(vmm, vcpu, seg, addr, &paddr, 0,
+		    VMM_MODE_UNKNOWN) != 0) {
 			errno = EFAULT;
 			return (0);
 		}
@@ -834,7 +857,8 @@ vmm_vwrite(vmm_t *vmm, int vcpu, int seg, const void *buf, size_t len,
 	uint64_t boundary;
 
 	while (len != 0) {
-		if (vmm_vtop(vmm, vcpu, seg, addr, &paddr) != 0) {
+		if (vmm_vtop(vmm, vcpu, seg, addr, &paddr, 0,
+		    VMM_MODE_UNKNOWN) != 0) {
 			errno = EFAULT;
 			return (0);
 		}

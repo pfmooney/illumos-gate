@@ -769,7 +769,8 @@ bhyve_vtol_dcmd(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 			return (DCMD_USAGE);
 	}
 
-	if (vmm_vtol(bd->bd_vmm, bd->bd_curcpu, segreg, addr, &laddr) != 0) {
+	if (vmm_vtol(bd->bd_vmm, bd->bd_curcpu, segreg, addr, &laddr,
+	    VMM_MODE_UNKNOWN) != 0) {
 		if (errno == EFAULT)
 			set_errno(EMDB_NOMAP);
 		return (DCMD_ERR);
@@ -788,25 +789,43 @@ bhyve_vtop_dcmd(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 {
 	bhyve_data_t *bd = mdb.m_target->t_data;
 	int segreg = bd->bd_defseg;
-	char *seg = "";
+	char *seg = NULL, *mode_str = NULL;
 	physaddr_t pa;
-	int i;
+	uintptr_t cr3 = 0;
+	vmm_mode_t mode = VMM_MODE_UNKNOWN;
 
 	if (!(flags & DCMD_ADDRSPEC))
 		return (DCMD_USAGE);
 
-	i = mdb_getopts(argc, argv, 's', MDB_OPT_STR, &seg, NULL);
+	if (mdb_getopts(argc, argv,
+	    's', MDB_OPT_STR, &seg,
+	    'p', MDB_OPT_UINTPTR, &cr3,
+	    'm', MDB_OPT_STR, &mode_str,
+	    NULL) != argc) {
+		return (DCMD_USAGE);
+	}
 
-	argc -= i;
-	argv += i;
-
-	if (i != 0) {
+	if (seg != NULL) {
 		segreg = bhyve_seg2reg(seg);
 		if (segreg == -1)
 			return (DCMD_USAGE);
 	}
+	if (cr3 != 0 && mode_str != NULL) {
+		if (strcmp(mode_str, "real") == 0) {
+			mode = VMM_MODE_REAL;
+		} else if (strcmp(mode_str, "prot") == 0) {
+			mode = VMM_MODE_PROT;
+		} else if (strcmp(mode_str, "pae") == 0) {
+			mode = VMM_MODE_PAE;
+		} else if (strcmp(mode_str, "long") == 0) {
+			mode = VMM_MODE_LONG;
+		} else {
+			return (DCMD_USAGE);
+		}
+	}
 
-	if (vmm_vtop(bd->bd_vmm, bd->bd_curcpu, segreg, addr, &pa) == -1) {
+	if (vmm_vtop(bd->bd_vmm, bd->bd_curcpu, segreg, addr, &pa, cr3,
+	    mode) == -1) {
 		mdb_warn("failed to get physical mapping");
 		return (DCMD_ERR);
 	}
@@ -1198,7 +1217,8 @@ bhyve_vtop(mdb_tgt_t *tgt, mdb_tgt_as_t as, uintptr_t va, physaddr_t *pa)
 		return (set_errno(EINVAL));
 	}
 
-	if (vmm_vtop(bd->bd_vmm, bd->bd_curcpu, seg, va, pa) != 0) {
+	if (vmm_vtop(bd->bd_vmm, bd->bd_curcpu, seg, va, pa, 0,
+	    VMM_MODE_UNKNOWN) != 0) {
 		if (errno == EFAULT)
 			return (set_errno(EMDB_NOMAP));
 		else

@@ -134,6 +134,20 @@ typedef enum {
 } vmcs_state_t;
 #endif /* __FreeBSD__ */
 
+
+#define EXIT_RING_SIZE 4096
+
+typedef struct {
+	hrtime_t	time;
+	uint64_t	rip;
+	uint64_t	cr3;
+	uint32_t	reason;
+	uint16_t	handled;
+	uint16_t	rflags;
+} exit_ring_t;
+
+
+
 /* virtual machine softc */
 struct vmx {
 	struct vmcs	vmcs[VM_MAXCPU];	/* one vmcs per virtual cpu */
@@ -152,6 +166,8 @@ struct vmx {
 	uint64_t	eptp;
 	struct vm	*vm;
 	long		eptgen[MAXCPU];		/* cached pmap->pm_eptgen */
+	uint_t		exit_ring_pos;
+	exit_ring_t	exit_ring[EXIT_RING_SIZE];
 };
 CTASSERT((offsetof(struct vmx, vmcs) & PAGE_MASK) == 0);
 CTASSERT((offsetof(struct vmx, msr_bitmap) & PAGE_MASK) == 0);

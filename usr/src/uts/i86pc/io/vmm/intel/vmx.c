@@ -162,6 +162,8 @@ static MALLOC_DEFINE(M_VLAPIC, "vlapic", "vlapic");
 SYSCTL_DECL(_hw_vmm);
 SYSCTL_NODE(_hw_vmm, OID_AUTO, vmx, CTLFLAG_RW, NULL, NULL);
 
+static volatile boolean_t vmx_force_cr3_exit = B_FALSE;
+
 #ifdef __FreeBSD__
 int vmxon_enabled[MAXCPU];
 static char vmxon_region[MAXCPU][PAGE_SIZE] __aligned(PAGE_SIZE);
@@ -1044,6 +1046,7 @@ vmx_vminit(struct vm *vm, pmap_t pmap)
 	struct vmx *vmx;
 	struct vmcs *vmcs;
 	uint32_t exc_bitmap;
+	uint32_t local_procbased_ctls;
 
 	vmx = malloc(sizeof(struct vmx), M_VMX, M_WAITOK | M_ZERO);
 	if ((uintptr_t)vmx & PAGE_MASK) {
@@ -1105,6 +1108,12 @@ vmx_vminit(struct vm *vm, pmap_t pmap)
 		KASSERT(error == 0, ("vm_map_mmio(apicbase) error %d", error));
 	}
 
+	/* XXX: temporary */
+	local_procbased_ctls = procbased_ctls;
+	if (vmx_force_cr3_exit) {
+		local_procbased_ctls |= PROCBASED_CR3_LOAD_EXITING;
+	}
+
 	for (i = 0; i < VM_MAXCPU; i++) {
 #ifndef __FreeBSD__
 		/*
@@ -1145,7 +1154,7 @@ vmx_vminit(struct vm *vm, pmap_t pmap)
 #endif
 		error += vmwrite(VMCS_EPTP, vmx->eptp);
 		error += vmwrite(VMCS_PIN_BASED_CTLS, pinbased_ctls);
-		error += vmwrite(VMCS_PRI_PROC_BASED_CTLS, procbased_ctls);
+		error += vmwrite(VMCS_PRI_PROC_BASED_CTLS, local_procbased_ctls);
 		error += vmwrite(VMCS_SEC_PROC_BASED_CTLS, procbased_ctls2);
 		error += vmwrite(VMCS_EXIT_CTLS, exit_ctls);
 		error += vmwrite(VMCS_ENTRY_CTLS, entry_ctls);
@@ -1201,7 +1210,7 @@ vmx_vminit(struct vm *vm, pmap_t pmap)
 		KASSERT(error == 0, ("vmx_vminit: error customizing the vmcs"));
 
 		vmx->cap[i].set = 0;
-		vmx->cap[i].proc_ctls = procbased_ctls;
+		vmx->cap[i].proc_ctls = local_procbased_ctls;
 		vmx->cap[i].proc_ctls2 = procbased_ctls2;
 
 		vmx->state[i].nextrip = ~0;
@@ -1264,6 +1273,17 @@ vmx_exit_trace(struct vmx *vmx, int vcpu, uint64_t rip, uint32_t exit_reason,
 		 handled ? "handled" : "unhandled",
 		 exit_reason_to_str(exit_reason), rip);
 #endif
+	exit_ring_t ent = {
+		.time = gethrtime(),
+		.rip = rip,
+		.cr3 = vmcs_read(VMCS_GUEST_CR3),
+		.reason = exit_reason,
+		.handled = (uint16_t)handled,
+		.rflags = vmcs_read(VMCS_GUEST_RFLAGS),
+	};
+	vmx->exit_ring[vmx->exit_ring_pos] = ent;
+	vmx->exit_ring_pos = (vmx->exit_ring_pos + 1) & (EXIT_RING_SIZE-1);
+
 	DTRACE_PROBE3(vmm__vexit, int, vcpu, uint64_t, rip,
 	    uint32_t, exit_reason);
 }
@@ -2141,6 +2161,29 @@ vmx_emulate_cr0_access(struct vmx *vmx, int vcpu, uint64_t exitqual)
 }
 
 static int
+vmx_emulate_cr3_access(struct vmx *vmx, int vcpu, uint64_t exitqual,
+    uint64_t rip)
+{
+	uint64_t regval, old;
+	const int reg = (exitqual >> 8) & 0xf;
+
+	/* We only handle mov to %cr3 at this time */
+	if ((exitqual & 0xf0) != 0x00)
+		return (UNHANDLED);
+
+	old = vmcs_read(VMCS_GUEST_CR3);
+	regval = vmx_get_guest_reg(vmx, vcpu, (exitqual >> 8) & 0xf);
+
+	DTRACE_PROBE4(vmx__cr3, int, vcpu, uint64_t, rip,
+	    uint64_t, old, uint64_t, regval);
+
+	/* XXX: just blindly do it for now */
+	vmcs_write(VMCS_GUEST_CR3, regval);
+
+	return (HANDLED);
+}
+
+static int
 vmx_emulate_cr4_access(struct vmx *vmx, int vcpu, uint64_t exitqual)
 {
 	uint64_t crval, regval;
@@ -2746,6 +2789,10 @@ vmx_exit_process(struct vmx *vmx, int vcpu, struct vm_exit *vmexit)
 		switch (qual & 0xf) {
 		case 0:
 			handled = vmx_emulate_cr0_access(vmx, vcpu, qual);
+			break;
+		case 3:
+			handled = vmx_emulate_cr3_access(vmx, vcpu, qual,
+			    vmexit->rip);
 			break;
 		case 4:
 			handled = vmx_emulate_cr4_access(vmx, vcpu, qual);

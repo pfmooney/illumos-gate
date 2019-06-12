@@ -27,6 +27,7 @@ OBJECTS		= $(VMM_OBJS:%=$(OBJS_DIR)/%)
 LINTS		= $(VMM_OBJS:%.o=$(LINTS_DIR)/%.ln)
 ROOTMODULE	= $(USR_DRV_DIR)/$(MODULE)
 CONF_SRCDIR	= $(UTSBASE)/i86pc/io/vmm
+MAPFILE		= $(UTSBASE)/i86pc/io/vmm/vmm.mapfile
 
 #
 #	Include common rules.
@@ -107,6 +108,8 @@ LDFLAGS         += -dy -Nfs/dev
 
 $(OBJS_DIR)/vmm.o := CERRWARN += -_gcc=-Wno-pointer-sign -_gcc=-Wno-type-limits
 $(OBJS_DIR)/svm.o := CERRWARN += -_gcc=-Wno-pointer-sign -_gcc=-Wno-type-limits
+
+LDFLAGS         += -M $(MAPFILE)
 
 OFFSETS_VMX	= $(CONF_SRCDIR)/intel/offsets.in
 OFFSETS_SVM	= $(CONF_SRCDIR)/amd/offsets.in

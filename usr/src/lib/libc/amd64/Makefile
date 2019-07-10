@@ -24,7 +24,7 @@
 # Copyright (c) 2013, OmniTI Computer Consulting, Inc. All rights reserved.
 # Copyright 2013 Garrett D'Amore <garrett@damore.org>
 # Copyright 2018 Nexenta Systems, Inc.
-# Copyright (c) 2019, Joyent, Inc.
+# Copyright 2019 Joyent, Inc.
 # Copyright 2019 OmniOS Community Edition (OmniOSce) Association.
 #
 
@@ -207,7 +207,7 @@ COMSYSOBJS=			\
 	geteuid.o		\
 	getgid.o		\
 	getgroups.o		\
-	gethrtime.o		\
+	gethrvtime.o		\
 	getitimer.o		\
 	getmsg.o		\
 	getpid.o		\
@@ -288,6 +288,7 @@ COMSYSOBJS=			\
 SYSOBJS=			\
 	__clock_gettime.o	\
 	__clock_gettime_sys.o	\
+	__gethrtime_sys.o	\
 	__getcontext.o		\
 	__uadmin.o		\
 	_lwp_mutex_unlock.o	\
@@ -296,6 +297,7 @@ SYSOBJS=			\
 	forkx.o			\
 	forkallx.o		\
 	getcontext.o		\
+	gethrtime.o		\
 	gettimeofday.o		\
 	lwp_private.o		\
 	nuname.o		\
@@ -1189,6 +1191,7 @@ $(PORTI18N_COND:%=pics/%) := \
 pics/arc4random.o :=	CPPFLAGS += -I$(SRC)/common/crypto/chacha
 
 pics/__clock_gettime.o := CPPFLAGS += $(COMMPAGE_CPPFLAGS)
+pics/gethrtime.o := CPPFLAGS += $(COMMPAGE_CPPFLAGS)
 pics/gettimeofday.o := CPPFLAGS += $(COMMPAGE_CPPFLAGS)
 
 .KEEP_STATE:

@@ -234,7 +234,7 @@ COMSYSOBJS=			\
 	geteuid.o		\
 	getgid.o		\
 	getgroups.o		\
-	gethrtime.o		\
+	gethrvtime.o		\
 	getitimer.o		\
 	getmsg.o		\
 	getpid.o		\
@@ -315,6 +315,7 @@ COMSYSOBJS=			\
 SYSOBJS=			\
 	__clock_gettime.o	\
 	__clock_gettime_sys.o	\
+	__gethrtime_sys.o	\
 	__getcontext.o		\
 	__uadmin.o		\
 	_lwp_mutex_unlock.o	\
@@ -323,6 +324,7 @@ SYSOBJS=			\
 	forkx.o			\
 	forkallx.o		\
 	getcontext.o		\
+	gethrtime.o		\
 	gettimeofday.o		\
 	lwp_private.o		\
 	nuname.o		\
@@ -1255,6 +1257,7 @@ $(PORTI18N_COND:%=pics/%) := \
 pics/arc4random.o :=	CPPFLAGS += -I$(SRC)/common/crypto/chacha
 
 pics/__clock_gettime.o := CPPFLAGS += $(COMMPAGE_CPPFLAGS)
+pics/gethrtime.o := CPPFLAGS += $(COMMPAGE_CPPFLAGS)
 pics/gettimeofday.o := CPPFLAGS += $(COMMPAGE_CPPFLAGS)
 
 .KEEP_STATE:

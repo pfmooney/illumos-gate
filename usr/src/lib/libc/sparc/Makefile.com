@@ -24,7 +24,7 @@
 # Copyright (c) 2013, OmniTI Computer Consulting, Inc. All rights reserved.
 # Copyright 2013 Garrett D'Amore <garrett@damore.org>
 # Copyright 2018 Nexenta Systems, Inc.
-# Copyright 2018 Joyent, Inc.
+# Copyright 2019 Joyent, Inc.
 # Copyright 2019 OmniOS Community Edition (OmniOSce) Association.
 # Copyright 2019 Peter Tribble.
 #
@@ -250,7 +250,7 @@ COMSYSOBJS=			\
 	geteuid.o		\
 	getgid.o		\
 	getgroups.o		\
-	gethrtime.o		\
+	gethrvtime.o		\
 	getitimer.o		\
 	getmsg.o		\
 	getpid.o		\
@@ -337,6 +337,7 @@ SYSOBJS=			\
 	door.o			\
 	forkx.o			\
 	forkallx.o		\
+	gethrtime.o		\
 	gettimeofday.o		\
 	ptrace.o		\
 	syscall.o		\

@@ -34,6 +34,7 @@ SRCS =	acpi.c			\
 	bhyverun.c		\
 	block_if.c		\
 	bootrom.c		\
+	config.c		\
 	console.c		\
 	consport.c		\
 	dbgport.c		\

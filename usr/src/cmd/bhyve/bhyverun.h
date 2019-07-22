@@ -49,8 +49,6 @@
 struct vmctx;
 extern int guest_ncpus;
 extern uint16_t cores, sockets, threads;
-extern char *guest_uuid_str;
-extern char *vmname;
 #ifndef	__FreeBSD__
 extern int bcons_wait;
 extern int bcons_connected;
@@ -67,9 +65,6 @@ void fbsdrun_addcpu(struct vmctx *ctx, int fromcpu, int newcpu, uint64_t rip);
 void fbsdrun_addcpu(struct vmctx *ctx, int fromcpu, int newcpu, uint64_t rip,
     bool suspend);
 #endif
-int  fbsdrun_muxed(void);
-int  fbsdrun_vmexit_on_hlt(void);
-int  fbsdrun_vmexit_on_pause(void);
-int  fbsdrun_disable_x2apic(void);
 int  fbsdrun_virtio_msix(void);
+
 #endif

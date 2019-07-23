@@ -562,7 +562,7 @@ int
 fbsdrun_virtio_msix(void)
 {
 
-	return (get_config_bool("virtio_msix"));
+	return (get_config_bool("virtio.msix"));
 }
 
 static void *
@@ -701,7 +701,7 @@ vmexit_rdmsr(struct vmctx *ctx, struct vm_exit *vme, int *pvcpu)
 	if (error != 0) {
 		fprintf(stderr, "rdmsr to register %#x on vcpu %d\n",
 		    vme->u.msr.code, *pvcpu);
-		if (get_config_bool("strictmsr")) {
+		if (get_config_bool("x86.strict_msr")) {
 			vm_inject_gp(ctx, *pvcpu);
 			return (VMEXIT_CONTINUE);
 		}
@@ -727,7 +727,7 @@ vmexit_wrmsr(struct vmctx *ctx, struct vm_exit *vme, int *pvcpu)
 	if (error != 0) {
 		fprintf(stderr, "wrmsr to register %#x(%#lx) on vcpu %d\n",
 		    vme->u.msr.code, vme->u.msr.wval, *pvcpu);
-		if (get_config_bool("strictmsr")) {
+		if (get_config_bool("x86.strict_msr")) {
 			vm_inject_gp(ctx, *pvcpu);
 			return (VMEXIT_CONTINUE);
 		}
@@ -1032,7 +1032,7 @@ fbsdrun_set_capabilities(struct vmctx *ctx, int cpu)
 {
 	int err, tmp;
 
-	if (get_config_bool("vmexit_on_hlt")) {
+	if (get_config_bool("hvm.vmexit_on_hlt")) {
 		err = vm_get_capability(ctx, cpu, VM_CAP_HALT_EXIT, &tmp);
 		if (err < 0) {
 			fprintf(stderr, "VM exit on HLT not supported\n");
@@ -1043,7 +1043,7 @@ fbsdrun_set_capabilities(struct vmctx *ctx, int cpu)
 			handler[VM_EXITCODE_HLT] = vmexit_hlt;
 	}
 
-	if (get_config_bool("vmexit_on_pause")) {
+	if (get_config_bool("hvm.vmexit_on_pause")) {
 		/*
 		 * pause exit support required for this mode
 		 */
@@ -1058,7 +1058,7 @@ fbsdrun_set_capabilities(struct vmctx *ctx, int cpu)
 			handler[VM_EXITCODE_PAUSE] = vmexit_pause;
         }
 
-	if (get_config_bool("x2apic"))
+	if (get_config_bool("x86.x2apic"))
 		err = vm_set_x2apic_state(ctx, cpu, X2APIC_ENABLED);
 	else
 		err = vm_set_x2apic_state(ctx, cpu, X2APIC_DISABLED);
@@ -1219,38 +1219,33 @@ set_defaults(void)
 {
 
 	/* default is xAPIC */
-	set_config_bool("x2apic", false);
-	set_config_bool("acpi_tables", false);
+	set_config_bool("x86.x2apic", false);
+	set_config_bool("x86.acpi_tables", false);
+	set_config_bool("x86.strict_io", false);
+	set_config_bool("x86.strict_msr", true);
+	set_config_bool("x86.mptable", true);
+
 	set_config_bool("bvmconsole", false);
 	set_config_bool("gdb.wait", false);
+
 	set_config_bool("memory.guest_in_core", false);
 	set_config_value("memory.size", "256M");
 	set_config_bool("memory.wired", false);
-	set_config_bool("mptable", true);
+
 	set_config_bool("rtc.use_localtime", true);
-	set_config_bool("strictio", false);
-	set_config_bool("strictmsr", true);
-	set_config_bool("virtio_msix", true);
-	set_config_bool("vmexit_on_hlt", false);
-	set_config_bool("vmexit_on_pause", false);
+
+	set_config_bool("virtio.msix", true);
+
+	set_config_bool("hvm.vmexit_on_hlt", false);
+	set_config_bool("hvm.vmexit_on_pause", false);
 }
 
-int
-main(int argc, char *argv[])
+static void
+parse_args(int argc, char *argv[])
 {
-	int c, error, err;
-	int max_vcpus, memflags;
-#ifndef __FreeBSD__
-	bool suspend = false;
-#endif
-	struct vmctx *ctx;
-	uint64_t rip;
-	size_t memsize;
-	const char *value, *vmname;
-	char *optstr;
+	const char *optstr;
+	int c;
 
-	init_config();
-	set_defaults();
 	progname = basename(argv[0]);
 
 #ifdef	__FreeBSD__
@@ -1261,10 +1256,10 @@ main(int argc, char *argv[])
 	while ((c = getopt(argc, argv, optstr)) != -1) {
 		switch (c) {
 		case 'a':
-			set_config_bool("x2apic", false);
+			set_config_bool("x86.x2apic", false);
 			break;
 		case 'A':
-			set_config_bool("acpi_tables", true);
+			set_config_bool("x86.acpi_tables", true);
 			break;
 		case 'b':
 			set_config_bool("bvmconsole", true);
@@ -1277,7 +1272,7 @@ main(int argc, char *argv[])
 			break;
 #ifndef	__FreeBSD__
 		case 'd':
-			suspend = true;
+			set_config_bool("hvm.suspend_at_boot", true);
 			break;
 #else
 		case 'p':
@@ -1337,7 +1332,7 @@ main(int argc, char *argv[])
 				errx(EX_USAGE, "invalid configuration option '%s'", optarg);
 			break;
 		case 'H':
-			set_config_bool("vmexit_on_hlt", true);
+			set_config_bool("hvm.vmexit_on_hlt", true);
 			break;
 		case 'I':
 			/*
@@ -1349,10 +1344,10 @@ main(int argc, char *argv[])
 			 */
 			break;
 		case 'P':
-			set_config_bool("vmexit_on_pause", true);
+			set_config_bool("hvm.vmexit_on_pause", true);
 			break;
 		case 'e':
-			set_config_bool("strictio", true);
+			set_config_bool("x86.strict_io", true);
 			break;
 		case 'u':
 			set_config_bool("rtc.use_localtime", false);
@@ -1361,19 +1356,19 @@ main(int argc, char *argv[])
 			set_config_value("uuid", optarg);
 			break;
 		case 'w':
-			set_config_bool("strictmsr", false);
+			set_config_bool("x86.strict_msr", false);
 			break;
 		case 'W':
-			set_config_bool("virtio_msix", false);
+			set_config_bool("virtio.msix", false);
 			break;
 		case 'x':
-			set_config_bool("x2apic", true);
+			set_config_bool("x86.x2apic", true);
 			break;
 		case 'Y':
-			set_config_bool("mptable", false);
+			set_config_bool("x86.mptable", false);
 			break;
 		case 'h':
-			usage(0);			
+			usage(0);
 		default:
 			usage(1);
 		}
@@ -1386,6 +1381,23 @@ main(int argc, char *argv[])
 
 	if (argc == 1)
 		set_config_value("name", argv[0]);
+}
+
+int
+main(int argc, char *argv[])
+{
+	int error, err;
+	int max_vcpus, memflags;
+	struct vmctx *ctx;
+	uint64_t rip;
+	size_t memsize;
+	const char *value, *vmname;
+
+	init_config();
+	set_defaults();
+
+	parse_args(argc, argv);
+	finish_config();
 
 	vmname = get_config_value("name");
 	if (vmname == NULL)
@@ -1393,7 +1405,7 @@ main(int argc, char *argv[])
 
 #if 1
 	if (get_config_value("config.dump")) {
-		dump_config();
+		dump_config(get_config_value("config.dump_expand") != NULL);
 		exit(1);
 	}
 #endif
@@ -1496,7 +1508,7 @@ main(int argc, char *argv[])
 	/*
  	 * build the guest tables, MP etc.
 	 */
-	if (get_config_bool("mptable")) {
+	if (get_config_bool("x86.mptable")) {
 		error = mptable_build(ctx, guest_ncpus);
 		if (error) {
 			perror("error to build the guest tables");
@@ -1507,7 +1519,7 @@ main(int argc, char *argv[])
 	error = smbios_build(ctx);
 	assert(error == 0);
 
-	if (get_config_bool("acpi_tables")) {
+	if (get_config_bool("x86.acpi_tables")) {
 		error = acpi_build(ctx, guest_ncpus);
 		assert(error == 0);
 	}
@@ -1551,7 +1563,8 @@ main(int argc, char *argv[])
 #ifdef __FreeBSD__
 	fbsdrun_addcpu(ctx, BSP, BSP, rip);
 #else
-	fbsdrun_addcpu(ctx, BSP, BSP, rip, suspend);
+	fbsdrun_addcpu(ctx, BSP, BSP, rip,
+	    get_config_bool("hvm.suspend_at_boot"));
 
 	mark_provisioned();
 #endif

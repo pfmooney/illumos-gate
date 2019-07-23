@@ -30,12 +30,6 @@
 #ifndef __CONFIG_H__
 #define	__CONFIG_H__
 
-#ifdef __FreeBSD__
-#include <sys/nv.h>
-#else
-#include <sys/nvpair.h>
-#endif /* __FreeBSD__ */
-
 /*-
  * Manages a configuration database backed by an nv(9) list.
  *
@@ -43,61 +37,25 @@
  * values into other types if needed.  String values can reference
  * other configuration variables using a '%(name)' syntax.  In this
  * case, the name must be the the full path of the configuration
- * variable.  The % character can be escaped with a preceding \ to
- * avoid expansion.  Any \ characters must be escaped.
+ * variable.  The % character can be escaped with a preceding % to avoid
+ * expansion
  *
  * Configuration variables are stored in a tree.  The full path of a
  * variable is specified as a dot-separated name similar to sysctl(8)
  * OIDs.
- */ 
-
-/*
- * Fetches the value of a configuration variable.  If the "raw" value
- * contains references to other configuration variables, this function
- * expands those references and returns a pointer to the parsed
- * string.  The string's storage is only stable until the next call to
- * this function.
- *
- * If no node is found, returns NULL.
- *
- * If 'parent' is NULL, 'name' is assumed to be a top-level variable.
  */
-const char *get_config_value_node(nvlist_t *parent, const char *name);
-
-/*
- * Similar to get_config_value_node but expects a full path to the
- * leaf node.
- */
-const char *get_config_value(const char *path);
 
 /* Initializes the tree to an empty state. */
 void	init_config(void);
+void	finish_config(void);
 
-/*
- * Parses a dot-separated OID path.  Will fail if the path names an
- * existing leaf configuration variable.  Will create a new node if it
- * does not yet exist and 'create' is true.
- */
-nvlist_t *lookup_config_node(const char *path, bool create);
-
-/*
- * Adds or replaces the value of the specified variable.
- *
- * If 'parent' is NULL, 'name' is assumed to be a top-level variable.
- */
-void	set_config_value_node(nvlist_t *parent, const char *name,
-    const char *value);
-
-/*
- * Similar to set_config_value_node but expects a full path to the
- * leaf node.
- */
+const char *get_config_value(const char *path);
 void	set_config_value(const char *path, const char *value);
 
 /* Convenience wrappers for boolean variables. */
-bool	get_config_bool(const char *path);
-void	set_config_bool(const char *path, bool value);
+boolean_t get_config_bool(const char *path);
+void	set_config_bool(const char *path, boolean_t value);
 
-void	dump_config(void);
+void	dump_config(boolean_t);
 
 #endif /* !__CONFIG_H__ */

@@ -844,6 +844,7 @@ smbios_build(struct vmctx *ctx)
 	return (0);
 }
 
+#ifndef __FreeBSD__
 int
 smbios_parse(const char *opts)
 {
@@ -852,6 +853,8 @@ smbios_parse(const char *opts)
 	char *token;
 	char *end;
 	long type;
+	const char *guest_uuid_str = get_config_value("uuid");
+
 	struct {
 		const char *key;
 		const char **targetp;
@@ -862,7 +865,7 @@ smbios_parse(const char *opts)
 		{ "serial", &smbios_type1_strings[3] },
 		{ "sku", &smbios_type1_strings[4] },
 		{ "family", &smbios_type1_strings[5] },
-		{ "uuid", (const char **)&guest_uuid_str },
+		{ "uuid", &guest_uuid_str },
 		{ 0 }
 	};
 
@@ -920,3 +923,4 @@ fail:
 	free(buf);
 	return (-1);
 }
+#endif /* __FreeBSD__ */

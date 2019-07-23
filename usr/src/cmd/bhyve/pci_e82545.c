@@ -66,6 +66,7 @@ __FBSDID("$FreeBSD$");
 #include "mii.h"
 
 #include "bhyverun.h"
+#include "config.h"
 #include "pci_emul.h"
 #include "mevent.h"
 
@@ -2388,7 +2389,7 @@ e82545_init(struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 	 */
 	if (!mac_provided) {
 		snprintf(nstr, sizeof(nstr), "%d-%d-%s", pi->pi_slot,
-		    pi->pi_func, vmname);
+		    pi->pi_func, get_config_value("name"));
 
 		MD5Init(&mdctx);
 		MD5Update(&mdctx, nstr, strlen(nstr));

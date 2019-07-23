@@ -34,7 +34,7 @@ SRCS =	acpi.c			\
 	bhyverun.c		\
 	block_if.c		\
 	bootrom.c		\
-	config.c		\
+	config_sol.c		\
 	console.c		\
 	consport.c		\
 	dbgport.c		\
@@ -128,7 +128,7 @@ CSTD=		$(CSTD_GNU99)
 C99MODE=	-xc99=%all
 C99LMODE=	-Xc99=%all
 
-$(PROG) := LDLIBS += -lsocket -lnsl -ldlpi -ldladm -lmd -luuid -lvmmapi -lz
+$(PROG) := LDLIBS += -lavl -lsocket -lnsl -ldlpi -ldladm -lmd -luuid -lvmmapi -lz
 $(ZHYVE_PROG) := LDLIBS += -lnvpair
 $(MEVENT_TEST_PROG) := LDLIBS += -lsocket
 

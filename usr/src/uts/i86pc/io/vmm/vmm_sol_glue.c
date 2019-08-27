@@ -36,7 +36,7 @@
  * http://www.illumos.org/license/CDDL.
  *
  * Copyright 2014 Pluribus Networks Inc.
- * Copyright 2018 Joyent, Inc.
+ * Copyright 2019 Joyent, Inc.
  */
 
 #include <sys/types.h>

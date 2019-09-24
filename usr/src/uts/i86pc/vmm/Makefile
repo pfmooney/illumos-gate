@@ -104,12 +104,12 @@ CFLAGS		+= -_gcc=-Wno-format
 # enable collection of VMM statistics
 CFLAGS		+= -DVMM_KEEP_STATS
 
-LDFLAGS         += -dy -Nfs/dev
+LDFLAGS         += -Nfs/dev
 
 $(OBJS_DIR)/vmm.o := CERRWARN += -_gcc=-Wno-pointer-sign -_gcc=-Wno-type-limits
 $(OBJS_DIR)/svm.o := CERRWARN += -_gcc=-Wno-pointer-sign -_gcc=-Wno-type-limits
 
-LDFLAGS         += -M $(MAPFILE)
+LDFLAGS         += -z type=kmod -M $(MAPFILE)
 
 OFFSETS_VMX	= $(CONF_SRCDIR)/intel/offsets.in
 OFFSETS_SVM	= $(CONF_SRCDIR)/amd/offsets.in
@@ -118,9 +118,6 @@ ASSYM_SVM	= $(OBJS_DIR)/svm_assym.h
 ASSYM_H		= $(ASSYM_VMX) $(ASSYM_SVM)
 
 CLEANFILES	+= $(ASSYM_H)
-
-# create linker set start/stop symbols, needed by VMM stats
-POST_PROCESS	+= ; $(GENSETDEFS) $@
 
 #
 #	Default build targets.

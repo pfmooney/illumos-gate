@@ -124,8 +124,6 @@ C99LMODE=	-Xc99=%all
 $(PROG) := LDLIBS += -lsocket -lnsl -ldlpi -lmd -luuid -lvmmapi -lz
 $(MEVENT_TEST_PROG) := LDLIBS += -lsocket
 
-POST_PROCESS += ; $(GENSETDEFS) $@
-
 .KEEP_STATE:
 
 all: $(PROG) $(MEVENT_TEST_PROG) $(SUBDIRS)

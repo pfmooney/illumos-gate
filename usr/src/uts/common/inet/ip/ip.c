@@ -5249,7 +5249,7 @@ ip_fanout_udp_conn(conn_t *connp, mblk_t *mp, ipha_t *ipha, ip6_t *ip6h,
  * Fanout for UDP packets that are multicast or broadcast, and ICMP errors.
  * (Unicast fanout is handled in ip_input_v4.)
  *
- * If SO_REUSEADDR is set all multicast and broadcast packets
+ * If SO_REUSEADDR or SO_REUSEPORT is set all multicast and broadcast packets
  * will be delivered to all conns bound to the same port.
  *
  * If there is at least one matching AF_INET receiver, then we will
@@ -5286,9 +5286,9 @@ ip_fanout_udp_multi_v4(mblk_t *mp, ipha_t *ipha, uint16_t lport, uint16_t fport,
 	connp = connfp->connf_head;
 
 	/*
-	 * If SO_REUSEADDR has been set on the first we send the
-	 * packet to all clients that have joined the group and
-	 * match the port.
+	 * If SO_REUSEADDR or SO_REUSEPORT has been set on the
+	 * first we send the packet to all clients that have
+	 * join the group and match the port.
 	 */
 	while (connp != NULL) {
 		if ((IPCL_UDP_MATCH(connp, lport, laddr, fport, faddr)) &&
@@ -5304,7 +5304,7 @@ ip_fanout_udp_multi_v4(mblk_t *mp, ipha_t *ipha, uint16_t lport, uint16_t fport,
 
 	CONN_INC_REF(connp);
 
-	if (connp->conn_reuseaddr) {
+	if (connp->conn_reuseaddr || connp->conn_reuseport) {
 		conn_t		*first_connp = connp;
 		conn_t		*next_connp;
 		mblk_t		*mp1;
@@ -5415,11 +5415,11 @@ notfound:
 	ASSERT(IPCL_IS_NONSTR(connp) || connp->conn_rq != NULL);
 
 	/*
-	 * If SO_REUSEADDR has been set on the first we send the
-	 * packet to all clients that have joined the group and
-	 * match the port.
+	 * If SO_REUSEADDR or SO_REUSEPORT has been set on the
+	 * first we send the packet to all clients that have
+	 * join the group and match the port.
 	 */
-	if (connp->conn_reuseaddr) {
+	if (connp->conn_reuseaddr || connp->conn_reuseport) {
 		conn_t		*first_connp = connp;
 		conn_t		*next_connp;
 		mblk_t		*mp1;

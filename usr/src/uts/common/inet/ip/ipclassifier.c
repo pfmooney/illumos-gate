@@ -1640,7 +1640,7 @@ ipcl_classify_v4(mblk_t *mp, uint8_t protocol, uint_t hdr_len,
 		if (connp != NULL) {
 			/* Have a listener at least */
 			if (connp->conn_rg_bind != NULL) {
-				/* have multiple SO_REUSEPORT bind, do load balancing */
+				/* Have multiple bindings by SO_REUSEPORT, do load balancing */
 				connp = conn_rg_lb_pick(connp->conn_rg_bind);
 			}
 			CONN_INC_REF(connp);
@@ -1678,6 +1678,7 @@ ipcl_classify_v4(mblk_t *mp, uint8_t protocol, uint_t hdr_len,
 
 		if (connp != NULL) {
 			if (connp->conn_rg_bind != NULL) {
+				/* Have multiple bindings by SO_REUSEPORT, do load balancing */
 				connp = conn_rg_lb_pick(connp->conn_rg_bind);
 			}
 			CONN_INC_REF(connp);

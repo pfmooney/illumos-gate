@@ -274,6 +274,9 @@
 #include <sys/tsol/tnet.h>
 #include <sys/sockio.h>
 
+#include <inet/tcp.h>
+#include <inet/tcp_impl.h>
+
 /* Old value for compatibility. Setable in /etc/system */
 uint_t tcp_conn_hash_size = 0;
 
@@ -1636,6 +1639,10 @@ ipcl_classify_v4(mblk_t *mp, uint8_t protocol, uint_t hdr_len,
 
 		if (connp != NULL) {
 			/* Have a listener at least */
+			if (connp->conn_rg_bind != NULL) {
+				/* have multiple SO_REUSEPORT bind, do load balancing */
+				connp = conn_rg_lb_pick(connp->conn_rg_bind);
+			}
 			CONN_INC_REF(connp);
 			mutex_exit(&bind_connfp->connf_lock);
 			return (connp);
@@ -1670,6 +1677,9 @@ ipcl_classify_v4(mblk_t *mp, uint8_t protocol, uint_t hdr_len,
 		}
 
 		if (connp != NULL) {
+			if (connp->conn_rg_bind != NULL) {
+				connp = conn_rg_lb_pick(connp->conn_rg_bind);
+			}
 			CONN_INC_REF(connp);
 			mutex_exit(&connfp->connf_lock);
 			return (connp);
@@ -1771,6 +1781,10 @@ ipcl_classify_v6(mblk_t *mp, uint8_t protocol, uint_t hdr_len,
 
 		if (connp != NULL) {
 			/* Have a listner at least */
+			if (connp->conn_rg_bind != NULL) {
+				/* have multiple SO_REUSEPORT bind, do load balancing */
+				connp = conn_rg_lb_pick(connp->conn_rg_bind);
+			}
 			CONN_INC_REF(connp);
 			mutex_exit(&bind_connfp->connf_lock);
 			return (connp);
@@ -1807,6 +1821,9 @@ ipcl_classify_v6(mblk_t *mp, uint8_t protocol, uint_t hdr_len,
 		}
 
 		if (connp != NULL) {
+			if (connp->conn_rg_bind != NULL) {
+				connp = conn_rg_lb_pick(connp->conn_rg_bind);
+			}
 			CONN_INC_REF(connp);
 			mutex_exit(&connfp->connf_lock);
 			return (connp);
@@ -2797,4 +2814,155 @@ conn_get_socket_info(conn_t *connp, mib2_socketInfoEntry_t *sie)
 	sie->sie_dev = attr.va_rdev;
 
 	return (sie);
+}
+
+
+/* Max number of members in TCP SO_REUSEPORT group */
+#define	CONN_RG_SIZE_MAX		256
+/* Step size when expanding members array */
+#define	CONN_RG_SIZE_STEP		4
+/* Initial size of members array */
+#define CONN_RG_SIZE_INIT		4
+
+
+conn_rg_t *
+conn_rg_init(conn_t *connp)
+{
+	conn_rg_t *rg;
+	rg = kmem_alloc(sizeof (conn_rg_t), KM_NOSLEEP|KM_NORMALPRI);
+	if (rg == NULL)
+		return (NULL);
+	rg->connrg_members = kmem_zalloc(CONN_RG_SIZE_INIT * sizeof (conn_t *),
+	    KM_NOSLEEP|KM_NORMALPRI);
+	if (rg->connrg_members == NULL) {
+		kmem_free(rg, sizeof (conn_rg_t));
+		return (NULL);
+	}
+
+	mutex_init(&rg->connrg_lock, NULL, MUTEX_DEFAULT, NULL);
+	rg->connrg_size = CONN_RG_SIZE_INIT;
+	rg->connrg_count = 1;
+	rg->connrg_active = 1;
+	/* The initial state of RNG is a fixed number,
+	 * which means its predictable. This shouldn't
+	 * be a security hole since this RNG is only
+	 * used by load balancer to pick connection */
+	rg->connrg_lb_state = 0xDEADBEEFDEADBEEF;
+	rg->connrg_members[0] = connp;
+	return (rg);
+}
+
+void
+conn_rg_destroy(conn_rg_t *rg)
+{
+	mutex_enter(&rg->connrg_lock);
+	ASSERT(rg->connrg_count == 0);
+	ASSERT(rg->connrg_active == 0);
+	kmem_free(rg->connrg_members, rg->connrg_size * sizeof (conn_t *));
+	mutex_destroy(&rg->connrg_lock);
+	kmem_free(rg, sizeof (struct conn_rg_s));
+}
+
+int
+conn_rg_insert(conn_rg_t *rg, conn_t *connp)
+{
+	mutex_enter(&rg->connrg_lock);
+
+	VERIFY(rg->connrg_size > 0);
+	VERIFY(rg->connrg_count <= rg->connrg_size);
+	if (rg->connrg_count != 0) {
+		cred_t *oldcred = rg->connrg_members[0]->conn_cred;
+		cred_t *newcred = connp->conn_cred;
+
+		if (crgetuid(oldcred) != crgetuid(newcred) ||
+		    crgetzoneid(oldcred) != crgetzoneid(newcred)) {
+			mutex_exit(&rg->connrg_lock);
+			return (EPERM);
+		}
+	}
+
+	if (rg->connrg_count == rg->connrg_size) {
+		unsigned int oldalloc = rg->connrg_size * sizeof (conn_t *);
+		unsigned int newsize = rg->connrg_size + CONN_RG_SIZE_STEP;
+		conn_t **newmembers;
+
+		if (newsize > CONN_RG_SIZE_MAX) {
+			mutex_exit(&rg->connrg_lock);
+			return (EINVAL);
+		}
+		newmembers = kmem_zalloc(newsize * sizeof (conn_t *),
+		    KM_NOSLEEP|KM_NORMALPRI);
+		if (newmembers == NULL) {
+			mutex_exit(&rg->connrg_lock);
+			return (ENOMEM);
+		}
+		bcopy(rg->connrg_members, newmembers, oldalloc);
+		kmem_free(rg->connrg_members, oldalloc);
+		rg->connrg_members = newmembers;
+		rg->connrg_size = newsize;
+	}
+
+	rg->connrg_members[rg->connrg_count] = connp;
+	rg->connrg_count++;
+	rg->connrg_active++;
+
+	mutex_exit(&rg->connrg_lock);
+	return (0);
+}
+
+boolean_t
+conn_rg_remove(conn_rg_t *rg, conn_t *connp)
+{
+	int i;
+	int count_remaining;
+
+	mutex_enter(&rg->connrg_lock);
+	for (i = 0; i < rg->connrg_count; i++) {
+		if (rg->connrg_members[i] == connp)
+			break;
+	}
+	/* The item should be present */
+	ASSERT(i < rg->connrg_count);
+	/* Move the last member into this position */
+	rg->connrg_count--;
+	rg->connrg_members[i] = rg->connrg_members[rg->connrg_count];
+	rg->connrg_members[rg->connrg_count] = NULL;
+	if (connp->conn_reuseport != 0)
+		rg->connrg_active--;
+	count_remaining = rg->connrg_count;
+	mutex_exit(&rg->connrg_lock);
+	return (count_remaining);
+}
+
+void
+conn_rg_setactive(conn_rg_t *rg, boolean_t is_active)
+{
+	/* XXX: replace with atomic? */
+	mutex_enter(&rg->connrg_lock);
+	if (is_active) {
+		rg->connrg_active++;
+	} else {
+		rg->connrg_active--;
+	}
+	mutex_exit(&rg->connrg_lock);
+}
+
+conn_t*
+conn_rg_lb_pick(conn_rg_t *rg)
+{
+	/* quick implementation */
+	mutex_enter(&rg->connrg_lock);
+
+	/* Random load balancing with Xorshift64 */
+	uint64_t idx = rg->connrg_lb_state;
+	idx ^= idx << 13;
+	idx ^= idx >> 7;
+	idx ^= idx << 17;
+	rg->connrg_lb_state = idx;
+
+	idx = idx % rg->connrg_count;
+	conn_t *ret = rg->connrg_members[idx];
+
+	mutex_exit(&rg->connrg_lock);
+	return ret;
 }

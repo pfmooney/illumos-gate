@@ -407,6 +407,12 @@ udp_bind_hash_remove(udp_t *udp, boolean_t caller_holds_lock)
 		ASSERT(lockp != NULL);
 		mutex_enter(lockp);
 	}
+	if (connp->conn_rg_bind != NULL) {
+		if (conn_rg_remove(connp->conn_rg_bind, connp) == 0) {
+			conn_rg_destroy(connp->conn_rg_bind);
+		}
+		connp->conn_rg_bind = NULL;
+	}
 	if (udp->udp_ptpbhn != NULL) {
 		udpnext = udp->udp_bind_hash;
 		if (udpnext != NULL) {
@@ -5131,7 +5137,63 @@ udp_do_bind(conn_t *connp, struct sockaddr *sa, socklen_t len, cred_t *cr,
 			 * No other stream has this IP address
 			 * and port number. We can use it.
 			 */
+			if (connp->conn_reuseport &&
+			    (connp->conn_rg_bind == NULL)) {
+				/* 
+				 * We are the first in this rg group,
+				 * set up conn_rg_bind
+				 */
+				conn_rg_t *rg = conn_rg_init(connp);
+				if (rg == NULL) {
+					mutex_exit(&udpf->uf_lock);
+					mutex_exit(&connp->conn_lock);
+					return (ENOMEM);
+				}
+				connp->conn_rg_bind = rg;
+			}
 			break;
+		}
+
+		if (!found_exclbind &&
+		    (connp->conn_reuseport && requested_port != 0)) {
+			/* 
+			 * We have SO_REUSEPORT set, so attempt to 
+			 * join the existing conn_rg_bind group
+			 */
+			ASSERT(udp1 != NULL);
+			ASSERT(connp1 != NULL);
+
+			boolean_t allow_reuse = B_TRUE;
+			
+			int err = 0;
+			
+			/* Reject reuse if socket already bound doesn't allow it */
+			if (connp1->conn_rg_bind == NULL) {
+				err = (-TADDRBUSY);
+				goto errout;
+			}
+
+			/* Reject reuse if not all socket in the rg group allow it */
+			conn_rg_t *rg = connp1->conn_rg_bind;
+			if (rg->connrg_active != rg->connrg_count) {
+				err = (-TADDRBUSY);
+				goto errout;
+			}
+
+			/* Join the group */
+			err = conn_rg_insert(rg, connp);
+			if (err != 0) {
+				goto errout;
+			}
+			connp->conn_rg_bind = rg;
+			break;
+
+		errout:	
+			if (err != 0) {
+				mutex_exit(&udpf->uf_lock);
+				mutex_exit(&connp->conn_lock);
+				return err;
+			}
 		}
 		mutex_exit(&udpf->uf_lock);
 		if (bind_to_req_port_only) {

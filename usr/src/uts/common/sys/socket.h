@@ -139,6 +139,7 @@ typedef	void		*_RESTRICT_KYWD Psocklen_t;
 #define	SO_OOBINLINE	0x0100		/* leave received OOB data in line */
 #define	SO_DGRAM_ERRIND	0x0200		/* Application wants delayed error */
 #define	SO_RECVUCRED	0x0400		/* Application wants ucred of sender */
+#define	SO_REUSEPORT	0x2004		/* allow simultaneous port reuse */
 
 /*
  * Socket options are passed using a signed integer, but it is also rare
@@ -205,7 +206,6 @@ struct so_snd_bufinfo {
 #define	SO_SRCADDR	0x2001		/* Internal: AF_UNIX source address */
 #define	SO_FILEP	0x2002		/* Internal: AF_UNIX file pointer */
 #define	SO_UNIX_CLOSE	0x2003		/* Internal: AF_UNIX peer closed */
-#define	SO_REUSEPORT	0x2004		/* allow simultaneous port reuse */
 #endif	/* _KERNEL */
 
 /*

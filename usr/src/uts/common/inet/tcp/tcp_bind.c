@@ -45,6 +45,7 @@
 
 #include <inet/common.h>
 #include <inet/ip.h>
+#include <inet/ip_impl.h>
 #include <inet/tcp.h>
 #include <inet/tcp_impl.h>
 #include <inet/proto_set.h>
@@ -57,7 +58,6 @@ static uint32_t tcp_random_anon_port = 1;
 static int	tcp_bind_select_lport(tcp_t *, in_port_t *, boolean_t,
 		    cred_t *cr);
 static in_port_t	tcp_get_next_priv_port(const tcp_t *);
-static int tcp_rg_insert(tcp_rg_t *, struct tcp_s *);
 
 /*
  * Hash list insertion routine for tcp_t structures. Each hash bucket
@@ -176,13 +176,13 @@ tcp_bind_hash_remove(tcp_t *tcp)
 	ASSERT(lockp != NULL);
 	mutex_enter(lockp);
 
-	/* destroy any association with SO_REUSEPORT group */
-	if (tcp->tcp_rg_bind != NULL) {
-		if (tcp_rg_remove(tcp->tcp_rg_bind, tcp)) {
+	/* Destroy any association with SO_REUSEPORT group */
+	if (connp->conn_rg_bind != NULL) {
+		if (conn_rg_remove(connp->conn_rg_bind, connp) == 0) {
 			/* Last one out turns off the lights */
-			tcp_rg_destroy(tcp->tcp_rg_bind);
+			conn_rg_destroy(connp->conn_rg_bind);
 		}
-		tcp->tcp_rg_bind = NULL;
+		connp->conn_rg_bind = NULL;
 	}
 
 	if (tcp->tcp_ptpbhn) {
@@ -492,6 +492,7 @@ tcp_bind_select_lport(tcp_t *tcp, in_port_t *requested_port_ptr,
 		connp->conn_mlp_type = mlptype;
 	}
 
+	int errcode;
 	allocated_port = tcp_bindi(tcp, requested_port, &v6addr,
 	    connp->conn_reuseaddr, B_FALSE, bind_to_req_port_only,
 	    user_specified);
@@ -509,7 +510,7 @@ tcp_bind_select_lport(tcp_t *tcp, in_port_t *requested_port_ptr,
 				    SL_ERROR|SL_TRACE,
 				    "tcp_bind: requested addr busy");
 			}
-			return (-TADDRBUSY);
+			return (errcode);
 		} else {
 			/* If we are out of ports, fail the bind. */
 			if (connp->conn_debug) {
@@ -676,6 +677,7 @@ tcp_bindi(tcp_t *tcp, in_port_t port, const in6_addr_t *laddr,
 	conn_t *connp = tcp->tcp_connp;
 	tcp_stack_t	*tcps = tcp->tcp_tcps;
 	boolean_t reuseport = connp->conn_reuseport;
+
 
 	/*
 	 * Lookup for free addresses is done in a loop and "loopmax"
@@ -858,7 +860,7 @@ tcp_bindi(tcp_t *tcp, in_port_t port, const in6_addr_t *laddr,
 				 * binding if it too had SO_REUSEPORT enabled
 				 * when it was bound.
 				 */
-				attempt_reuse = (ltcp->tcp_rg_bind != NULL);
+				attempt_reuse = (ltcp->tcp_connp->conn_rg_bind != NULL);
 				break;
 			}
 
@@ -908,27 +910,20 @@ tcp_bindi(tcp_t *tcp, in_port_t port, const in6_addr_t *laddr,
 		} else {
 			if (attempt_reuse) {
 				int err;
-				struct tcp_rg_s *rg;
+				struct conn_rg_s *rg;
 
 				ASSERT(ltcp != NULL);
-				ASSERT(ltcp->tcp_rg_bind != NULL);
-				ASSERT(tcp->tcp_rg_bind != NULL);
-				ASSERT(ltcp->tcp_rg_bind != tcp->tcp_rg_bind);
+				ASSERT(ltcp->tcp_connp != NULL);
+				ASSERT(ltcp->tcp_connp->conn_rg_bind != NULL);
+				ASSERT(connp != NULL);
+				ASSERT(connp->conn_rg_bind == NULL);
 
-				err = tcp_rg_insert(ltcp->tcp_rg_bind, tcp);
+				err = conn_rg_insert(ltcp->tcp_connp->conn_rg_bind, connp);
 				if (err != 0) {
 					mutex_exit(&tbf->tf_lock);
 					return (0);
 				}
-				/*
-				 * Now that the newly-binding socket has joined
-				 * the existing reuseport group on ltcp, it
-				 * should clean up its own (empty) group.
-				 */
-				rg = tcp->tcp_rg_bind;
-				tcp->tcp_rg_bind = ltcp->tcp_rg_bind;
-				VERIFY(tcp_rg_remove(rg, tcp));
-				tcp_rg_destroy(rg);
+				connp->conn_rg_bind = ltcp->tcp_connp->conn_rg_bind;
 			}
 
 			/*
@@ -941,6 +936,19 @@ tcp_bindi(tcp_t *tcp, in_port_t port, const in6_addr_t *laddr,
 			    ip_xmit_attr_t *, connp->conn_ixa,
 			    void, NULL, tcp_t *, tcp, void, NULL,
 			    int32_t, TCPS_IDLE);
+
+			/*
+			 * If we are the first here and have SO_REUSEPORT set,
+			 * set up connp->conn_rg_bind
+			 */
+			if (connp->conn_reuseport &&
+			    (connp->conn_rg_bind == NULL)) {
+				conn_rg_t *rg = conn_rg_init(connp);
+				if (rg == NULL) {
+					return (0);
+				}
+				connp->conn_rg_bind = rg;
+			}
 
 			connp->conn_lport = htons(port);
 
@@ -996,124 +1004,3 @@ tcp_bindi(tcp_t *tcp, in_port_t port, const in6_addr_t *laddr,
 	return (0);
 }
 
-/* Max number of members in TCP SO_REUSEPORT group */
-#define	TCP_RG_SIZE_MAX		64
-/* Step size when expanding members array */
-#define	TCP_RG_SIZE_STEP	2
-
-
-tcp_rg_t *
-tcp_rg_init(tcp_t *tcp)
-{
-	tcp_rg_t *rg;
-	rg = kmem_alloc(sizeof (tcp_rg_t), KM_NOSLEEP|KM_NORMALPRI);
-	if (rg == NULL)
-		return (NULL);
-	rg->tcprg_members = kmem_zalloc(2 * sizeof (tcp_t *),
-	    KM_NOSLEEP|KM_NORMALPRI);
-	if (rg->tcprg_members == NULL) {
-		kmem_free(rg, sizeof (tcp_rg_t));
-		return (NULL);
-	}
-
-	mutex_init(&rg->tcprg_lock, NULL, MUTEX_DEFAULT, NULL);
-	rg->tcprg_size = 2;
-	rg->tcprg_count = 1;
-	rg->tcprg_active = 1;
-	rg->tcprg_members[0] = tcp;
-	return (rg);
-}
-
-void
-tcp_rg_destroy(tcp_rg_t *rg)
-{
-	mutex_enter(&rg->tcprg_lock);
-	ASSERT(rg->tcprg_count == 0);
-	ASSERT(rg->tcprg_active == 0);
-	kmem_free(rg->tcprg_members, rg->tcprg_size * sizeof (tcp_t *));
-	mutex_destroy(&rg->tcprg_lock);
-	kmem_free(rg, sizeof (struct tcp_rg_s));
-}
-
-static int
-tcp_rg_insert(tcp_rg_t *rg, tcp_t *tcp)
-{
-	mutex_enter(&rg->tcprg_lock);
-
-	VERIFY(rg->tcprg_size > 0);
-	VERIFY(rg->tcprg_count <= rg->tcprg_size);
-	if (rg->tcprg_count != 0) {
-		cred_t *oldcred = rg->tcprg_members[0]->tcp_connp->conn_cred;
-		cred_t *newcred = tcp->tcp_connp->conn_cred;
-
-		if (crgetuid(oldcred) != crgetuid(newcred) ||
-		    crgetzoneid(oldcred) != crgetzoneid(newcred)) {
-			mutex_exit(&rg->tcprg_lock);
-			return (EPERM);
-		}
-	}
-
-	if (rg->tcprg_count == rg->tcprg_size) {
-		unsigned int oldalloc = rg->tcprg_size * sizeof (tcp_t *);
-		unsigned int newsize = rg->tcprg_size + TCP_RG_SIZE_STEP;
-		tcp_t **newmembers;
-
-		if (newsize > TCP_RG_SIZE_MAX) {
-			mutex_exit(&rg->tcprg_lock);
-			return (EINVAL);
-		}
-		newmembers = kmem_zalloc(newsize * sizeof (tcp_t *),
-		    KM_NOSLEEP|KM_NORMALPRI);
-		if (newmembers == NULL) {
-			mutex_exit(&rg->tcprg_lock);
-			return (ENOMEM);
-		}
-		bcopy(rg->tcprg_members, newmembers, oldalloc);
-		kmem_free(rg->tcprg_members, oldalloc);
-		rg->tcprg_members = newmembers;
-		rg->tcprg_size = newsize;
-	}
-
-	rg->tcprg_members[rg->tcprg_count] = tcp;
-	rg->tcprg_count++;
-	rg->tcprg_active++;
-
-	mutex_exit(&rg->tcprg_lock);
-	return (0);
-}
-
-boolean_t
-tcp_rg_remove(tcp_rg_t *rg, tcp_t *tcp)
-{
-	int i;
-	boolean_t is_empty;
-
-	mutex_enter(&rg->tcprg_lock);
-	for (i = 0; i < rg->tcprg_count; i++) {
-		if (rg->tcprg_members[i] == tcp)
-			break;
-	}
-	/* The item should be present */
-	ASSERT(i < rg->tcprg_count);
-	/* Move the last member into this position */
-	rg->tcprg_count--;
-	rg->tcprg_members[i] = rg->tcprg_members[rg->tcprg_count];
-	rg->tcprg_members[rg->tcprg_count] = NULL;
-	if (tcp->tcp_connp->conn_reuseport != 0)
-		rg->tcprg_active--;
-	is_empty = (rg->tcprg_count == 0);
-	mutex_exit(&rg->tcprg_lock);
-	return (is_empty);
-}
-
-void
-tcp_rg_setactive(tcp_rg_t *rg, boolean_t is_active)
-{
-	mutex_enter(&rg->tcprg_lock);
-	if (is_active) {
-		rg->tcprg_active++;
-	} else {
-		rg->tcprg_active--;
-	}
-	mutex_exit(&rg->tcprg_lock);
-}

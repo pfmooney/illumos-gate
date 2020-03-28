@@ -1417,16 +1417,16 @@ tcp_free(tcp_t *tcp)
 	/*
 	 * Destroy any association with SO_REUSEPORT group.
 	 */
-	if (tcp->tcp_rg_bind != NULL) {
+	if (connp->conn_rg_bind != NULL) {
 		/*
 		 * This is only necessary for connections which enabled
 		 * SO_REUSEPORT but were never bound.  Such connections should
 		 * be the one and only member of the tcp_rg_tp to which they
 		 * have been associated.
 		 */
-		VERIFY(tcp_rg_remove(tcp->tcp_rg_bind, tcp));
-		tcp_rg_destroy(tcp->tcp_rg_bind);
-		tcp->tcp_rg_bind = NULL;
+		VERIFY(conn_rg_remove(connp->conn_rg_bind, connp) == 0);
+		conn_rg_destroy(connp->conn_rg_bind);
+		connp->conn_rg_bind = NULL;
 	}
 
 	/*
@@ -1619,7 +1619,7 @@ tcp_connect_ipv4(tcp_t *tcp, ipaddr_t *dstaddrp, in_port_t dstport,
 		lport = tcp_bindi(tcp, lport, &connp->conn_laddr_v6, 0, B_TRUE,
 		    B_FALSE, B_FALSE);
 		if (lport == 0)
-			return (-TNOADDR);
+			return (-TADDRBUSY);
 	}
 
 	/*
@@ -1715,7 +1715,7 @@ tcp_connect_ipv6(tcp_t *tcp, in6_addr_t *dstaddrp, in_port_t dstport,
 		lport = tcp_bindi(tcp, lport, &connp->conn_laddr_v6, 0, B_TRUE,
 		    B_FALSE, B_FALSE);
 		if (lport == 0)
-			return (-TNOADDR);
+			return (-TADDRBUSY);
 	}
 
 	/*

@@ -221,6 +221,24 @@ typedef struct crb_s {
 #define	crb_timestamp			crbu.crbb.crbb_timestamp
 
 /*
+ * Track conn_t entities bound to the same port/address tuple via SO_REUSEPORT.
+ * - connrg_lock:	Protects the other fields
+ * - connrg_size:	Allocated size (in entries) of tcprg_members array
+ * - connrg_count:	Count of occupied tcprg_members slots
+ * - connrg_active:	Count of members which still have SO_REUSEPORT set
+ * - connrg_lb_counter:	State of load balancer
+ * - connrg_members:	Connections associated with address/port group
+ */
+typedef struct conn_rg_s {
+	kmutex_t	connrg_lock;
+	uint_t		connrg_size;
+	uint_t		connrg_count;
+	uint_t		connrg_active;
+	uint64_t	connrg_lb_state;
+	struct conn_s	**connrg_members;
+} conn_rg_t;
+
+/*
  * The initial fields in the conn_t are setup by the kmem_cache constructor,
  * and are preserved when it is freed. Fields after that are bzero'ed when
  * the conn_t is freed.
@@ -329,6 +347,9 @@ struct conn_s {
 	connf_t		*conn_fanout;		/* Hash bucket we're part of */
 	struct conn_s	*conn_next;		/* Hash chain next */
 	struct conn_s	*conn_prev;		/* Hash chain prev */
+
+	/* Group of conn_s bound to same address/port pair by SO_REUSEPORT */
+	struct conn_rg_s	*conn_rg_bind;  
 
 	struct {
 		in6_addr_t connua_laddr;	/* Local address - match */
@@ -737,6 +758,13 @@ extern int	ip_helper_stream_setup(queue_t *, dev_t *, int, int,
     cred_t *, boolean_t);
 extern mib2_socketInfoEntry_t *conn_get_socket_info(conn_t *,
     mib2_socketInfoEntry_t *);
+
+conn_rg_t*	conn_rg_init(conn_t *connp);
+void	conn_rg_destroy(struct conn_rg_s *rg);
+int	conn_rg_insert(struct conn_rg_s *rg, conn_t *connp);
+boolean_t	conn_rg_remove(struct conn_rg_s *rg, conn_t *connp);
+void	conn_rg_setactive(struct conn_rg_s *rg, boolean_t is_acitve);
+conn_t*	conn_rg_lb_pick(struct conn_rg_s *rg);
 
 #ifdef	__cplusplus
 }

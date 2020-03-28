@@ -1025,7 +1025,7 @@ tcp_fallback(sock_lower_handle_t proto_handle, queue_t *q,
 	/*
 	 * Do not allow fallback on connections making use of SO_REUSEPORT.
 	 */
-	if (tcp->tcp_rg_bind != NULL) {
+	if (connp->conn_rg_bind != NULL) {
 		freeb(stropt_mp);
 		freeb(ordrel_mp);
 		squeue_synch_exit(connp);

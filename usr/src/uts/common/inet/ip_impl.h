@@ -198,6 +198,7 @@ extern void ip_ire_rebind_walker(ire_t *, void *);
 #define	DEV_IP	"/devices/pseudo/ip@0:ip"
 #define	DEV_IP6	"/devices/pseudo/ip6@0:ip6"
 
+
 #endif	/* _KERNEL */
 
 #ifdef	__cplusplus

@@ -510,91 +510,90 @@ tcp_opt_get(conn_t *connp, int level, int name, uchar_t *ptr)
  *    in port-reuse, will switch its tcp_rg_bind pointer when it joins the
  *    group of an existing connection in tcp_bindi().
  */
-static int
-tcp_set_reuseport(conn_t *connp, boolean_t do_enable)
-{
-	tcp_t *tcp = connp->conn_tcp;
-	struct tcp_rg_s *rg;
+/* static int */
+/* tcp_set_reuseport(conn_t *connp, boolean_t do_enable) */
+/* { */
+/* 	tcp_t *tcp = connp->conn_tcp; */
+/* 	struct conn_rg_s *rg; */
 
-	if (!IPCL_IS_NONSTR(connp)) {
-		if (do_enable) {
-			/*
-			 * SO_REUSEPORT cannot be enabled on sockets which have
-			 * fallen back to the STREAMS API.
-			 */
-			return (EINVAL);
-		} else {
-			/*
-			 * A connection with SO_REUSEPORT enabled should be
-			 * prevented from falling back to STREAMS mode via
-			 * logic in tcp_fallback.  It is legal, however, for
-			 * fallen-back connections to affirm the disabled state
-			 * of SO_REUSEPORT.
-			 */
-			ASSERT(connp->conn_reuseport == 0);
-			ASSERT(tcp->tcp_conn_rg_bind == NULL);
-			return (0);
-		}
-	}
-	if (tcp->tcp_state <= TCPS_CLOSED) {
-		return (EINVAL);
-	}
-	if (connp->conn_reuseport == 0 && do_enable) {
-		/* disabled -> enabled */
-		if (tcp->tcp_rg_bind != NULL) {
-			tcp_rg_setactive(tcp->tcp_rg_bind, do_enable);
-		} else {
-			/*
-			 * Connection state is not a concern when initially
-			 * populating tcp_rg_bind.  Setting it to non-NULL on a
-			 * bound or listening connection would only mean that
-			 * new reused-port binds become a possibility.
-			 */
-			if ((rg = tcp_rg_init(tcp)) == NULL) {
-				return (ENOMEM);
-			}
-			tcp->tcp_rg_bind = rg;
-		}
-		connp->conn_reuseport = 1;
-	} else if (connp->conn_reuseport != 0 && !do_enable) {
-		/* enabled -> disabled */
-		ASSERT(tcp->tcp_rg_bind != NULL);
-		if (tcp->tcp_state == TCPS_IDLE) {
-			/*
-			 * If the connection has not been bound yet, discard
-			 * the reuse group state.  Since disabling SO_REUSEPORT
-			 * on a bound socket will _not_ prevent others from
-			 * reusing the port, the presence of tcp_rg_bind is
-			 * used to determine reuse availability, not
-			 * conn_reuseport.
-			 *
-			 * This allows proper behavior for examples such as:
-			 *
-			 * setsockopt(fd1, ... SO_REUSEPORT, &on_val...);
-			 * bind(fd1, &myaddr, ...);
-			 * setsockopt(fd1, ... SO_REUSEPORT, &off_val...);
-			 *
-			 * setsockopt(fd2, ... SO_REUSEPORT, &on_val...);
-			 * bind(fd2, &myaddr, ...); // <- SHOULD SUCCEED
-			 *
-			 */
-			rg = tcp->tcp_rg_bind;
-			tcp->tcp_rg_bind = NULL;
-			VERIFY(tcp_rg_remove(rg, tcp));
-			tcp_rg_destroy(rg);
-		} else {
-			/*
-			 * If a connection has been bound, it's no longer safe
-			 * to manipulate tcp_rg_bind until connection clean-up
-			 * during tcp_free.  Just mark the member status of the
-			 * connection as inactive.
-			 */
-			tcp_rg_setactive(tcp->tcp_rg_bind, do_enable);
-		}
-		connp->conn_reuseport = 0;
-	}
-	return (0);
-}
+/* 	if (!IPCL_IS_NONSTR(connp)) { */
+/* 		if (do_enable) { */
+/* 			/\* */
+/* 			 * SO_REUSEPORT cannot be enabled on sockets which have */
+/* 			 * fallen back to the STREAMS API. */
+/* 			 *\/ */
+/* 			return (EINVAL); */
+/* 		} else { */
+/* 			/\* */
+/* 			 * A connection with SO_REUSEPORT enabled should be */
+/* 			 * prevented from falling back to STREAMS mode via */
+/* 			 * logic in tcp_fallback.  It is legal, however, for */
+/* 			 * fallen-back connections to affirm the disabled state */
+/* 			 * of SO_REUSEPORT. */
+/* 			 *\/ */
+/* 			ASSERT(connp->conn_reuseport == 0); */
+/* 			return (0); */
+/* 		} */
+/* 	} */
+/* 	if (tcp->tcp_state <= TCPS_CLOSED) { */
+/* 		return (EINVAL); */
+/* 	} */
+/* 	if (connp->conn_reuseport == 0 && do_enable) { */
+/* 		/\* disabled -> enabled *\/ */
+/* 		if (connp->conn_rg_bind != NULL) { */
+/* 			conn_rg_setactive(connp->conn_rg_bind, do_enable); */
+/* 		} else { */
+/* 			/\* */
+/* 			 * Connection state is not a concern when initially */
+/* 			 * populating tcp_rg_bind.  Setting it to non-NULL on a */
+/* 			 * bound or listening connection would only mean that */
+/* 			 * new reused-port binds become a possibility. */
+/* 			 *\/ */
+/* 			if ((rg = conn_rg_init(connp)) == NULL) { */
+/* 				return (ENOMEM); */
+/* 			} */
+/* 			connp->conn_rg_bind = rg; */
+/* 		} */
+/* 		connp->conn_reuseport = 1; */
+/* 	} else if (connp->conn_reuseport != 0 && !do_enable) { */
+/* 		/\* enabled -> disabled *\/ */
+/* 		ASSERT(connp->conn_rg_bind != NULL); */
+/* 		if (tcp->tcp_state == TCPS_IDLE) { */
+/* 			/\* */
+/* 			 * If the connection has not been bound yet, discard */
+/* 			 * the reuse group state.  Since disabling SO_REUSEPORT */
+/* 			 * on a bound socket will _not_ prevent others from */
+/* 			 * reusing the port, the presence of tcp_rg_bind is */
+/* 			 * used to determine reuse availability, not */
+/* 			 * conn_reuseport. */
+/* 			 * */
+/* 			 * This allows proper behavior for examples such as: */
+/* 			 * */
+/* 			 * setsockopt(fd1, ... SO_REUSEPORT, &on_val...); */
+/* 			 * bind(fd1, &myaddr, ...); */
+/* 			 * setsockopt(fd1, ... SO_REUSEPORT, &off_val...); */
+/* 			 * */
+/* 			 * setsockopt(fd2, ... SO_REUSEPORT, &on_val...); */
+/* 			 * bind(fd2, &myaddr, ...); // <- SHOULD SUCCEED */
+/* 			 * */
+/* 			 *\/ */
+/* 			rg = connp->conn_rg_bind; */
+/* 			connp->conn_rg_bind = NULL; */
+/* 			VERIFY(conn_rg_remove(rg, connp)); */
+/* 			conn_rg_destroy(rg); */
+/* 		} else { */
+/* 			/\* */
+/* 			 * If a connection has been bound, it's no longer safe */
+/* 			 * to manipulate tcp_rg_bind until connection clean-up */
+/* 			 * during tcp_free.  Just mark the member status of the */
+/* 			 * connection as inactive. */
+/* 			 *\/ */
+/* 			conn_rg_setactive(connp->conn_rg_bind, do_enable); */
+/* 		} */
+/* 		connp->conn_reuseport = 0; */
+/* 	} */
+/* 	return (0); */
+/* } */
 
 /*
  * We declare as 'int' rather than 'void' to satisfy pfi_t arg requirements.
@@ -765,11 +764,6 @@ tcp_opt_set(conn_t *connp, uint_t optset_context, int level, int name,
 				tcp->tcp_snd_zcopy_aware = 1;
 			}
 			*outlenp = inlen;
-			return (0);
-		case SO_REUSEPORT:
-			if (!checkonly) {
-				return (tcp_set_reuseport(connp, *i1 != 0));
-			}
 			return (0);
 		}
 		break;

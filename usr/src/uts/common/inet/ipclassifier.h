@@ -759,12 +759,12 @@ extern int	ip_helper_stream_setup(queue_t *, dev_t *, int, int,
 extern mib2_socketInfoEntry_t *conn_get_socket_info(conn_t *,
     mib2_socketInfoEntry_t *);
 
-conn_rg_t*	conn_rg_init(conn_t *connp);
+conn_rg_t	*conn_rg_init(conn_t *connp);
 void	conn_rg_destroy(struct conn_rg_s *rg);
 int	conn_rg_insert(struct conn_rg_s *rg, conn_t *connp);
 boolean_t	conn_rg_remove(struct conn_rg_s *rg, conn_t *connp);
 void	conn_rg_setactive(struct conn_rg_s *rg, boolean_t is_acitve);
-conn_t*	conn_rg_lb_pick(struct conn_rg_s *rg);
+conn_t	*conn_rg_lb_pick(struct conn_rg_s *rg);
 
 #ifdef	__cplusplus
 }

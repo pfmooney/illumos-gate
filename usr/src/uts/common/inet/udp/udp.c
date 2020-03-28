@@ -5139,7 +5139,7 @@ udp_do_bind(conn_t *connp, struct sockaddr *sa, socklen_t len, cred_t *cr,
 			 */
 			if (connp->conn_reuseport &&
 			    (connp->conn_rg_bind == NULL)) {
-				/* 
+				/*
 				 * We are the first in this rg group,
 				 * set up conn_rg_bind
 				 */
@@ -5156,17 +5156,17 @@ udp_do_bind(conn_t *connp, struct sockaddr *sa, socklen_t len, cred_t *cr,
 
 		if (!found_exclbind &&
 		    (connp->conn_reuseport && requested_port != 0)) {
-			/* 
-			 * We have SO_REUSEPORT set, so attempt to 
+			/*
+			 * We have SO_REUSEPORT set, so attempt to
 			 * join the existing conn_rg_bind group
 			 */
 			ASSERT(udp1 != NULL);
 			ASSERT(connp1 != NULL);
 
 			boolean_t allow_reuse = B_TRUE;
-			
+
 			int err = 0;
-			
+
 			/* Reject reuse if socket already bound doesn't allow it */
 			if (connp1->conn_rg_bind == NULL) {
 				err = (-TADDRBUSY);
@@ -5188,7 +5188,7 @@ udp_do_bind(conn_t *connp, struct sockaddr *sa, socklen_t len, cred_t *cr,
 			connp->conn_rg_bind = rg;
 			break;
 
-		errout:	
+		errout:
 			if (err != 0) {
 				mutex_exit(&udpf->uf_lock);
 				mutex_exit(&connp->conn_lock);

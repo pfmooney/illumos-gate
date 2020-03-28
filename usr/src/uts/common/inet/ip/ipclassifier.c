@@ -1783,7 +1783,7 @@ ipcl_classify_v6(mblk_t *mp, uint8_t protocol, uint_t hdr_len,
 		if (connp != NULL) {
 			/* Have a listner at least */
 			if (connp->conn_rg_bind != NULL) {
-				/* have multiple SO_REUSEPORT bind, do load balancing */
+				/* Have multiple SO_REUSEPORT bind, do load balancing */
 				connp = conn_rg_lb_pick(connp->conn_rg_bind);
 			}
 			CONN_INC_REF(connp);
@@ -1823,6 +1823,7 @@ ipcl_classify_v6(mblk_t *mp, uint8_t protocol, uint_t hdr_len,
 
 		if (connp != NULL) {
 			if (connp->conn_rg_bind != NULL) {
+				/* Have multiple SO_REUSEPORT bind, do load balancing */
 				connp = conn_rg_lb_pick(connp->conn_rg_bind);
 			}
 			CONN_INC_REF(connp);
@@ -2825,7 +2826,7 @@ conn_get_socket_info(conn_t *connp, mib2_socketInfoEntry_t *sie)
 /* Initial size of members array */
 #define CONN_RG_SIZE_INIT		4
 
-
+/* Initialize a conn_rg_t structure */
 conn_rg_t *
 conn_rg_init(conn_t *connp)
 {
@@ -2853,6 +2854,10 @@ conn_rg_init(conn_t *connp)
 	return (rg);
 }
 
+/*
+ * Destroy a conn_rg_t structure
+ * All conn_t in the group must be removed beforehand
+ */
 void
 conn_rg_destroy(conn_rg_t *rg)
 {
@@ -2864,6 +2869,11 @@ conn_rg_destroy(conn_rg_t *rg)
 	kmem_free(rg, sizeof (struct conn_rg_s));
 }
 
+/*
+ * Check if the given conection have the same effective UID
+ * as other connections in this group, and insert the connection
+ * in the group if true. Return EPERM otherwise.
+ */
 int
 conn_rg_insert(conn_rg_t *rg, conn_t *connp)
 {
@@ -2911,6 +2921,10 @@ conn_rg_insert(conn_rg_t *rg, conn_t *connp)
 	return (0);
 }
 
+/*
+ * Remove a connection from the given group
+ * Returns number of connection left in the group
+ */
 boolean_t
 conn_rg_remove(conn_rg_t *rg, conn_t *connp)
 {
@@ -2935,19 +2949,21 @@ conn_rg_remove(conn_rg_t *rg, conn_t *connp)
 	return (count_remaining);
 }
 
+/* Toggle active state of SO_REUSEPORT */
 void
 conn_rg_setactive(conn_rg_t *rg, boolean_t is_active)
 {
-	/* XXX: replace with atomic? */
-	mutex_enter(&rg->connrg_lock);
 	if (is_active) {
-		rg->connrg_active++;
+		atomic_inc_uint(&rg->connrg_active);
 	} else {
-		rg->connrg_active--;
+		atomic_dec_uint(&rg->connrg_active);
 	}
-	mutex_exit(&rg->connrg_lock);
 }
 
+/*
+ * Pick a connection from the given group, in a load-balaced way
+ * Currently we use a random load balancer based on Xorshift64
+ */
 conn_t*
 conn_rg_lb_pick(conn_rg_t *rg)
 {

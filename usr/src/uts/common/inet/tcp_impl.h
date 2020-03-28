@@ -693,7 +693,7 @@ extern int	tcp_bind_check(conn_t *, struct sockaddr *, socklen_t,
 extern void	tcp_bind_hash_insert(tf_t *, tcp_t *, int);
 extern void	tcp_bind_hash_remove(tcp_t *);
 extern in_port_t	tcp_bindi(tcp_t *, in_port_t, const in6_addr_t *,
-			    int, boolean_t, boolean_t, boolean_t);
+			    int, boolean_t, boolean_t, boolean_t, int *error);
 extern in_port_t	tcp_update_next_port(in_port_t, const tcp_t *,
 			    boolean_t);
 

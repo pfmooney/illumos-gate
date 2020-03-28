@@ -226,7 +226,7 @@ typedef struct crb_s {
  * - connrg_size:	Allocated size (in entries) of tcprg_members array
  * - connrg_count:	Count of occupied tcprg_members slots
  * - connrg_active:	Count of members which still have SO_REUSEPORT set
- * - connrg_lb_counter:	State of load balancer
+ * - connrg_lb_state:	State of load balancer
  * - connrg_members:	Connections associated with address/port group
  */
 typedef struct conn_rg_s {
@@ -349,7 +349,7 @@ struct conn_s {
 	struct conn_s	*conn_prev;		/* Hash chain prev */
 
 	/* Group of conn_s bound to same address/port pair by SO_REUSEPORT */
-	struct conn_rg_s	*conn_rg_bind;  
+	conn_rg_t	*conn_rg_bind;
 
 	struct {
 		in6_addr_t connua_laddr;	/* Local address - match */

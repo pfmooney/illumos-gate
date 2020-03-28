@@ -495,7 +495,7 @@ tcp_bind_select_lport(tcp_t *tcp, in_port_t *requested_port_ptr,
 	int errcode;
 	allocated_port = tcp_bindi(tcp, requested_port, &v6addr,
 	    connp->conn_reuseaddr, B_FALSE, bind_to_req_port_only,
-	    user_specified);
+	    user_specified, &errcode);
 
 	if (allocated_port == 0) {
 		connp->conn_mlp_type = mlptSingle;
@@ -510,7 +510,7 @@ tcp_bind_select_lport(tcp_t *tcp, in_port_t *requested_port_ptr,
 				    SL_ERROR|SL_TRACE,
 				    "tcp_bind: requested addr busy");
 			}
-			return (errcode);
+			return errcode == (-TNOADDR) ? (-TADDRBUSY) : errcode;
 		} else {
 			/* If we are out of ports, fail the bind. */
 			if (connp->conn_debug) {
@@ -668,7 +668,8 @@ tcp_bind_check(conn_t *connp, struct sockaddr *sa, socklen_t len, cred_t *cr,
 in_port_t
 tcp_bindi(tcp_t *tcp, in_port_t port, const in6_addr_t *laddr,
     int reuseaddr, boolean_t quick_connect,
-    boolean_t bind_to_req_port_only, boolean_t user_specified)
+    boolean_t bind_to_req_port_only, boolean_t user_specified,
+    int *errcode)
 {
 	/* number of times we have run around the loop */
 	int count = 0;
@@ -677,7 +678,7 @@ tcp_bindi(tcp_t *tcp, in_port_t port, const in6_addr_t *laddr,
 	conn_t *connp = tcp->tcp_connp;
 	tcp_stack_t	*tcps = tcp->tcp_tcps;
 	boolean_t reuseport = connp->conn_reuseport;
-
+	*errcode = (-TNOADDR);
 
 	/*
 	 * Lookup for free addresses is done in a loop and "loopmax"
@@ -921,6 +922,7 @@ tcp_bindi(tcp_t *tcp, in_port_t port, const in6_addr_t *laddr,
 				err = conn_rg_insert(ltcp->tcp_connp->conn_rg_bind, connp);
 				if (err != 0) {
 					mutex_exit(&tbf->tf_lock);
+					*errcode = err;
 					return (0);
 				}
 				connp->conn_rg_bind = ltcp->tcp_connp->conn_rg_bind;
@@ -945,6 +947,7 @@ tcp_bindi(tcp_t *tcp, in_port_t port, const in6_addr_t *laddr,
 			    (connp->conn_rg_bind == NULL)) {
 				conn_rg_t *rg = conn_rg_init(connp);
 				if (rg == NULL) {
+					*errcode = ENOMEM;
 					return (0);
 				}
 				connp->conn_rg_bind = rg;
@@ -1003,4 +1006,3 @@ tcp_bindi(tcp_t *tcp, in_port_t port, const in6_addr_t *laddr,
 	} while (++count < loopmax);
 	return (0);
 }
-

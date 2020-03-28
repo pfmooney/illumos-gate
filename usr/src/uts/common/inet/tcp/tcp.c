@@ -1617,9 +1617,9 @@ tcp_connect_ipv4(tcp_t *tcp, ipaddr_t *dstaddrp, in_port_t dstport,
 		lport = tcp_update_next_port(tcps->tcps_next_port_to_try,
 		    tcp, B_TRUE);
 		lport = tcp_bindi(tcp, lport, &connp->conn_laddr_v6, 0, B_TRUE,
-		    B_FALSE, B_FALSE);
+		    B_FALSE, B_FALSE, &error);
 		if (lport == 0)
-			return (-TADDRBUSY);
+			return (error);
 	}
 
 	/*
@@ -1713,9 +1713,9 @@ tcp_connect_ipv6(tcp_t *tcp, in6_addr_t *dstaddrp, in_port_t dstport,
 		lport = tcp_update_next_port(tcps->tcps_next_port_to_try,
 		    tcp, B_TRUE);
 		lport = tcp_bindi(tcp, lport, &connp->conn_laddr_v6, 0, B_TRUE,
-		    B_FALSE, B_FALSE);
+		    B_FALSE, B_FALSE, &error);
 		if (lport == 0)
-			return (-TADDRBUSY);
+			return (error);
 	}
 
 	/*

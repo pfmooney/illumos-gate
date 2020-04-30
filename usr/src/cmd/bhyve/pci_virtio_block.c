@@ -39,7 +39,6 @@
  * http://www.illumos.org/license/CDDL.
  *
  * Copyright 2014 Pluribus Networks Inc.
- * Copyright 2018 OmniOS Community Edition (OmniOSce) Association.
  * Copyright 2018 Joyent, Inc.
  */
 
@@ -339,39 +338,10 @@ pci_vtblk_init(struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 	off_t size;
 	int i, sectsz, sts, sto;
 
-#if !defined(__FreeBSD__) && !defined(__JOYENT__)
-	char *tmpopts, *opt, *nextopt, *path = NULL, *serial = NULL;
-
-	if ((tmpopts = strdup(opts)) == NULL)
-		return (-1);
-
-	for (nextopt = tmpopts, opt = strsep(&nextopt, ",");
-	    opt != NULL; opt = strsep(&nextopt, ",")) {
-		if (path == NULL && *opt == '/') {
-			path = opt;
-			continue;
-		}
-		if (!strncmp(opt, "serial=", 7)) {
-			serial = opt + 7;
-			continue;
-		}
-
-		printf("virtio-block: unknown option '%s'\n", opt);
-		free(tmpopts);
-		return (-1);
-	}
-	if (path == NULL) {
-		printf("virtio-block: backing device required\n");
-		free(tmpopts);
-		return (1);
-	}
-	opts = path;
-#else
 	if (opts == NULL) {
 		printf("virtio-block: backing device required\n");
 		return (1);
 	}
-#endif
 
 	/*
 	 * The supplied backing file has to exist
@@ -380,9 +350,6 @@ pci_vtblk_init(struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 	bctxt = blockif_open(opts, bident);
 	if (bctxt == NULL) {       	
 		perror("Could not open backing file");
-#if !defined(__FreeBSD__) && !defined(__JOYENT__)
-		free(tmpopts);
-#endif
 		return (1);
 	}
 
@@ -425,13 +392,6 @@ pci_vtblk_init(struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 	snprintf(sc->vbsc_ident, VTBLK_BLK_ID_BYTES,
 	    "BHYVE-%02X%02X-%02X%02X-%02X%02X",
 	    digest[0], digest[1], digest[2], digest[3], digest[4], digest[5]);
-#if !defined(__FreeBSD__) && !defined(__JOYENT__)
-	if (serial != NULL) {
-		bzero(sc->vbsc_ident, sizeof(sc->vbsc_ident));
-		strlcpy(sc->vbsc_ident, serial, sizeof(sc->vbsc_ident));
-	}
-	free(tmpopts);
-#endif
 
 	/* setup virtio block config space */
 	sc->vbsc_cfg.vbc_capacity = size / DEV_BSIZE; /* 512-byte units */

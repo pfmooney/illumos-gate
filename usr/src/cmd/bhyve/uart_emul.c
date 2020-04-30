@@ -865,10 +865,6 @@ uart_sock_backend(struct uart_softc *sc, const char *inopts)
 			path = opt;
 			continue;
 		}
-		if (!strcmp(opt, "wait")) {
-			console_wait = true;
-			continue;
-		}
 		/*
 		 * XXX check for server and client options here.  For now,
 		 * everything is a server

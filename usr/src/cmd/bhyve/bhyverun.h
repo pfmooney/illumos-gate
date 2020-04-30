@@ -52,10 +52,10 @@ extern uint16_t cores, sockets, threads;
 extern char *guest_uuid_str;
 extern char *vmname;
 #ifndef	__FreeBSD__
-extern int console_wait;
-extern int console_connected;
-extern pthread_mutex_t console_wait_lock;
-extern pthread_cond_t console_wait_done;
+extern int bcons_wait;
+extern int bcons_connected;
+extern pthread_mutex_t bcons_wait_lock;
+extern pthread_cond_t bcons_wait_done;
 #endif
 
 void *paddr_guest2host(struct vmctx *ctx, uintptr_t addr, size_t len);

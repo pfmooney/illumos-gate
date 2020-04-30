@@ -12,7 +12,6 @@
 /*
  * Copyright 2015 Pluribus Networks Inc.
  * Copyright 2019 Joyent, Inc.
- * Copyright 2019 OmniOS Community Edition (OmniOSce) Association.
  */
 
 #include <sys/types.h>
@@ -1298,28 +1297,17 @@ vmmdev_do_vm_create(char *name, cred_t *cr)
 	vmm_softc_t	*sc = NULL;
 	minor_t		minor;
 	int		error = ENOMEM;
-	hma_reg_t	*reg = NULL;
 
 	if (strnlen(name, VM_MAX_NAMELEN) >= VM_MAX_NAMELEN) {
 		return (EINVAL);
 	}
 
-	mutex_enter(&vmmdev_mtx);
 	mutex_enter(&vmm_mtx);
-
-	if (vmmdev_hma_reg == NULL) {
-		if ((reg = hma_register(vmmdev_hvm_name)) == NULL) {
-			cmn_err(CE_WARN, "%s HMA registration failed.",
-			    vmmdev_hvm_name);
-			error = ENXIO;
-			goto exit;
-		}
-	}
 
 	/* Look for duplicates names */
 	if (vmm_lookup(name) != NULL) {
-		error = EEXIST;
-		goto exit;
+		mutex_exit(&vmm_mtx);
+		return (EEXIST);
 	}
 
 	/* Allow only one instance per non-global zone. */
@@ -1327,8 +1315,8 @@ vmmdev_do_vm_create(char *name, cred_t *cr)
 		for (sc = list_head(&vmm_list); sc != NULL;
 		    sc = list_next(&vmm_list, sc)) {
 			if (sc->vmm_zone == curzone) {
-				error = EINVAL;
-				goto exit;
+				mutex_exit(&vmm_mtx);
+				return (EINVAL);
 			}
 		}
 	}
@@ -1367,12 +1355,7 @@ vmmdev_do_vm_create(char *name, cred_t *cr)
 		vmm_zsd_add_vm(sc);
 
 		list_insert_tail(&vmm_list, sc);
-		if (reg != NULL) {
-			VERIFY(vmmdev_hma_reg == NULL);
-			vmmdev_hma_reg = reg;
-		}
 		mutex_exit(&vmm_mtx);
-		mutex_exit(&vmmdev_mtx);
 		return (0);
 	}
 
@@ -1382,13 +1365,7 @@ fail:
 	if (sc != NULL) {
 		ddi_soft_state_free(vmm_statep, minor);
 	}
-exit:
-	if (reg != NULL) {
-		hma_unregister(reg);
-	}
-
 	mutex_exit(&vmm_mtx);
-	mutex_exit(&vmmdev_mtx);
 
 	return (error);
 }
@@ -1682,7 +1659,6 @@ vmm_do_vm_destroy_locked(vmm_softc_t *sc, boolean_t clean_zsd)
 	dev_info_t	*pdip = ddi_get_parent(vmmdev_dip);
 	minor_t		minor;
 
-	ASSERT(MUTEX_HELD(&vmmdev_mtx));
 	ASSERT(MUTEX_HELD(&vmm_mtx));
 
 	if (clean_zsd) {
@@ -1710,11 +1686,6 @@ vmm_do_vm_destroy_locked(vmm_softc_t *sc, boolean_t clean_zsd)
 	}
 	(void) devfs_clean(pdip, NULL, DV_CLEAN_FORCE);
 
-	if (list_is_empty(&vmm_list)) {
-		hma_unregister(vmmdev_hma_reg);
-		vmmdev_hma_reg = NULL;
-	}
-
 	return (0);
 }
 
@@ -1723,11 +1694,9 @@ vmm_do_vm_destroy(vmm_softc_t *sc, boolean_t clean_zsd)
 {
 	int 		err;
 
-	mutex_enter(&vmmdev_mtx);
 	mutex_enter(&vmm_mtx);
 	err = vmm_do_vm_destroy_locked(sc, clean_zsd);
 	mutex_exit(&vmm_mtx);
-	mutex_exit(&vmmdev_mtx);
 
 	return (err);
 }
@@ -1742,29 +1711,26 @@ vmmdev_do_vm_destroy(const char *name, cred_t *cr)
 	if (crgetuid(cr) != 0)
 		return (EPERM);
 
-	mutex_enter(&vmmdev_mtx);
 	mutex_enter(&vmm_mtx);
 
 	if ((sc = vmm_lookup(name)) == NULL) {
-		err = ENOENT;
-		goto exit;
+		mutex_exit(&vmm_mtx);
+		return (ENOENT);
 	}
 	/*
 	 * We don't check this in vmm_lookup() since that function is also used
 	 * for validation during create and currently vmm names must be unique.
 	 */
 	if (!INGLOBALZONE(curproc) && sc->vmm_zone != curzone) {
-		err = EPERM;
-		goto exit;
+		mutex_exit(&vmm_mtx);
+		return (EPERM);
 	}
 	err = vmm_do_vm_destroy_locked(sc, B_TRUE);
-
-exit:
 	mutex_exit(&vmm_mtx);
-	mutex_exit(&vmmdev_mtx);
 
 	return (err);
 }
+
 
 static int
 vmm_open(dev_t *devp, int flag, int otyp, cred_t *credp)
@@ -2079,18 +2045,12 @@ vmm_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	vmm_sol_glue_init();
 	vmm_arena_init();
 
-	/*
-	 * Perform temporary HMA registration to determine if the hardware
-	 * is capable.
-	 */
 	if ((reg = hma_register(vmmdev_hvm_name)) == NULL) {
 		goto fail;
 	} else if (vmm_mod_load() != 0) {
 		goto fail;
 	}
 	vmm_loaded = B_TRUE;
-	hma_unregister(reg);
-	reg = NULL;
 
 	/* Create control node.  Other nodes will be created on demand. */
 	if (ddi_create_minor_node(dip, "ctl", S_IFCHR,
@@ -2105,6 +2065,7 @@ vmm_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	}
 
 	ddi_report_dev(dip);
+	vmmdev_hma_reg = reg;
 	vmmdev_sdev_hdl = sph;
 	vmmdev_dip = dip;
 	mutex_exit(&vmmdev_mtx);
@@ -2153,10 +2114,8 @@ vmm_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	vmmdev_dip = NULL;
 
 	VERIFY0(vmm_mod_unload());
-	if (vmmdev_hma_reg != NULL) {
-		hma_unregister(vmmdev_hma_reg);
-		vmmdev_hma_reg = NULL;
-	}
+	hma_unregister(vmmdev_hma_reg);
+	vmmdev_hma_reg = NULL;
 	vmm_arena_fini();
 	vmm_sol_glue_cleanup();
 

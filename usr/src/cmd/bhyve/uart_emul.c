@@ -69,10 +69,6 @@ __FBSDID("$FreeBSD$");
 #include <sys/socket.h>
 #endif
 
-#ifndef	__FreeBSD__
-#include "bhyverun.h"
-#endif
-
 #include "mevent.h"
 #include "uart_emul.h"
 
@@ -755,10 +751,6 @@ uart_sock_accept(int fd, enum ev_type ev, void *arg)
 			sc->usc_sock.clifd = connfd;
 			sc->mev = mevent_add(sc->usc_sock.clifd, EVF_READ,
 			    uart_sock_drain, sc);
-			pthread_mutex_lock(&console_wait_lock);
-			console_connected = B_TRUE;
-			pthread_cond_signal(&console_wait_done);
-			pthread_mutex_unlock(&console_wait_lock);
 		}
 	}
 

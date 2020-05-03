@@ -83,6 +83,7 @@ typedef struct mac_promisc_impl_s {			/* Protected by */
 	boolean_t			mpi_no_phys;	/* WO */
 	boolean_t			mpi_strip_vlan_tag;	/* WO */
 	boolean_t			mpi_no_copy;	/* WO */
+	boolean_t			mpi_do_fixups;	/* WO */
 } mac_promisc_impl_t;
 
 typedef union mac_tx_percpu_s {
@@ -411,7 +412,7 @@ extern void mac_promisc_client_dispatch(mac_client_impl_t *, mblk_t *);
 extern void mac_client_init(void);
 extern void mac_client_fini(void);
 extern void mac_promisc_dispatch(mac_impl_t *, mblk_t *,
-    mac_client_impl_t *);
+    mac_client_impl_t *, boolean_t);
 
 extern int mac_validate_props(mac_impl_t *, mac_resource_props_t *);
 

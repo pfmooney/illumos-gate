@@ -606,6 +606,10 @@ proto_promiscon_req(dld_str_t *dsp, mblk_t *mp)
 		new_flags |= DLS_PROMISC_PHYS;
 		break;
 
+	case DL_PROMISC_FIXUPS:
+		new_flags |= DLS_PROMISC_FIXUPS;
+		break;
+
 	default:
 		dl_err = DL_NOTSUPPORTED;
 		goto failed2;
@@ -691,6 +695,14 @@ proto_promiscoff_req(dld_str_t *dsp, mblk_t *mp)
 			goto failed2;
 		}
 		new_flags &= ~DLS_PROMISC_PHYS;
+		break;
+
+	case DL_PROMISC_FIXUPS:
+		if (!(dsp->ds_promisc & DLS_PROMISC_FIXUPS)) {
+			dl_err = DL_NOTENAB;
+			goto failed2;
+		}
+		new_flags &= ~DLS_PROMISC_FIXUPS;
 		break;
 
 	default:

@@ -3616,12 +3616,6 @@ mac_tx(mac_client_handle_t mch, mblk_t *mp_chain, uintptr_t hint,
 		obytes = (mp_chain->b_cont == NULL ? MBLKL(mp_chain) :
 		    msgdsize(mp_chain));
 
-		/*
-		 * There's a chance this primary client might be part
-		 * of a bridge and the packet forwarded to a local
-		 * receiver -- mark the packet accordingly.
-		 */
-		DB_CKSUMFLAGS(mp_chain) |= HW_LOCAL_MAC;
 		mp_chain = mac_provider_tx(mip, srs_tx->st_arg2, mp_chain,
 		    mcip);
 
@@ -4106,7 +4100,7 @@ mac_client_get_effective_resources(mac_client_handle_t mch,
  */
 static void
 mac_promisc_dispatch_one(mac_promisc_impl_t *mpip, mblk_t *mp,
-    boolean_t loopback)
+    boolean_t loopback, boolean_t local)
 {
 	mblk_t *mp_next;
 
@@ -4181,7 +4175,7 @@ mac_is_mcast(mac_impl_t *mip, mblk_t *mp)
  */
 void
 mac_promisc_dispatch(mac_impl_t *mip, mblk_t *mp_chain,
-    mac_client_impl_t *sender)
+    mac_client_impl_t *sender, boolean_t local)
 {
 	mac_promisc_impl_t *mpip;
 	mac_cb_t *mcb;
@@ -4222,7 +4216,8 @@ mac_promisc_dispatch(mac_impl_t *mip, mblk_t *mp_chain,
 			if (is_sender ||
 			    mpip->mpi_type == MAC_CLIENT_PROMISC_ALL ||
 			    is_mcast) {
-				mac_promisc_dispatch_one(mpip, mp, is_sender);
+				mac_promisc_dispatch_one(mpip, mp, is_sender,
+					local);
 			}
 		}
 	}
@@ -4252,7 +4247,8 @@ mac_promisc_client_dispatch(mac_client_impl_t *mcip, mblk_t *mp_chain)
 			mpip = (mac_promisc_impl_t *)mcb->mcb_objp;
 			if (mpip->mpi_type == MAC_CLIENT_PROMISC_FILTERED &&
 			    !is_mcast) {
-				mac_promisc_dispatch_one(mpip, mp, B_FALSE);
+				mac_promisc_dispatch_one(mpip, mp, B_FALSE,
+					B_FALSE);
 			}
 		}
 	}

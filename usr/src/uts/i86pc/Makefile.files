@@ -25,6 +25,7 @@
 # Copyright (c) 2010, Intel Corporation.
 # Copyright 2019 OmniOS Community Edition (OmniOSce) Association.
 # Copyright 2019 Joyent, Inc.
+# Copyright 2021 Oxide Computer Company
 #
 #	This Makefile defines file modules in the directory uts/i86pc
 #	and its children. These are the source files which are i86pc
@@ -116,7 +117,6 @@ CORE_OBJS +=			\
 	ppage.o			\
 	pwrnow.o		\
 	smt.o			\
-	seg_vmm.o		\
 	speedstep.o		\
 	ssp.o			\
 	startup.o		\
@@ -269,6 +269,8 @@ VMM_OBJS += vmm.o \
 	svm_support.o \
 	amdv.o \
 	gipt.o \
+	seg_vmm.o \
+	vmm_reservoir.o \
 	vmm_sol_vm.o \
 	vmm_sol_glue.o \
 	vmm_sol_ept.o \

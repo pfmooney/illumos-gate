@@ -78,7 +78,6 @@ __FBSDID("$FreeBSD$");
 #include "vmm_ioport.h"
 #include "vmm_ktr.h"
 #include "vmm_host.h"
-#include "vmm_mem.h"
 #include "vmm_util.h"
 #include "vatpic.h"
 #include "vatpit.h"
@@ -397,16 +396,10 @@ vm_vie_ctx(struct vm *vm, int cpuid)
 static int
 vmm_init(void)
 {
-	int error;
-
 	vmm_host_state_init();
 
 	/* We use cpu_poke() for IPIs */
 	vmm_ipinum = 0;
-
-	error = vmm_mem_init();
-	if (error)
-		return (error);
 
 	if (vmm_is_intel())
 		ops = &vmm_ops_intel;
@@ -672,7 +665,7 @@ vm_map_mmio(struct vm *vm, vm_paddr_t gpa, size_t len, vm_paddr_t hpa)
 int
 vm_unmap_mmio(struct vm *vm, vm_paddr_t gpa, size_t len)
 {
-	return (vm_map_remove(&vm->vmspace->vm_map, gpa, gpa + len));
+	return (vm_map_remove(vm->vmspace, gpa, gpa + len));
 }
 
 /*
@@ -812,7 +805,7 @@ vm_mmap_memseg(struct vm *vm, vm_paddr_t gpa, int segid, vm_ooffset_t first,
 	if (map == NULL)
 		return (ENOSPC);
 
-	error = vm_map_find(&vm->vmspace->vm_map, seg->object, first, &gpa,
+	error = vm_map_find(vm->vmspace, seg->object, first, &gpa,
 	    len, 0, VMFS_NO_SPACE, prot, prot, 0);
 	if (error != 0)
 		return (EFAULT);
@@ -820,10 +813,10 @@ vm_mmap_memseg(struct vm *vm, vm_paddr_t gpa, int segid, vm_ooffset_t first,
 	vm_object_reference(seg->object);
 
 	if ((flags & VM_MEMMAP_F_WIRED) != 0) {
-		error = vm_map_wire(&vm->vmspace->vm_map, gpa, gpa + len,
+		error = vm_map_wire(vm->vmspace, gpa, gpa + len,
 		    VM_MAP_WIRE_USER | VM_MAP_WIRE_NOHOLES);
 		if (error != 0) {
-			vm_map_remove(&vm->vmspace->vm_map, gpa, gpa + len);
+			vm_map_remove(vm->vmspace, gpa, gpa + len);
 			return (EFAULT);
 		}
 	}
@@ -897,7 +890,7 @@ vm_free_memmap(struct vm *vm, int ident)
 
 	mm = &vm->mem_maps[ident];
 	if (mm->len) {
-		error = vm_map_remove(&vm->vmspace->vm_map, mm->gpa,
+		error = vm_map_remove(vm->vmspace, mm->gpa,
 		    mm->gpa + mm->len);
 		KASSERT(error == 0, ("%s: vm_map_remove error %d",
 		    __func__, error));
@@ -1083,7 +1076,7 @@ vm_gpa_hold(struct vm *vm, int vcpuid, vm_paddr_t gpa, size_t len, int reqprot,
 			continue;
 		}
 		if (gpa >= mm->gpa && gpa < mm->gpa + mm->len) {
-			count = vm_fault_quick_hold_pages(&vm->vmspace->vm_map,
+			count = vm_fault_quick_hold_pages(vm->vmspace,
 			    trunc_page(gpa), PAGE_SIZE, reqprot, &m, 1);
 			break;
 		}
@@ -1459,7 +1452,6 @@ static int
 vm_handle_paging(struct vm *vm, int vcpuid)
 {
 	int rv, ftype;
-	struct vm_map *map;
 	struct vcpu *vcpu;
 	struct vm_exit *vme;
 
@@ -1485,8 +1477,7 @@ vm_handle_paging(struct vm *vm, int vcpuid)
 		}
 	}
 
-	map = &vm->vmspace->vm_map;
-	rv = vm_fault(map, vme->u.paging.gpa, ftype, VM_FAULT_NORMAL);
+	rv = vm_fault(vm->vmspace, vme->u.paging.gpa, ftype, VM_FAULT_NORMAL);
 
 	VCPU_CTR3(vm, vcpuid, "vm_handle_paging rv = %d, gpa = %lx, "
 	    "ftype = %d", rv, vme->u.paging.gpa, ftype);

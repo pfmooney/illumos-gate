@@ -243,7 +243,6 @@ VMM_OBJS += vmm.o \
 	vmm_instruction_emul.o \
 	vmm_ioport.o \
 	vmm_lapic.o \
-	vmm_mem.o \
 	vmm_stat.o \
 	vmm_util.o \
 	x86.o \

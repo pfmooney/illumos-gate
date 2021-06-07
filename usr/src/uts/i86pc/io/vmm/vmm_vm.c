@@ -38,12 +38,6 @@
 #include <sys/seg_vmm.h>
 #include <sys/vmm_reservoir.h>
 
-#define	PMAP_TO_VMMAP(pm)	((vm_map_t)		\
-	((caddr_t)(pm) - offsetof(struct vmspace, vms_pmap)))
-#define	VMMAP_TO_VMSPACE(vmmap)	((struct vmspace *)		\
-	((caddr_t)(vmmap) - offsetof(struct vmspace, vm_map)))
-
-
 struct vmspace_mapping {
 	list_node_t	vmsm_node;
 	vm_object_t	vmsm_object;
@@ -417,6 +411,59 @@ vm_object_allocate(objtype_t type, vm_pindex_t psize, bool transient)
 }
 
 vm_object_t
+vmm_mmio_alloc(struct vmspace *vmspace, vm_paddr_t gpa, size_t len,
+    vm_paddr_t hpa)
+{
+	int error;
+	vm_object_t obj;
+	struct sglist *sg;
+
+	sg = sglist_alloc(1, M_WAITOK);
+	error = sglist_append_phys(sg, hpa, len);
+	KASSERT(error == 0, ("error %d appending physaddr to sglist", error));
+
+	const int prot = PROT_READ | PROT_WRITE;
+	obj = vm_pager_allocate(OBJT_SG, sg, len, prot, 0, NULL);
+	if (obj != NULL) {
+		/*
+		 * VT-x ignores the MTRR settings when figuring out the
+		 * memory type for translations obtained through EPT.
+		 *
+		 * Therefore we explicitly force the pages provided by
+		 * this object to be mapped as uncacheable.
+		 */
+		VM_OBJECT_WLOCK(obj);
+		error = vm_object_set_memattr(obj, VM_MEMATTR_UNCACHEABLE);
+		VM_OBJECT_WUNLOCK(obj);
+		if (error != 0) {
+			panic("vmm_mmio_alloc: vm_object_set_memattr error %d",
+			    error);
+		}
+		error = vm_map_find(vmspace, obj, 0, &gpa, len, 0,
+		    VMFS_NO_SPACE, prot, prot, 0);
+		if (error != 0) {
+			vm_object_deallocate(obj);
+			obj = NULL;
+		}
+	}
+
+	/*
+	 * Drop the reference on the sglist.
+	 *
+	 * If the scatter/gather object was successfully allocated then it
+	 * has incremented the reference count on the sglist. Dropping the
+	 * initial reference count ensures that the sglist will be freed
+	 * when the object is deallocated.
+	 *
+	 * If the object could not be allocated then we end up freeing the
+	 * sglist.
+	 */
+	sglist_free(sg);
+
+	return (obj);
+}
+
+vm_object_t
 vm_pager_allocate(objtype_t type, void *handle, vm_ooffset_t size,
     vm_prot_t prot, vm_ooffset_t off, void *cred)
 {
@@ -583,9 +630,8 @@ vm_mapping_remove(struct vmspace *vms, vmspace_mapping_t *vmsm)
 }
 
 int
-vm_fault(vm_map_t map, vm_offset_t off, vm_prot_t type, int flag)
+vm_fault(struct vmspace *vms, vm_offset_t off, vm_prot_t type, int flag)
 {
-	struct vmspace *vms = VMMAP_TO_VMSPACE(map);
 	pmap_t pmap = &vms->vms_pmap;
 	void *pmi = pmap->pm_impl;
 	const uintptr_t addr = off;
@@ -642,10 +688,9 @@ vm_fault(vm_map_t map, vm_offset_t off, vm_prot_t type, int flag)
 }
 
 int
-vm_fault_quick_hold_pages(vm_map_t map, vm_offset_t addr, vm_size_t len,
+vm_fault_quick_hold_pages(struct vmspace *vms, vm_offset_t addr, vm_size_t len,
     vm_prot_t prot, vm_page_t *ma, int max_count)
 {
-	struct vmspace *vms = VMMAP_TO_VMSPACE(map);
 	const uintptr_t vaddr = addr;
 	vmspace_mapping_t *vmsm;
 	struct vm_object *vmo;
@@ -694,11 +739,10 @@ vm_fault_quick_hold_pages(vm_map_t map, vm_offset_t addr, vm_size_t len,
  * Find a suitable location for a mapping (and install it).
  */
 int
-vm_map_find(vm_map_t map, vm_object_t vmo, vm_ooffset_t off, vm_offset_t *addr,
-    vm_size_t len, vm_offset_t max_addr, int find_flags, vm_prot_t prot,
-    vm_prot_t prot_max, int cow)
+vm_map_find(struct vmspace *vms, vm_object_t vmo, vm_ooffset_t off,
+    vm_offset_t *addr, vm_size_t len, vm_offset_t max_addr, int find_flags,
+    vm_prot_t prot, vm_prot_t prot_max, int cow)
 {
-	struct vmspace *vms = VMMAP_TO_VMSPACE(map);
 	const size_t size = (size_t)len;
 	const uintptr_t uoff = (uintptr_t)off;
 	uintptr_t base = *addr;
@@ -748,9 +792,8 @@ out:
 }
 
 int
-vm_map_remove(vm_map_t map, vm_offset_t start, vm_offset_t end)
+vm_map_remove(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 {
-	struct vmspace *vms = VMMAP_TO_VMSPACE(map);
 	pmap_t pmap = &vms->vms_pmap;
 	void *pmi = pmap->pm_impl;
 	const uintptr_t addr = start;
@@ -779,9 +822,8 @@ vm_map_remove(vm_map_t map, vm_offset_t start, vm_offset_t end)
 }
 
 int
-vm_map_wire(vm_map_t map, vm_offset_t start, vm_offset_t end, int flags)
+vm_map_wire(struct vmspace *vms, vm_offset_t start, vm_offset_t end, int flags)
 {
-	struct vmspace *vms = VMMAP_TO_VMSPACE(map);
 	pmap_t pmap = &vms->vms_pmap;
 	void *pmi = pmap->pm_impl;
 	const uintptr_t addr = start;

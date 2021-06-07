@@ -89,15 +89,13 @@ typedef union vm_map_object vm_map_object_t;
 struct vm_map_entry;
 typedef struct vm_map_entry *vm_map_entry_t;
 
-struct vm_map;
-typedef struct vm_map *vm_map_t;
-
 pmap_t vmspace_pmap(struct vmspace *);
 
-int vm_map_find(vm_map_t, vm_object_t, vm_ooffset_t, vm_offset_t *, vm_size_t,
-    vm_offset_t, int, vm_prot_t, vm_prot_t, int);
-int vm_map_remove(vm_map_t, vm_offset_t, vm_offset_t);
-int vm_map_wire(vm_map_t map, vm_offset_t start, vm_offset_t end, int flags);
+int vm_map_find(struct vmspace *, vm_object_t, vm_ooffset_t, vm_offset_t *,
+    vm_size_t, vm_offset_t, int, vm_prot_t, vm_prot_t, int);
+int vm_map_remove(struct vmspace *, vm_offset_t, vm_offset_t);
+int vm_map_wire(struct vmspace *, vm_offset_t start, vm_offset_t end,
+   int flags);
 
 long vmspace_resident_count(struct vmspace *vmspace);
 
@@ -105,10 +103,6 @@ void	pmap_invalidate_cache(void);
 void	pmap_get_mapping(pmap_t pmap, vm_offset_t va, uint64_t *ptr, int *num);
 int	pmap_emulate_accessed_dirty(pmap_t pmap, vm_offset_t va, int ftype);
 long	pmap_wired_count(pmap_t pmap);
-
-struct vm_map {
-	struct vmspace *vmm_space;
-};
 
 struct pmap {
 	void		*pm_pml4;
@@ -122,8 +116,6 @@ struct pmap {
 };
 
 struct vmspace {
-	struct vm_map vm_map;
-
 	/* Implementation private */
 	kmutex_t	vms_lock;
 	boolean_t	vms_map_changing;
@@ -178,8 +170,8 @@ typedef int (*pmap_pinit_t)(struct pmap *pmap);
 struct vmspace *vmspace_alloc(vm_offset_t, vm_offset_t, pmap_pinit_t);
 void vmspace_free(struct vmspace *);
 
-int vm_fault(vm_map_t, vm_offset_t, vm_prot_t, int);
-int vm_fault_quick_hold_pages(vm_map_t map, vm_offset_t addr, vm_size_t len,
+int vm_fault(struct vmspace *, vm_offset_t, vm_prot_t, int);
+int vm_fault_quick_hold_pages(struct vmspace *, vm_offset_t addr, vm_size_t len,
     vm_prot_t prot, vm_page_t *ma, int max_count);
 
 struct vm_object *vm_object_allocate(objtype_t, vm_pindex_t, bool);
@@ -187,6 +179,8 @@ void vm_object_deallocate(vm_object_t);
 void vm_object_reference(vm_object_t);
 int vm_object_set_memattr(vm_object_t, vm_memattr_t);
 pfn_t vm_object_pfn(vm_object_t, uintptr_t);
+struct vm_object *vmm_mmio_alloc(struct vmspace *, vm_paddr_t gpa, size_t len,
+    vm_paddr_t hpa);
 
 #define	VM_OBJECT_WLOCK(vmo)	mutex_enter(&(vmo)->vmo_lock)
 #define	VM_OBJECT_WUNLOCK(vmo)	mutex_exit(&(vmo)->vmo_lock)

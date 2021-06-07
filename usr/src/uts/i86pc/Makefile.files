@@ -271,11 +271,11 @@ VMM_OBJS += vmm.o \
 	gipt.o \
 	seg_vmm.o \
 	vmm_reservoir.o \
-	vmm_sol_vm.o \
 	vmm_sol_glue.o \
 	vmm_sol_ept.o \
 	vmm_sol_rvi.o \
 	vmm_support.o \
+	vmm_vm.o \
 	vmm_zsd.o
 
 VIONA_OBJS += viona_main.o \

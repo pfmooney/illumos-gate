@@ -19,20 +19,6 @@
 
 #include <sys/types.h>
 
-typedef struct vmm_pt_ops vmm_pt_ops_t;
-struct vmm_pt_ops {
-	void *		(*vpo_init)(uint64_t *);
-	void		(*vpo_free)(void *);
-	uint64_t	(*vpo_wired_cnt)(void *);
-	int		(*vpo_is_wired)(void *, uint64_t, uint_t *);
-	int		(*vpo_map)(void *, uint64_t, pfn_t, uint_t, uint_t,
-			    uint8_t);
-	uint64_t	(*vpo_unmap)(void *, uint64_t, uint64_t);
-};
-
-extern struct vmm_pt_ops ept_ops;
-extern struct vmm_pt_ops rvi_ops;
-
 /*
  * Constants for the nodes in the GPT radix tree.  Note
  * that, in accordance with hardware page table descriptions,
@@ -78,9 +64,6 @@ struct vmm_pte_ops {
 
 struct vmm_gpt;
 typedef struct vmm_gpt vmm_gpt_t;
-
-vmm_gpt_t *ept_create(void);
-vmm_gpt_t *rvi_create(void);
 
 vmm_gpt_t *vmm_gpt_alloc(vmm_pte_ops_t *);
 void vmm_gpt_free(vmm_gpt_t *);

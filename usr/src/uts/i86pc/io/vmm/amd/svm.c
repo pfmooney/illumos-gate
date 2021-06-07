@@ -45,7 +45,6 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/smp.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/pcpu.h>
@@ -60,7 +59,6 @@ __FBSDID("$FreeBSD$");
 #include <machine/md_var.h>
 #include <machine/reg.h>
 #include <machine/specialreg.h>
-#include <machine/smp.h>
 #include <machine/vmm.h>
 #include <machine/vmm_dev.h>
 #include <sys/vmm_instruction_emul.h>
@@ -79,7 +77,6 @@ __FBSDID("$FreeBSD$");
 #include "svm.h"
 #include "svm_softc.h"
 #include "svm_msr.h"
-#include "npt.h"
 
 SYSCTL_DECL(_hw_vmm);
 SYSCTL_NODE(_hw_vmm, OID_AUTO, svm, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
@@ -151,12 +148,11 @@ svm_cleanup(void)
 }
 
 static int
-svm_init(int ipinum)
+svm_init(void)
 {
 	vmcb_clean &= VMCB_CACHE_DEFAULT;
 
 	svm_msr_init();
-	svm_npt_init(ipinum);
 
 	return (0);
 }
@@ -425,7 +421,7 @@ vmcb_init(struct svm_softc *sc, int vcpu, uint64_t iopm_base_pa,
  * Initialize a virtual machine.
  */
 static void *
-svm_vminit(struct vm *vm, pmap_t pmap)
+svm_vminit(struct vm *vm)
 {
 	struct svm_softc *svm_sc;
 	struct svm_vcpu *vcpu;
@@ -447,7 +443,7 @@ svm_vminit(struct vm *vm, pmap_t pmap)
 		panic("contigmalloc of SVM IO bitmap failed");
 
 	svm_sc->vm = vm;
-	svm_sc->nptp = (vm_offset_t)vtophys(pmap->pm_pml4);
+	svm_sc->nptp = vmspace_table_root(vm_get_vmspace(vm));
 
 	/*
 	 * Intercept read and write accesses to all MSRs.
@@ -1769,23 +1765,21 @@ svm_inject_recheck(struct svm_softc *sc, int vcpu,
 
 
 static void
-check_asid(struct svm_softc *sc, int vcpuid, pmap_t pmap, uint_t thiscpu)
+check_asid(struct svm_softc *sc, int vcpuid, uint_t thiscpu, uint64_t nptgen)
 {
 	struct svm_vcpu *vcpustate = svm_get_vcpu(sc, vcpuid);
 	struct vmcb_ctrl *ctrl = svm_get_vmcb_ctrl(sc, vcpuid);
-	long eptgen;
 	uint8_t flush;
 
-	eptgen = pmap->pm_eptgen;
 	flush = hma_svm_asid_update(&vcpustate->hma_asid, flush_by_asid(),
-	    vcpustate->eptgen != eptgen);
+	    vcpustate->nptgen != nptgen);
 
 	if (flush != VMCB_TLB_FLUSH_NOTHING) {
 		ctrl->asid = vcpustate->hma_asid.hsa_asid;
 		svm_set_dirty(sc, vcpuid, VMCB_CACHE_ASID);
 	}
 	ctrl->tlb_ctrl = flush;
-	vcpustate->eptgen = eptgen;
+	vcpustate->nptgen = nptgen;
 }
 
 static void
@@ -1803,8 +1797,8 @@ flush_asid(struct svm_softc *sc, int vcpuid)
 	ctrl->tlb_ctrl = flush;
 	svm_set_dirty(sc, vcpuid, VMCB_CACHE_ASID);
 	/*
-	 * A potential future optimization: We could choose to update the eptgen
-	 * associated with the vCPU, since any pending eptgen change requiring a
+	 * A potential future optimization: We could choose to update the nptgen
+	 * associated with the vCPU, since any pending nptgen change requiring a
 	 * flush will be satisfied by the one which has just now been queued.
 	 */
 }
@@ -1892,7 +1886,7 @@ svm_apply_tsc_adjust(struct svm_softc *svm_sc, int vcpuid)
  * Start vcpu with specified RIP.
  */
 static int
-svm_vmrun(void *arg, int vcpu, uint64_t rip, pmap_t pmap)
+svm_vmrun(void *arg, int vcpu, uint64_t rip)
 {
 	struct svm_regctx *gctx;
 	struct svm_softc *svm_sc;
@@ -1901,6 +1895,7 @@ svm_vmrun(void *arg, int vcpu, uint64_t rip, pmap_t pmap)
 	struct vmcb_ctrl *ctrl;
 	struct vm_exit *vmexit;
 	struct vlapic *vlapic;
+	vm_client_t *vmc;
 	struct vm *vm;
 	uint64_t vmcb_pa;
 	int handled;
@@ -1914,6 +1909,7 @@ svm_vmrun(void *arg, int vcpu, uint64_t rip, pmap_t pmap)
 	ctrl = svm_get_vmcb_ctrl(svm_sc, vcpu);
 	vmexit = vm_exitinfo(vm, vcpu);
 	vlapic = vm_lapic(vm, vcpu);
+	vmc = vm_get_vmclient(vm, vcpu);
 
 	gctx = svm_get_guest_regctx(svm_sc, vcpu);
 	vmcb_pa = svm_sc->vcpu[vcpu].vmcb_pa;
@@ -1955,6 +1951,7 @@ svm_vmrun(void *arg, int vcpu, uint64_t rip, pmap_t pmap)
 
 	do {
 		enum event_inject_state inject_state;
+		uint64_t nptgen;
 
 		/*
 		 * Initial event injection is complex and may involve mutex
@@ -2014,14 +2011,12 @@ svm_vmrun(void *arg, int vcpu, uint64_t rip, pmap_t pmap)
 		 */
 		ldt_sel = sldt();
 
-		/* Activate the nested pmap on 'curcpu' */
-		CPU_SET_ATOMIC_ACQ(curcpu, &pmap->pm_active);
-
 		/*
 		 * Check the pmap generation and the ASID generation to
 		 * ensure that the vcpu does not use stale TLB mappings.
 		 */
-		check_asid(svm_sc, vcpu, pmap, curcpu);
+		nptgen = vmc_table_enter(vmc);
+		check_asid(svm_sc, vcpu, curcpu, nptgen);
 
 		ctrl->vmcb_clean = vmcb_clean & ~vcpustate->dirty;
 		vcpustate->dirty = 0;
@@ -2035,13 +2030,13 @@ svm_vmrun(void *arg, int vcpu, uint64_t rip, pmap_t pmap)
 		svm_dr_leave_guest(gctx);
 		vcpu_ustate_change(vm, vcpu, VU_EMU_KERN);
 
-		CPU_CLR_ATOMIC(curcpu, &pmap->pm_active);
-
 		/* Restore host LDTR. */
 		lldt(ldt_sel);
 
 		/* #VMEXIT disables interrupts so re-enable them here. */
 		enable_gintr();
+
+		vmc_table_exit(vmc);
 
 		/* Update 'nextrip' */
 		vcpustate->nextrip = state->rip;
@@ -2470,6 +2465,7 @@ struct vmm_ops vmm_ops_amd = {
 	.init		= svm_init,
 	.cleanup	= svm_cleanup,
 	.resume		= svm_restore,
+
 	.vminit		= svm_vminit,
 	.vmrun		= svm_vmrun,
 	.vmcleanup	= svm_vmcleanup,
@@ -2479,8 +2475,6 @@ struct vmm_ops vmm_ops_amd = {
 	.vmsetdesc	= svm_setdesc,
 	.vmgetcap	= svm_getcap,
 	.vmsetcap	= svm_setcap,
-	.vmspace_alloc	= svm_npt_alloc,
-	.vmspace_free	= svm_npt_free,
 	.vlapic_init	= svm_vlapic_init,
 	.vlapic_cleanup	= svm_vlapic_cleanup,
 

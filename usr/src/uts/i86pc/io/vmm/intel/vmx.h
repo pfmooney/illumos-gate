@@ -47,8 +47,6 @@
 
 #include "vmcs.h"
 
-struct pmap;
-
 struct vmxctx {
 	uint64_t	guest_rdi;		/* Guest state */
 	uint64_t	guest_rsi;
@@ -82,12 +80,6 @@ struct vmxctx {
 	int		host_tf;
 
 	int		inst_fail_status;
-
-	/*
-	 * The pmap needs to be deactivated in vmx_enter_guest()
-	 * so keep a copy of the 'pmap' in each vmxctx.
-	 */
-	struct pmap	*pmap;
 };
 
 struct vmxcap {
@@ -151,7 +143,7 @@ struct vmx {
 	uint64_t	eptp;
 	enum vmx_caps	vmx_caps;
 	struct vm	*vm;
-	long		eptgen[MAXCPU];		/* cached pmap->pm_eptgen */
+	uint64_t	eptgen[MAXCPU];		/* cached pmap eptgen */
 };
 CTASSERT((offsetof(struct vmx, vmcs) & PAGE_MASK) == 0);
 CTASSERT((offsetof(struct vmx, msr_bitmap) & PAGE_MASK) == 0);

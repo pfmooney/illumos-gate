@@ -155,21 +155,21 @@ static vmm_pte_ops_t rvi_pte_ops = {
 	.vpeo_reset_accessed	= rvi_reset_accessed,
 };
 
-vmm_gpt_t *
-rvi_create(void)
+static int
+rvi_ops_init(void)
 {
-	return (vmm_gpt_alloc(&rvi_pte_ops));
+	/* No special checks required for now */
+	return (0);
 }
 
 static void *
-rvi_ops_create(uintptr_t *root_kaddr)
+rvi_ops_alloc(void)
 {
 	rvi_map_t *map;
 
 	map = kmem_zalloc(sizeof (*map), KM_SLEEP);
 	mutex_init(&map->rm_lock, NULL, MUTEX_DEFAULT, NULL);
-	map->rm_gpt = rvi_create();
-	*root_kaddr = (uintptr_t)vmm_gpt_root_kaddr(map->rm_gpt);
+	map->rm_gpt = vmm_gpt_alloc(&rvi_pte_ops);
 
 	return (map);
 }
@@ -184,6 +184,14 @@ rvi_ops_destroy(void *arg)
 		mutex_destroy(&map->rm_lock);
 		kmem_free(map, sizeof (*map));
 	}
+}
+
+static uint64_t
+rvi_ops_pmtp(void *arg)
+{
+	rvi_map_t *rmap = arg;
+
+	return (vmm_gpt_root_pfn(rmap->rm_gpt) << PAGESHIFT);
 }
 
 static uint64_t
@@ -244,10 +252,12 @@ rvi_ops_unmap(void *arg, uint64_t start, uint64_t end)
 }
 
 struct vmm_pt_ops rvi_ops = {
-	.vpo_init		= rvi_ops_create,
-	.vpo_free		= rvi_ops_destroy,
-	.vpo_wired_cnt		= rvi_ops_wired_count,
-	.vpo_is_wired		= rvi_ops_is_wired,
-	.vpo_map		= rvi_ops_map,
-	.vpo_unmap		= rvi_ops_unmap,
+	.vpo_init	= rvi_ops_init,
+	.vpo_alloc	= rvi_ops_alloc,
+	.vpo_free	= rvi_ops_destroy,
+	.vpo_pmtp	= rvi_ops_pmtp,
+	.vpo_wired_cnt	= rvi_ops_wired_count,
+	.vpo_is_wired	= rvi_ops_is_wired,
+	.vpo_map	= rvi_ops_map,
+	.vpo_unmap	= rvi_ops_unmap,
 };

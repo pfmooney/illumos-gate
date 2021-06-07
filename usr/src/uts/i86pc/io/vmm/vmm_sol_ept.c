@@ -21,6 +21,8 @@
 #include <sys/kmem.h>
 #include <sys/machsystm.h>
 #include <sys/mman.h>
+#include <sys/x86_archext.h>
+#include <vm/hat_pte.h>
 
 #include <sys/vmm_gpt.h>
 #include <sys/vmm_vm.h>
@@ -41,6 +43,9 @@ struct ept_map {
 #define	EPT_DIRTY	(1 << 9)
 
 #define	EPT_PA_MASK	(0x000ffffffffff000ull)
+
+#define	EPT_MAX_LEVELS	4
+CTASSERT(EPT_MAX_LEVELS <= MAX_GPT_LEVEL);
 
 CTASSERT(EPT_R == PROT_READ);
 CTASSERT(EPT_W == PROT_WRITE);
@@ -131,21 +136,46 @@ static vmm_pte_ops_t ept_pte_ops = {
 	.vpeo_reset_accessed	= ept_reset_accessed,
 };
 
-vmm_gpt_t *
-ept_create(void)
+/*
+ * Cover the EPT capabilities used by bhyve at present:
+ * - 4-level page walks
+ * - write-back memory type
+ * - INVEPT operations (all types)
+ * - INVVPID operations (single-context only)
+ */
+#define	EPT_CAPS_REQUIRED			\
+	(IA32_VMX_EPT_VPID_PWL4 |		\
+	IA32_VMX_EPT_VPID_TYPE_WB |		\
+	IA32_VMX_EPT_VPID_INVEPT |		\
+	IA32_VMX_EPT_VPID_INVEPT_SINGLE |	\
+	IA32_VMX_EPT_VPID_INVEPT_ALL |		\
+	IA32_VMX_EPT_VPID_INVVPID |		\
+	IA32_VMX_EPT_VPID_INVVPID_SINGLE)
+
+static int
+ept_ops_init(void)
 {
-	return (vmm_gpt_alloc(&ept_pte_ops));
+	uint64_t caps = rdmsr(MSR_IA32_VMX_EPT_VPID_CAP);
+	if ((caps & EPT_CAPS_REQUIRED) != EPT_CAPS_REQUIRED) {
+		return (EINVAL);
+	}
+
+	/*
+	 * TODO: Properly handle when IA32_VMX_EPT_VPID_HW_AD is missing and the
+	 * hypervisor intends to utilize dirty page tracking.
+	 */
+
+	return (0);
 }
 
 static void *
-ept_ops_create(uintptr_t *root_kaddr)
+ept_ops_alloc(void)
 {
 	ept_map_t *map;
 
 	map = kmem_zalloc(sizeof (*map), KM_SLEEP);
 	mutex_init(&map->em_lock, NULL, MUTEX_DEFAULT, NULL);
-	map->em_gpt = ept_create();
-	*root_kaddr = (uintptr_t)vmm_gpt_root_kaddr(map->em_gpt);
+	map->em_gpt = vmm_gpt_alloc(&ept_pte_ops);
 
 	return (map);
 }
@@ -160,6 +190,19 @@ ept_ops_destroy(void *arg)
 		mutex_destroy(&map->em_lock);
 		kmem_free(map, sizeof (*map));
 	}
+}
+
+static uint64_t
+ept_ops_pmtp(void *arg)
+{
+	ept_map_t *emap = arg;
+	uint64_t res;
+
+	/* TODO: enable AD tracking when required */
+	res = vmm_gpt_root_pfn(emap->em_gpt) << PAGESHIFT |
+	    (EPT_MAX_LEVELS - 1) << 3 | MTRR_TYPE_WB;
+
+	return (res);
 }
 
 static uint64_t
@@ -219,10 +262,12 @@ ept_ops_unmap(void *arg, uint64_t start, uint64_t end)
 }
 
 struct vmm_pt_ops ept_ops = {
-	.vpo_init		= ept_ops_create,
-	.vpo_free		= ept_ops_destroy,
-	.vpo_wired_cnt		= ept_ops_wired_count,
-	.vpo_is_wired		= ept_ops_is_wired,
-	.vpo_map		= ept_ops_map,
-	.vpo_unmap		= ept_ops_unmap,
+	.vpo_init	= ept_ops_init,
+	.vpo_alloc	= ept_ops_alloc,
+	.vpo_free	= ept_ops_destroy,
+	.vpo_pmtp	= ept_ops_pmtp,
+	.vpo_wired_cnt	= ept_ops_wired_count,
+	.vpo_is_wired	= ept_ops_is_wired,
+	.vpo_map	= ept_ops_map,
+	.vpo_unmap	= ept_ops_unmap,
 };

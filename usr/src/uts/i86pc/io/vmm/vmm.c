@@ -719,8 +719,7 @@ vm_alloc_memseg(struct vm *vm, int ident, size_t len, bool sysmem)
 			return (EINVAL);
 	}
 
-	obj = vm_object_allocate(OBJT_DEFAULT, len >> PAGE_SHIFT,
-	    vm->mem_transient);
+	obj = vm_object_mem_allocate(len, vm->mem_transient);
 	if (obj == NULL)
 		return (ENOMEM);
 

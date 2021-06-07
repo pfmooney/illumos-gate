@@ -53,6 +53,35 @@ typedef struct vmspace_mapping vmspace_mapping_t;
 	    ((addr) - (uintptr_t)(vmsm)->vmsm_addr))
 
 
+struct vmspace {
+	/* Implementation private */
+	kmutex_t	vms_lock;
+	boolean_t	vms_map_changing;
+	struct pmap	vms_pmap;
+	uintptr_t	vms_size;	/* fixed after creation */
+
+	list_t		vms_maplist;
+};
+
+enum vm_object_type {
+	VMOT_NONE,
+	VMOT_MEM,
+	VMOT_MMIO,
+};
+
+struct vm_object {
+	uint_t		vmo_refcnt;	/* manipulated with atomic ops */
+
+	/* This group of fields are fixed at creation time */
+	enum vm_object_type vmo_type;
+	size_t		vmo_size;
+	void		*vmo_data;
+
+	kmutex_t	vmo_lock;	/* protects fields below */
+	vm_memattr_t	vmo_attr;
+};
+
+
 /* Private glue interfaces */
 static void pmap_free(pmap_t);
 static vmspace_mapping_t *vm_mapping_find(struct vmspace *, uintptr_t, size_t,
@@ -124,14 +153,10 @@ vmspace_find_kva(struct vmspace *vms, uintptr_t addr, size_t size)
 	if (vmsm != NULL) {
 		struct vm_object *vmo = vmsm->vmsm_object;
 
-		switch (vmo->vmo_type) {
-		case OBJT_DEFAULT:
+		if (vmo->vmo_type == VMOT_MEM) {
 			result = vmmr_region_mem_at(
 			    (vmmr_region_t *)vmo->vmo_data,
 			    VMSM_OFFSET(vmsm, addr) & PAGEMASK);
-			break;
-		default:
-			break;
 		}
 	}
 
@@ -217,196 +242,85 @@ pmap_emulate_accessed_dirty(pmap_t pmap, vm_offset_t va, int ftype)
 	return (-1);
 }
 
-
-
-struct sglist_ent {
-	vm_paddr_t	sge_pa;
-	size_t		sge_len;
-};
-struct sglist {
-	kmutex_t		sg_lock;
-	uint_t			sg_refcnt;
-	uint_t			sg_len;
-	uint_t			sg_next;
-	struct sglist_ent	sg_entries[];
-};
-
-#define	SG_SIZE(cnt)	(sizeof (struct sglist) + \
-	(sizeof (struct sglist_ent) * (cnt)))
-
-struct sglist *
-sglist_alloc(int nseg, int flags)
-{
-	const size_t sz = SG_SIZE(nseg);
-	const int flag = (flags & M_WAITOK) ? KM_SLEEP : KM_NOSLEEP;
-	struct sglist *sg;
-
-	ASSERT(nseg > 0);
-
-	sg = kmem_zalloc(sz, flag);
-	if (sg != NULL) {
-		sg->sg_len = nseg;
-		sg->sg_refcnt = 1;
-	}
-	return (sg);
-}
-
-void
-sglist_free(struct sglist *sg)
-{
-	size_t sz;
-
-	mutex_enter(&sg->sg_lock);
-	if (sg->sg_refcnt > 1) {
-		sg->sg_refcnt--;
-		mutex_exit(&sg->sg_lock);
-		return;
-	}
-
-	VERIFY(sg->sg_refcnt == 1);
-	sg->sg_refcnt = 0;
-	sz = SG_SIZE(sg->sg_len);
-	mutex_exit(&sg->sg_lock);
-	kmem_free(sg, sz);
-}
-
-int
-sglist_append_phys(struct sglist *sg, vm_paddr_t pa, size_t len)
-{
-	uint_t idx;
-	struct sglist_ent *ent;
-
-	/* Restrict to page-aligned entries */
-	if ((pa & PAGEOFFSET) != 0 || (len & PAGEOFFSET) != 0 || len == 0) {
-		return (EINVAL);
-	}
-
-	mutex_enter(&sg->sg_lock);
-	idx = sg->sg_next;
-	if (idx >= sg->sg_len) {
-		mutex_exit(&sg->sg_lock);
-		return (ENOSPC);
-	}
-
-	ent = &sg->sg_entries[idx];
-	ASSERT(ent->sge_pa == 0 && ent->sge_len == 0);
-	ent->sge_pa = pa;
-	ent->sge_len = len;
-	sg->sg_next++;
-
-	mutex_exit(&sg->sg_lock);
-	return (0);
-}
-
-
 static pfn_t
-vm_object_pager_none(vm_object_t vmo, uintptr_t off, pfn_t *lpfn, uint_t *lvl)
-{
-	panic("bad vm_object pager");
-	return (PFN_INVALID);
-}
-
-static pfn_t
-vm_object_pager_reservoir(vm_object_t vmo, uintptr_t off, pfn_t *lpfn,
-    uint_t *lvl)
+vm_object_pager_reservoir(vm_object_t vmo, uintptr_t off)
 {
 	vmmr_region_t *region;
 	pfn_t pfn;
 
-	ASSERT(vmo->vmo_type == OBJT_DEFAULT);
+	ASSERT(vmo->vmo_type == VMOT_MEM);
 
 	region = vmo->vmo_data;
 	pfn = vmmr_region_pfn_at(region, off & PAGEMASK);
 
-	/* TODO: handle large pages */
-	if (lpfn != NULL) {
-		*lpfn = pfn;
-	}
-	if (lvl != NULL) {
-		*lvl = 0;
-	}
 	return (pfn);
 }
 
 static pfn_t
-vm_object_pager_sg(vm_object_t vmo, uintptr_t off, pfn_t *lpfn, uint_t *lvl)
+vm_object_pager_mmio(vm_object_t vmo, uintptr_t off)
 {
-	const uintptr_t aoff = ALIGN2PAGE(off);
-	uint_t level = 0;
-	uintptr_t pos = 0;
-	struct sglist *sg;
-	struct sglist_ent *ent;
-	pfn_t pfn = PFN_INVALID;
+	pfn_t pfn;
 
-	ASSERT(vmo->vmo_type == OBJT_SG);
-	ASSERT(off < vmo->vmo_size);
+	ASSERT3U(vmo->vmo_type, ==, VMOT_MMIO);
+	ASSERT3P(vmo->vmo_data, !=, NULL);
+	ASSERT3U(off, < , vmo->vmo_size);
 
-	sg = vmo->vmo_data;
-	if (sg == NULL) {
-		return (PFN_INVALID);
-	}
+	pfn = ((uintptr_t)vmo->vmo_data + (off & PAGEMASK)) >> PAGESHIFT;
 
-	ent = &sg->sg_entries[0];
-	for (uint_t i = 0; i < sg->sg_next; i++, ent++) {
-		if (aoff >= pos && aoff < (pos + ent->sge_len)) {
-			/* XXXJOY: Punt on large pages for now */
-			level = 0;
-			pfn = mmu_btop(ent->sge_pa + (aoff - pos));
-			break;
-		}
-		pos += ent->sge_len;
-	}
-
-	if (lpfn != 0) {
-		*lpfn = pfn;
-	}
-	if (lvl != 0) {
-		*lvl = level;
-	}
 	return (pfn);
 }
 
+/* XXX: clean up these translations */
+CTASSERT(VM_MEMATTR_UNCACHEABLE == MTRR_TYPE_UC);
+CTASSERT(VM_MEMATTR_WRITE_BACK == MTRR_TYPE_WB);
+
 vm_object_t
-vm_object_allocate(objtype_t type, vm_pindex_t psize, bool transient)
+vm_object_mem_allocate(size_t size, bool transient)
 {
+	int err;
+	vmmr_region_t *region = NULL;
 	vm_object_t vmo;
-	const size_t size = ptob((size_t)psize);
+
+	ASSERT3U(size, !=, 0);
+	ASSERT3U(size & PAGEOFFSET, ==, 0);
+
+	err = vmmr_alloc(size, transient, &region);
+	if (err != 0) {
+		return (NULL);
+	}
 
 	vmo = kmem_alloc(sizeof (*vmo), KM_SLEEP);
 	mutex_init(&vmo->vmo_lock, NULL, MUTEX_DEFAULT, NULL);
 
 	/* For now, these are to stay fixed after allocation */
-	vmo->vmo_type = type;
+	vmo->vmo_type = VMOT_MEM;
 	vmo->vmo_size = size;
 	vmo->vmo_attr = VM_MEMATTR_DEFAULT;
-
-	switch (type) {
-	case OBJT_DEFAULT: {
-
-		/* TODO: opt-in to larger pages? */
-		int err;
-		vmmr_region_t *region = NULL;
-
-		err = vmmr_alloc(size, transient, &region);
-		if (err != 0) {
-			mutex_destroy(&vmo->vmo_lock);
-			kmem_free(vmo, sizeof (*vmo));
-			return (NULL);
-		}
-		vmo->vmo_data = region;
-		vmo->vmo_pager = vm_object_pager_reservoir;
-	}
-		break;
-	case OBJT_SG:
-		vmo->vmo_data = NULL;
-		vmo->vmo_pager = vm_object_pager_sg;
-		break;
-	default:
-		panic("Unsupported vm_object type");
-		break;
-	}
-
+	vmo->vmo_data = region;
 	vmo->vmo_refcnt = 1;
+
+	return (vmo);
+}
+
+static vm_object_t
+vm_object_mmio_allocate(size_t size, uintptr_t hpa)
+{
+	vm_object_t vmo;
+
+	ASSERT3U(size, !=, 0);
+	ASSERT3U(size & PAGEOFFSET, ==, 0);
+	ASSERT3U(hpa & PAGEOFFSET, ==, 0);
+
+	vmo = kmem_alloc(sizeof (*vmo), KM_SLEEP);
+	mutex_init(&vmo->vmo_lock, NULL, MUTEX_DEFAULT, NULL);
+
+	/* For now, these are to stay fixed after allocation */
+	vmo->vmo_type = VMOT_MMIO;
+	vmo->vmo_size = size;
+	vmo->vmo_attr = VM_MEMATTR_UNCACHEABLE;
+	vmo->vmo_data = (void *)hpa;
+	vmo->vmo_refcnt = 1;
+
 	return (vmo);
 }
 
@@ -416,29 +330,11 @@ vmm_mmio_alloc(struct vmspace *vmspace, vm_paddr_t gpa, size_t len,
 {
 	int error;
 	vm_object_t obj;
-	struct sglist *sg;
 
-	sg = sglist_alloc(1, M_WAITOK);
-	error = sglist_append_phys(sg, hpa, len);
-	KASSERT(error == 0, ("error %d appending physaddr to sglist", error));
-
-	const int prot = PROT_READ | PROT_WRITE;
-	obj = vm_pager_allocate(OBJT_SG, sg, len, prot, 0, NULL);
+	obj = vm_object_mmio_allocate(len, hpa);
 	if (obj != NULL) {
-		/*
-		 * VT-x ignores the MTRR settings when figuring out the
-		 * memory type for translations obtained through EPT.
-		 *
-		 * Therefore we explicitly force the pages provided by
-		 * this object to be mapped as uncacheable.
-		 */
-		VM_OBJECT_WLOCK(obj);
-		error = vm_object_set_memattr(obj, VM_MEMATTR_UNCACHEABLE);
-		VM_OBJECT_WUNLOCK(obj);
-		if (error != 0) {
-			panic("vmm_mmio_alloc: vm_object_set_memattr error %d",
-			    error);
-		}
+		const int prot = PROT_READ | PROT_WRITE;
+
 		error = vm_map_find(vmspace, obj, 0, &gpa, len, 0,
 		    VMFS_NO_SPACE, prot, prot, 0);
 		if (error != 0) {
@@ -447,41 +343,7 @@ vmm_mmio_alloc(struct vmspace *vmspace, vm_paddr_t gpa, size_t len,
 		}
 	}
 
-	/*
-	 * Drop the reference on the sglist.
-	 *
-	 * If the scatter/gather object was successfully allocated then it
-	 * has incremented the reference count on the sglist. Dropping the
-	 * initial reference count ensures that the sglist will be freed
-	 * when the object is deallocated.
-	 *
-	 * If the object could not be allocated then we end up freeing the
-	 * sglist.
-	 */
-	sglist_free(sg);
-
 	return (obj);
-}
-
-vm_object_t
-vm_pager_allocate(objtype_t type, void *handle, vm_ooffset_t size,
-    vm_prot_t prot, vm_ooffset_t off, void *cred)
-{
-	struct vm_object *vmo;
-	struct sglist *sg = (struct sglist *)handle;
-
-	/* XXXJOY: be very restrictive for now */
-	VERIFY(type == OBJT_SG);
-	VERIFY(off == 0);
-
-	vmo = vm_object_allocate(type, size, false);
-	vmo->vmo_data = sg;
-
-	mutex_enter(&sg->sg_lock);
-	VERIFY(sg->sg_refcnt++ >= 1);
-	mutex_exit(&sg->sg_lock);
-
-	return (vmo);
 }
 
 void
@@ -497,40 +359,20 @@ vm_object_deallocate(vm_object_t vmo)
 	}
 
 	switch (vmo->vmo_type) {
-	case OBJT_DEFAULT:
+	case VMOT_MEM:
 		vmmr_free((vmmr_region_t *)vmo->vmo_data);
 		break;
-	case OBJT_SG:
-		sglist_free((struct sglist *)vmo->vmo_data);
+	case VMOT_MMIO:
 		break;
 	default:
-		panic("Unsupported vm_object type");
+		panic("unexpected object type %u", vmo->vmo_type);
 		break;
 	}
 
-	vmo->vmo_pager = vm_object_pager_none;
 	vmo->vmo_data = NULL;
 	vmo->vmo_size = 0;
 	mutex_destroy(&vmo->vmo_lock);
 	kmem_free(vmo, sizeof (*vmo));
-}
-
-CTASSERT(VM_MEMATTR_UNCACHEABLE == MTRR_TYPE_UC);
-CTASSERT(VM_MEMATTR_WRITE_BACK == MTRR_TYPE_WB);
-int
-vm_object_set_memattr(vm_object_t vmo, vm_memattr_t attr)
-{
-	ASSERT(MUTEX_HELD(&vmo->vmo_lock));
-
-	switch (attr) {
-	case VM_MEMATTR_UNCACHEABLE:
-	case VM_MEMATTR_WRITE_BACK:
-		vmo->vmo_attr = attr;
-		return (0);
-	default:
-		break;
-	}
-	return (EINVAL);
 }
 
 void
@@ -546,12 +388,16 @@ vm_object_reference(vm_object_t vmo)
 pfn_t
 vm_object_pfn(vm_object_t vmo, uintptr_t off)
 {
-	/* This is expected to be used only on reservoir-backed memory */
-	if (vmo->vmo_type != OBJT_DEFAULT) {
-		return (PFN_INVALID);
+	switch (vmo->vmo_type) {
+	case VMOT_MEM:
+		return (vm_object_pager_reservoir(vmo, off));
+	case VMOT_MMIO:
+		return (vm_object_pager_mmio(vmo, off));
+	case VMOT_NONE:
+	default:
+		panic("unexpected object type %u", vmo->vmo_type);
+		break;
 	}
-
-	return (vmo->vmo_pager(vmo, off, NULL, NULL));
 }
 
 static vmspace_mapping_t *
@@ -670,7 +516,7 @@ vm_fault(struct vmspace *vms, vm_offset_t off, vm_prot_t type, int flag)
 	prot = vmsm->vmsm_prot;
 
 	/* XXXJOY: punt on large pages for now */
-	pfn = vmo->vmo_pager(vmo, VMSM_OFFSET(vmsm, addr), NULL, NULL);
+	pfn = vm_object_pfn(vmo, VMSM_OFFSET(vmsm, addr));
 	map_lvl = 0;
 	map_addr = P2ALIGN((uintptr_t)addr, LEVEL_SIZE(map_lvl));
 	VERIFY(pfn != PFN_INVALID);
@@ -728,8 +574,7 @@ vm_fault_quick_hold_pages(struct vmspace *vms, vm_offset_t addr, vm_size_t len,
 	vmo = vmsm->vmsm_object;
 	vm_object_reference(vmo);
 	vmp->vmp_obj_held = vmo;
-	vmp->vmp_pfn = vmo->vmo_pager(vmo, VMSM_OFFSET(vmsm, vaddr), NULL,
-	    NULL);
+	vmp->vmp_pfn = vm_object_pfn(vmo, VMSM_OFFSET(vmsm, vaddr));
 
 	*ma = vmp;
 	return (1);
@@ -848,7 +693,7 @@ vm_map_wire(struct vmspace *vms, vm_offset_t start, vm_offset_t end, int flags)
 		uint_t map_lvl = 0;
 
 		/* XXXJOY: punt on large pages for now */
-		pfn = vmo->vmo_pager(vmo, VMSM_OFFSET(vmsm, pos), NULL, NULL);
+		pfn = vm_object_pfn(vmo, VMSM_OFFSET(vmsm, pos));
 		pg_size = LEVEL_SIZE(map_lvl);
 		map_addr = P2ALIGN(pos, pg_size);
 		VERIFY(pfn != PFN_INVALID);
@@ -876,8 +721,8 @@ vm_segmap_obj(vm_object_t vmo, off_t map_off, size_t size, struct as *as,
 	VERIFY(size <= vmo->vmo_size);
 	VERIFY((size + map_off) <= vmo->vmo_size);
 
-	if (vmo->vmo_type != OBJT_DEFAULT) {
-		/* Only support default objects for now */
+	if (vmo->vmo_type != VMOT_MEM) {
+		/* Only support memory objects for now */
 		return (ENOTSUP);
 	}
 
@@ -923,8 +768,8 @@ vm_segmap_space(struct vmspace *vms, off_t off, struct as *as, caddr_t *addrp,
 		return (EACCES);
 	}
 	vmo = vmsm->vmsm_object;
-	if (vmo->vmo_type != OBJT_DEFAULT) {
-		/* Only support default objects for now */
+	if (vmo->vmo_type != VMOT_MEM) {
+		/* Only support memory objects for now */
 		mutex_exit(&vms->vms_lock);
 		return (ENOTSUP);
 	}

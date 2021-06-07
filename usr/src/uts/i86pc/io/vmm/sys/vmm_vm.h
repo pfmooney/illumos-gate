@@ -79,10 +79,6 @@ struct vmm_pt_ops;
 struct vm_page;
 typedef struct vm_page *vm_page_t;
 
-enum obj_type { OBJT_DEFAULT, OBJT_SWAP, OBJT_VNODE, OBJT_DEVICE, OBJT_PHYS,
-    OBJT_DEAD, OBJT_SG, OBJT_MGTDEVICE };
-typedef uchar_t objtype_t;
-
 union vm_map_object;
 typedef union vm_map_object vm_map_object_t;
 
@@ -113,31 +109,6 @@ struct pmap {
 	enum pmap_type	pm_type;
 	struct vmm_pt_ops *pm_ops;
 	void		*pm_impl;
-};
-
-struct vmspace {
-	/* Implementation private */
-	kmutex_t	vms_lock;
-	boolean_t	vms_map_changing;
-	struct pmap	vms_pmap;
-	uintptr_t	vms_size;	/* fixed after creation */
-
-	list_t		vms_maplist;
-};
-
-typedef pfn_t (*vm_pager_fn_t)(vm_object_t, uintptr_t, pfn_t *, uint_t *);
-
-struct vm_object {
-	uint_t		vmo_refcnt;	/* manipulated with atomic ops */
-
-	/* This group of fields are fixed at creation time */
-	objtype_t	vmo_type;
-	size_t		vmo_size;
-	vm_pager_fn_t	vmo_pager;
-	void		*vmo_data;
-
-	kmutex_t	vmo_lock;	/* protects fields below */
-	vm_memattr_t	vmo_attr;
 };
 
 struct vm_page {
@@ -174,10 +145,9 @@ int vm_fault(struct vmspace *, vm_offset_t, vm_prot_t, int);
 int vm_fault_quick_hold_pages(struct vmspace *, vm_offset_t addr, vm_size_t len,
     vm_prot_t prot, vm_page_t *ma, int max_count);
 
-struct vm_object *vm_object_allocate(objtype_t, vm_pindex_t, bool);
+vm_object_t vm_object_mem_allocate(size_t, bool);
 void vm_object_deallocate(vm_object_t);
 void vm_object_reference(vm_object_t);
-int vm_object_set_memattr(vm_object_t, vm_memattr_t);
 pfn_t vm_object_pfn(vm_object_t, uintptr_t);
 struct vm_object *vmm_mmio_alloc(struct vmspace *, vm_paddr_t gpa, size_t len,
     vm_paddr_t hpa);
@@ -190,8 +160,5 @@ struct vm_object *vmm_mmio_alloc(struct vmspace *, vm_paddr_t gpa, size_t len,
 void vm_page_unwire(vm_page_t, uint8_t);
 
 #define	VM_PAGE_TO_PHYS(page)	(mmu_ptob((uintptr_t)((page)->vmp_pfn)))
-
-vm_object_t vm_pager_allocate(objtype_t, void *, vm_ooffset_t, vm_prot_t,
-    vm_ooffset_t, void *);
 
 #endif /* _VMM_VM_H */

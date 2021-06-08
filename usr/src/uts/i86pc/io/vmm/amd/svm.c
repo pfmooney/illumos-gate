@@ -45,7 +45,6 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/smp.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/pcpu.h>
@@ -60,7 +59,6 @@ __FBSDID("$FreeBSD$");
 #include <machine/md_var.h>
 #include <machine/reg.h>
 #include <machine/specialreg.h>
-#include <machine/smp.h>
 #include <machine/vmm.h>
 #include <machine/vmm_dev.h>
 #include <sys/vmm_instruction_emul.h>
@@ -79,7 +77,6 @@ __FBSDID("$FreeBSD$");
 #include "svm.h"
 #include "svm_softc.h"
 #include "svm_msr.h"
-#include "npt.h"
 
 SYSCTL_DECL(_hw_vmm);
 SYSCTL_NODE(_hw_vmm, OID_AUTO, svm, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
@@ -151,12 +148,11 @@ svm_cleanup(void)
 }
 
 static int
-svm_init(int ipinum)
+svm_init()
 {
 	vmcb_clean &= VMCB_CACHE_DEFAULT;
 
 	svm_msr_init();
-	svm_npt_init(ipinum);
 
 	return (0);
 }
@@ -447,7 +443,7 @@ svm_vminit(struct vm *vm, pmap_t pmap)
 		panic("contigmalloc of SVM IO bitmap failed");
 
 	svm_sc->vm = vm;
-	svm_sc->nptp = (vm_offset_t)vtophys(pmap->pm_pml4);
+	svm_sc->nptp = vmspace_pmtp(vm_get_vmspace(vm));
 
 	/*
 	 * Intercept read and write accesses to all MSRs.
@@ -2470,6 +2466,7 @@ struct vmm_ops vmm_ops_amd = {
 	.init		= svm_init,
 	.cleanup	= svm_cleanup,
 	.resume		= svm_restore,
+
 	.vminit		= svm_vminit,
 	.vmrun		= svm_vmrun,
 	.vmcleanup	= svm_vmcleanup,
@@ -2479,8 +2476,6 @@ struct vmm_ops vmm_ops_amd = {
 	.vmsetdesc	= svm_setdesc,
 	.vmgetcap	= svm_getcap,
 	.vmsetcap	= svm_setcap,
-	.vmspace_alloc	= svm_npt_alloc,
-	.vmspace_free	= svm_npt_free,
 	.vlapic_init	= svm_vlapic_init,
 	.vlapic_cleanup	= svm_vlapic_cleanup,
 

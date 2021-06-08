@@ -28,6 +28,7 @@
 
 struct rvi_map {
 	gipt_map_t	rm_gipt;
+	uint64_t	rm_gipt_root;
 	uint64_t	rm_wired_page_count;
 };
 typedef struct rvi_map rvi_map_t;
@@ -84,6 +85,13 @@ CTASSERT(RVI_MAX_LEVELS <= GIPT_MAX_LEVELS);
 CTASSERT((PAT_DEFAULT_ATTRIBUTE & 0xf) == MTRR_TYPE_WB);
 CTASSERT(((PAT_DEFAULT_ATTRIBUTE >> 24) & 0xf) == MTRR_TYPE_UC);
 
+static int
+rvi_init()
+{
+	/* No special checks required for now */
+	return (0);
+}
+
 static inline uint64_t
 rvi_attr_to_pat(const uint8_t attr)
 {
@@ -118,7 +126,7 @@ rvi_pte_map(uint64_t pfn)
 }
 
 static void *
-rvi_create(uintptr_t *pml4_kaddr)
+rvi_alloc()
 {
 	rvi_map_t *rmap;
 	gipt_map_t *map;
@@ -134,7 +142,9 @@ rvi_create(uintptr_t *pml4_kaddr)
 	root->gipt_level = RVI_MAX_LEVELS - 1;
 	gipt_map_init(map, RVI_MAX_LEVELS, GIPT_HASH_SIZE_DEFAULT, &cbs, root);
 
-	*pml4_kaddr = (uintptr_t)root->gipt_kva;
+	/* XXX: stash the gipt root for now */
+	rmap->rm_gipt_root = root->gipt_pfn << PAGESHIFT;
+
 	return (rmap);
 }
 
@@ -149,6 +159,14 @@ rvi_destroy(void *arg)
 		gipt_map_fini(map);
 		kmem_free(rmap, sizeof (*rmap));
 	}
+}
+
+static uint64_t
+rvi_pmtp(void *arg)
+{
+	rvi_map_t *rmap = arg;
+
+	return (rmap->rm_gipt_root);
 }
 
 static uint64_t
@@ -291,8 +309,10 @@ rvi_unmap(void *arg, uint64_t va, uint64_t end_va)
 }
 
 struct vmm_pt_ops rvi_ops = {
-	.vpo_init	= rvi_create,
+	.vpo_init	= rvi_init,
+	.vpo_alloc	= rvi_alloc,
 	.vpo_free	= rvi_destroy,
+	.vpo_pmtp	= rvi_pmtp,
 	.vpo_wired_cnt	= rvi_wired_count,
 	.vpo_is_wired	= rvi_is_wired,
 	.vpo_map	= rvi_map,

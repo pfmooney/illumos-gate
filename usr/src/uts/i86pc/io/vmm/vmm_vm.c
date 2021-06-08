@@ -86,12 +86,13 @@ struct vm_page {
 
 /* Private glue interfaces */
 static void pmap_free(pmap_t);
+static void pmap_init(pmap_t, struct vmm_pt_ops *);
 static vmspace_mapping_t *vm_mapping_find(struct vmspace *, uintptr_t, size_t,
     boolean_t);
 static void vm_mapping_remove(struct vmspace *, vmspace_mapping_t *);
 
 struct vmspace *
-vmspace_alloc(vm_offset_t start, vm_offset_t end, pmap_pinit_t pinit)
+vmspace_alloc(size_t end, struct vmm_pt_ops *ops)
 {
 	struct vmspace *vms;
 	const uintptr_t size = end + 1;
@@ -101,7 +102,7 @@ vmspace_alloc(vm_offset_t start, vm_offset_t end, pmap_pinit_t pinit)
 	 * space is available to work with for the various pagetable tricks.
 	 */
 	VERIFY(ttoproc(curthread)->p_model == DATAMODEL_LP64);
-	VERIFY(start == 0 && size > 0 && (size & PAGEOFFSET) == 0 &&
+	VERIFY(size > 0 && (size & PAGEOFFSET) == 0 &&
 	    size <= (uintptr_t)USERLIMIT);
 
 	vms = kmem_zalloc(sizeof (*vms), KM_SLEEP);
@@ -109,10 +110,7 @@ vmspace_alloc(vm_offset_t start, vm_offset_t end, pmap_pinit_t pinit)
 	list_create(&vms->vms_maplist, sizeof (vmspace_mapping_t),
 	    offsetof(vmspace_mapping_t, vmsm_node));
 
-	if (pinit(&vms->vms_pmap) == 0) {
-		kmem_free(vms, sizeof (*vms));
-		return (NULL);
-	}
+	pmap_init(&vms->vms_pmap, ops);
 
 	return (vms);
 }
@@ -183,47 +181,31 @@ pmap_free(pmap_t pmap)
 	void *pmi = pmap->pm_impl;
 	struct vmm_pt_ops *ops = pmap->pm_ops;
 
-	pmap->pm_pml4 = NULL;
 	pmap->pm_impl = NULL;
 	pmap->pm_ops = NULL;
 
 	ops->vpo_free(pmi);
 }
 
-int
-pmap_pinit_type(pmap_t pmap, enum pmap_type type, int flags)
+static void
+pmap_init(pmap_t pmap, struct vmm_pt_ops *ops)
 {
-	/* For use in vmm only */
-	pmap->pm_type = type;
-	switch (type) {
-	case PT_EPT: {
-		struct vmm_pt_ops *ops = &ept_ops;
-		void *pml4, *pmi;
+	void *pmi;
 
-		pmi = ops->vpo_init((uintptr_t *)&pml4);
+	ASSERT3P(ops, !=, NULL);
 
-		pmap->pm_ops = ops;
-		pmap->pm_impl = pmi;
-		pmap->pm_pml4 = pml4;
-		return (1);
-	}
-	case PT_RVI: {
-		struct vmm_pt_ops *ops = &rvi_ops;
-		void *pml4, *pmi;
+	pmi = ops->vpo_alloc();
+	pmap->pm_ops = ops;
+	pmap->pm_impl = pmi;
+}
 
-		pmi = ops->vpo_init((uintptr_t *)&pml4);
+uint64_t
+vmspace_pmtp(struct vmspace *vms)
+{
+	struct vmm_pt_ops *ops = vms->vms_pmap.pm_ops;
+	void *pmi = vms->vms_pmap.pm_impl;
 
-		pmap->pm_ops = ops;
-		pmap->pm_impl = pmi;
-		pmap->pm_pml4 = pml4;
-		return (1);
-	}
-	default:
-		panic("unsupported pmap type: %x", type);
-		break;
-	}
-
-	return (1);
+	return (ops->vpo_pmtp(pmi));
 }
 
 long

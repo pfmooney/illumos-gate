@@ -411,18 +411,6 @@ vmm_glue_callout_localize(struct callout *c)
 	mutex_exit(&cpu_lock);
 }
 
-void
-ipi_cpu(int cpu, uint_t ipi)
-{
-	/*
-	 * This was previously implemented as an invocation of asynchronous
-	 * no-op crosscalls to interrupt the target CPU.  Since even nowait
-	 * crosscalls can block in certain circumstances, a direct poke_cpu()
-	 * is safer when called from delicate contexts.
-	 */
-	poke_cpu(cpu);
-}
-
 uint_t	cpu_high;		/* Highest arg to CPUID */
 uint_t	cpu_exthigh;		/* Highest arg to extended CPUID */
 uint_t	cpu_id;			/* Stepping ID */

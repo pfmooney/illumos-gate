@@ -48,7 +48,6 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/smp.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/pcpu.h>
@@ -66,7 +65,6 @@ __FBSDID("$FreeBSD$");
 #include <machine/md_var.h>
 #include <machine/reg.h>
 #include <machine/segments.h>
-#include <machine/smp.h>
 #include <machine/specialreg.h>
 #include <machine/vmparam.h>
 #include <sys/vmm_vm.h>
@@ -83,7 +81,6 @@ __FBSDID("$FreeBSD$");
 #include "vlapic.h"
 #include "vlapic_priv.h"
 
-#include "ept.h"
 #include "vmcs.h"
 #include "vmx.h"
 #include "vmx_msr.h"
@@ -426,7 +423,7 @@ vmx_restore(void)
 }
 
 static int
-vmx_init(int ipinum)
+vmx_init()
 {
 	int error;
 	uint64_t fixed0, fixed1;
@@ -565,13 +562,6 @@ vmx_init(int ipinum)
 		}
 	}
 
-	/* Initialize EPT */
-	error = ept_init(ipinum);
-	if (error) {
-		printf("vmx_init: ept initialization failed (%d)\n", error);
-		return (error);
-	}
-
 #ifdef __FreeBSD__
 	guest_l1d_flush = (cpu_ia32_arch_caps &
 	    IA32_ARCH_CAP_SKIP_L1DFL_VMENTRY) == 0;
@@ -660,7 +650,7 @@ vmx_vminit(struct vm *vm, pmap_t pmap)
 	}
 	vmx->vm = vm;
 
-	vmx->eptp = eptp(vtophys((vm_offset_t)pmap->pm_pml4));
+	vmx->eptp = vmspace_pmtp(vm_get_vmspace(vm));
 
 	/*
 	 * Clean up EPTP-tagged guest physical and combined mappings
@@ -671,7 +661,7 @@ vmx_vminit(struct vm *vm, pmap_t pmap)
 	 *
 	 * Combined mappings for this EP4TA are also invalidated for all VPIDs.
 	 */
-	ept_invalidate_mappings(vmx->eptp);
+	hma_vmx_invept_allcpus((uintptr_t)vmx->eptp);
 
 	vmx_msr_bitmap_initialize(vmx);
 
@@ -3604,6 +3594,7 @@ struct vmm_ops vmm_ops_intel = {
 	.init		= vmx_init,
 	.cleanup	= vmx_cleanup,
 	.resume		= vmx_restore,
+
 	.vminit		= vmx_vminit,
 	.vmrun		= vmx_run,
 	.vmcleanup	= vmx_vmcleanup,
@@ -3613,8 +3604,6 @@ struct vmm_ops vmm_ops_intel = {
 	.vmsetdesc	= vmx_setdesc,
 	.vmgetcap	= vmx_getcap,
 	.vmsetcap	= vmx_setcap,
-	.vmspace_alloc	= ept_vmspace_alloc,
-	.vmspace_free	= ept_vmspace_free,
 	.vlapic_init	= vmx_vlapic_init,
 	.vlapic_cleanup	= vmx_vlapic_cleanup,
 

@@ -65,7 +65,7 @@ struct vm_object;
 struct vm_guest_paging;
 struct pmap;
 
-typedef int	(*vmm_init_func_t)(int ipinum);
+typedef int	(*vmm_init_func_t)();
 typedef int	(*vmm_cleanup_func_t)(void);
 typedef void	(*vmm_resume_func_t)(void);
 typedef void *	(*vmi_init_func_t)(struct vm *vm, struct pmap *pmap);
@@ -103,8 +103,6 @@ struct vmm_ops {
 	vmi_set_desc_t		vmsetdesc;
 	vmi_get_cap_t		vmgetcap;
 	vmi_set_cap_t		vmsetcap;
-	vmi_vmspace_alloc	vmspace_alloc;
-	vmi_vmspace_free	vmspace_free;
 	vmi_vlapic_init		vlapic_init;
 	vmi_vlapic_cleanup	vlapic_cleanup;
 

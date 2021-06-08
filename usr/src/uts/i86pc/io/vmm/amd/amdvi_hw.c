@@ -37,7 +37,6 @@ __FBSDID("$FreeBSD$");
 #include <sys/malloc.h>
 #include <sys/pcpu.h>
 #include <sys/rman.h>
-#include <sys/smp.h>
 #include <sys/sysctl.h>
 
 #include <dev/pci/pcivar.h>

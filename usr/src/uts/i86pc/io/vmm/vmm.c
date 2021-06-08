@@ -58,12 +58,10 @@ __FBSDID("$FreeBSD$");
 #include <sys/proc.h>
 #include <sys/rwlock.h>
 #include <sys/sched.h>
-#include <sys/smp.h>
 #include <sys/systm.h>
 #include <sys/sunddi.h>
 
 #include <machine/pcb.h>
-#include <machine/smp.h>
 #include <machine/md_var.h>
 #include <x86/psl.h>
 #include <x86/apicreg.h>
@@ -218,8 +216,6 @@ static struct vmm_ops vmm_ops_null = {
 	.vmsetdesc	= (vmi_set_desc_t)nullop_panic,
 	.vmgetcap	= (vmi_get_cap_t)nullop_panic,
 	.vmsetcap	= (vmi_set_cap_t)nullop_panic,
-	.vmspace_alloc	= (vmi_vmspace_alloc)nullop_panic,
-	.vmspace_free	= (vmi_vmspace_free)nullop_panic,
 	.vlapic_init	= (vmi_vlapic_init)nullop_panic,
 	.vlapic_cleanup	= (vmi_vlapic_cleanup)nullop_panic,
 	.vmsavectx	= (vmi_savectx)nullop_panic,
@@ -227,8 +223,9 @@ static struct vmm_ops vmm_ops_null = {
 };
 
 static struct vmm_ops *ops = &vmm_ops_null;
+static struct vmm_pt_ops *pt_ops = NULL;
 
-#define	VMM_INIT(num)			((*ops->init)(num))
+#define	VMM_INIT()			((*ops->init)())
 #define	VMM_CLEANUP()			((*ops->cleanup)())
 #define	VMM_RESUME()			((*ops->resume)())
 
@@ -236,8 +233,6 @@ static struct vmm_ops *ops = &vmm_ops_null;
 #define	VMRUN(vmi, vcpu, rip, pmap) \
 	((*ops->vmrun)(vmi, vcpu, rip, pmap))
 #define	VMCLEANUP(vmi)			((*ops->vmcleanup)(vmi))
-#define	VMSPACE_ALLOC(min, max)		((*ops->vmspace_alloc)(min, max))
-#define	VMSPACE_FREE(vmspace)		((*ops->vmspace_free)(vmspace))
 
 #define	VMGETREG(vmi, vcpu, num, rv)	((*ops->vmgetreg)(vmi, vcpu, num, rv))
 #define	VMSETREG(vmi, vcpu, num, val)	((*ops->vmsetreg)(vmi, vcpu, num, val))
@@ -263,9 +258,6 @@ SYSCTL_NODE(_hw, OID_AUTO, vmm, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
  * interrupts disabled.
  */
 static int halt_detection_enabled = 1;
-
-/* IPI vector used for vcpu notifications */
-static int vmm_ipinum;
 
 /* Trap into hypervisor on all guest exceptions and reflect them back */
 static int trace_guest_exceptions;
@@ -396,19 +388,28 @@ vm_vie_ctx(struct vm *vm, int cpuid)
 static int
 vmm_init(void)
 {
+	int res;
+
 	vmm_host_state_init();
 
-	/* We use cpu_poke() for IPIs */
-	vmm_ipinum = 0;
-
-	if (vmm_is_intel())
+	if (vmm_is_intel()) {
 		ops = &vmm_ops_intel;
-	else if (vmm_is_svm())
+		pt_ops = &ept_ops;
+	} else if (vmm_is_svm()) {
 		ops = &vmm_ops_amd;
-	else
+		pt_ops = &rvi_ops;
+	} else {
 		return (ENXIO);
+	}
 
-	return (VMM_INIT(vmm_ipinum));
+	res = VMM_INIT();
+	if (res != 0) {
+		return (res);
+	}
+	/* Initialize nested paging bits now the VMM parts are good */
+	res = pt_ops->vpo_init();
+
+	return (res);
 }
 
 int
@@ -501,7 +502,7 @@ vm_create(const char *name, uint64_t flags, struct vm **retvm)
 	/* Name validation has already occurred */
 	VERIFY3U(strnlen(name, VM_MAX_NAMELEN), <, VM_MAX_NAMELEN);
 
-	vmspace = VMSPACE_ALLOC(0, VM_MAXUSER_ADDRESS);
+	vmspace = vmspace_alloc(VM_MAXUSER_ADDRESS, pt_ops);
 	if (vmspace == NULL)
 		return (ENOMEM);
 
@@ -614,7 +615,7 @@ vm_cleanup(struct vm *vm, bool destroy)
 		for (i = 0; i < VM_MAX_MEMSEGS; i++)
 			vm_free_memseg(vm, i);
 
-		VMSPACE_FREE(vm->vmspace);
+		vmspace_free(vm->vmspace);
 		vm->vmspace = NULL;
 	}
 }
@@ -3301,10 +3302,9 @@ vcpu_notify_event_locked(struct vcpu *vcpu, vcpu_notify_t ntype)
 		KASSERT(hostcpu != NOCPU, ("vcpu running on invalid hostcpu"));
 		if (hostcpu != curcpu) {
 			if (ntype == VCPU_NOTIFY_APIC) {
-				vlapic_post_intr(vcpu->vlapic, hostcpu,
-				    vmm_ipinum);
+				vlapic_post_intr(vcpu->vlapic, hostcpu);
 			} else {
-				ipi_cpu(hostcpu, vmm_ipinum);
+				poke_cpu(hostcpu);
 			}
 		} else {
 			/*

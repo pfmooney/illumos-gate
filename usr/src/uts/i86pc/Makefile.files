@@ -254,7 +254,6 @@ VMM_OBJS += vmm.o \
 	vlapic.o \
 	vrtc.o \
 	vpmtmr.o \
-	ept.o \
 	vmcs.o \
 	vmx_msr.o \
 	vmx.o \
@@ -263,7 +262,6 @@ VMM_OBJS += vmm.o \
 	vtd_sol.o \
 	svm.o \
 	svm_msr.o \
-	npt.o \
 	vmcb.o \
 	svm_support.o \
 	amdv.o \

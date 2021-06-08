@@ -20,6 +20,7 @@
 #include <sys/kmem.h>
 #include <sys/machsystm.h>
 #include <sys/mman.h>
+#include <sys/x86_archext.h>
 
 #include <sys/gipt.h>
 #include <sys/vmm_vm.h>
@@ -27,6 +28,7 @@
 
 struct ept_map {
 	gipt_map_t	em_gipt;
+	uint64_t	em_gipt_root;
 	uint64_t	em_wired_page_count;
 };
 typedef struct ept_map ept_map_t;
@@ -71,6 +73,35 @@ CTASSERT(EPT_X == PROT_EXEC);
 #define	EPT_PTE_ASSIGN_TABLE(pfn)	(EPT_PADDR(pfn_to_pa(pfn)) | EPT_RWX)
 
 
+/*
+ * Cover the EPT capabilities used by bhyve at present:
+ * - 4-level page walks
+ * - write-back memory type
+ * - hardware accessed/dirty tracking
+ * - INVEPT operations (all types)
+ * - INVVPID operations (single-context only)
+ */
+#define EPT_CAPS_REQUIRED			\
+	(IA32_VMX_EPT_VPID_PWL4 |		\
+	IA32_VMX_EPT_VPID_TYPE_WB |		\
+	IA32_VMX_EPT_VPID_HW_AD |		\
+	IA32_VMX_EPT_VPID_INVEPT |		\
+	IA32_VMX_EPT_VPID_INVEPT_SINGLE |	\
+	IA32_VMX_EPT_VPID_INVEPT_ALL |		\
+	IA32_VMX_EPT_VPID_INVVPID |		\
+	IA32_VMX_EPT_VPID_INVVPID_SINGLE)
+
+static int
+ept_init()
+{
+	uint64_t caps = rdmsr(MSR_IA32_VMX_EPT_VPID_CAP);
+	if ((caps & EPT_CAPS_REQUIRED) != EPT_CAPS_REQUIRED) {
+		return (EINVAL);
+	}
+
+	return (0);
+}
+
 static gipt_pte_type_t
 ept_pte_type(uint64_t pte, uint_t level)
 {
@@ -90,7 +121,7 @@ ept_pte_map(uint64_t pfn)
 }
 
 static void *
-ept_create(uintptr_t *pml4_kaddr)
+ept_alloc()
 {
 	ept_map_t *emap;
 	gipt_map_t *map;
@@ -106,7 +137,9 @@ ept_create(uintptr_t *pml4_kaddr)
 	root->gipt_level = EPT_MAX_LEVELS - 1;
 	gipt_map_init(map, EPT_MAX_LEVELS, GIPT_HASH_SIZE_DEFAULT, &cbs, root);
 
-	*pml4_kaddr = (uintptr_t)root->gipt_kva;
+	/* XXX: stash the gipt root for now */
+	emap->em_gipt_root = root->gipt_pfn << PAGESHIFT;
+
 	return (emap);
 }
 
@@ -121,6 +154,18 @@ ept_destroy(void *arg)
 		gipt_map_fini(map);
 		kmem_free(emap, sizeof (*emap));
 	}
+}
+
+static uint64_t
+ept_pmtp(void *arg)
+{
+	ept_map_t *emap = arg;
+	uint64_t res;
+
+	/* TODO: enable AD tracking when required */
+	res = emap->em_gipt_root | (EPT_MAX_LEVELS - 1) << 3 | MTRR_TYPE_WB;
+
+	return (res);
 }
 
 static uint64_t
@@ -262,8 +307,10 @@ ept_unmap(void *arg, uint64_t va, uint64_t end_va)
 }
 
 struct vmm_pt_ops ept_ops = {
-	.vpo_init	= ept_create,
+	.vpo_init	= ept_init,
+	.vpo_alloc	= ept_alloc,
 	.vpo_free	= ept_destroy,
+	.vpo_pmtp	= ept_pmtp,
 	.vpo_wired_cnt	= ept_wired_count,
 	.vpo_is_wired	= ept_is_wired,
 	.vpo_map	= ept_map,

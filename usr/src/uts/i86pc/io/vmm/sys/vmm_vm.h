@@ -62,12 +62,10 @@ int	pmap_emulate_accessed_dirty(pmap_t pmap, vm_offset_t va, int ftype);
 long	pmap_wired_count(pmap_t pmap);
 
 struct pmap {
-	void		*pm_pml4;
 	cpuset_t	pm_active;
 	long		pm_eptgen;
 
 	/* Implementation private */
-	enum pmap_type	pm_type;
 	struct vmm_pt_ops *pm_ops;
 	void		*pm_impl;
 };
@@ -80,8 +78,10 @@ int vm_segmap_space(struct vmspace *, off_t, struct as *, caddr_t *, off_t,
 void *vmspace_find_kva(struct vmspace *, uintptr_t, size_t);
 
 struct vmm_pt_ops {
-	void * (*vpo_init)(uint64_t *);
+	int (*vpo_init)();
+	void * (*vpo_alloc)();
 	void (*vpo_free)(void *);
+	uint64_t (*vpo_pmtp)(void *);
 	uint64_t (*vpo_wired_cnt)(void *);
 	int (*vpo_is_wired)(void *, uint64_t, uint_t *);
 	int (*vpo_map)(void *, uint64_t, pfn_t, uint_t, uint_t, uint8_t);
@@ -93,8 +93,9 @@ extern struct vmm_pt_ops rvi_ops;
 
 typedef int (*pmap_pinit_t)(struct pmap *pmap);
 
-struct vmspace *vmspace_alloc(vm_offset_t, vm_offset_t, pmap_pinit_t);
+struct vmspace *vmspace_alloc(size_t, struct vmm_pt_ops *);
 void vmspace_free(struct vmspace *);
+uint64_t vmspace_pmtp(struct vmspace *);
 
 int vm_fault(struct vmspace *, vm_offset_t, vm_prot_t);
 int vm_fault_quick_hold_pages(struct vmspace *, vm_offset_t addr, vm_size_t len,

@@ -33,7 +33,6 @@
 #include <vm/seg_vn.h>
 #include <vm/seg_kmem.h>
 
-#include <machine/vm.h>
 #include <sys/vmm_vm.h>
 #include <sys/seg_vmm.h>
 #include <sys/vmm_reservoir.h>
@@ -76,8 +75,6 @@ struct vm_object {
 	enum vm_object_type vmo_type;
 	size_t		vmo_size;
 	void		*vmo_data;
-
-	kmutex_t	vmo_lock;	/* protects fields below */
 	vm_memattr_t	vmo_attr;
 };
 
@@ -270,10 +267,6 @@ vm_object_pager_mmio(vm_object_t vmo, uintptr_t off)
 	return (pfn);
 }
 
-/* XXX: clean up these translations */
-CTASSERT(VM_MEMATTR_UNCACHEABLE == MTRR_TYPE_UC);
-CTASSERT(VM_MEMATTR_WRITE_BACK == MTRR_TYPE_WB);
-
 vm_object_t
 vm_object_mem_allocate(size_t size, bool transient)
 {
@@ -290,12 +283,11 @@ vm_object_mem_allocate(size_t size, bool transient)
 	}
 
 	vmo = kmem_alloc(sizeof (*vmo), KM_SLEEP);
-	mutex_init(&vmo->vmo_lock, NULL, MUTEX_DEFAULT, NULL);
 
 	/* For now, these are to stay fixed after allocation */
 	vmo->vmo_type = VMOT_MEM;
 	vmo->vmo_size = size;
-	vmo->vmo_attr = VM_MEMATTR_DEFAULT;
+	vmo->vmo_attr = MTRR_TYPE_WB;
 	vmo->vmo_data = region;
 	vmo->vmo_refcnt = 1;
 
@@ -312,12 +304,11 @@ vm_object_mmio_allocate(size_t size, uintptr_t hpa)
 	ASSERT3U(hpa & PAGEOFFSET, ==, 0);
 
 	vmo = kmem_alloc(sizeof (*vmo), KM_SLEEP);
-	mutex_init(&vmo->vmo_lock, NULL, MUTEX_DEFAULT, NULL);
 
 	/* For now, these are to stay fixed after allocation */
 	vmo->vmo_type = VMOT_MMIO;
 	vmo->vmo_size = size;
-	vmo->vmo_attr = VM_MEMATTR_UNCACHEABLE;
+	vmo->vmo_attr = MTRR_TYPE_UC;
 	vmo->vmo_data = (void *)hpa;
 	vmo->vmo_refcnt = 1;
 
@@ -333,10 +324,8 @@ vmm_mmio_alloc(struct vmspace *vmspace, vm_paddr_t gpa, size_t len,
 
 	obj = vm_object_mmio_allocate(len, hpa);
 	if (obj != NULL) {
-		const int prot = PROT_READ | PROT_WRITE;
-
-		error = vm_map_find(vmspace, obj, 0, &gpa, len, 0,
-		    VMFS_NO_SPACE, prot, prot, 0);
+		error = vm_map_add(vmspace, obj, 0, gpa, len,
+		    PROT_READ | PROT_WRITE);
 		if (error != 0) {
 			vm_object_deallocate(obj);
 			obj = NULL;
@@ -371,7 +360,6 @@ vm_object_deallocate(vm_object_t vmo)
 
 	vmo->vmo_data = NULL;
 	vmo->vmo_size = 0;
-	mutex_destroy(&vmo->vmo_lock);
 	kmem_free(vmo, sizeof (*vmo));
 }
 
@@ -584,26 +572,21 @@ vm_fault_quick_hold_pages(struct vmspace *vms, vm_offset_t addr, vm_size_t len,
  * Find a suitable location for a mapping (and install it).
  */
 int
-vm_map_find(struct vmspace *vms, vm_object_t vmo, vm_ooffset_t off,
-    vm_offset_t *addr, vm_size_t len, vm_offset_t max_addr, int find_flags,
-    vm_prot_t prot, vm_prot_t prot_max, int cow)
+vm_map_add(struct vmspace *vms, vm_object_t vmo, vm_ooffset_t off,
+    vm_offset_t addr, vm_size_t len, vm_prot_t prot)
 {
 	const size_t size = (size_t)len;
 	const uintptr_t uoff = (uintptr_t)off;
-	uintptr_t base = *addr;
+	uintptr_t base = addr;
 	vmspace_mapping_t *vmsm;
 	int res = 0;
-
-	/* For use in vmm only */
-	VERIFY(find_flags == VMFS_NO_SPACE); /* essentially MAP_FIXED */
-	VERIFY(max_addr == 0);
 
 	if (size == 0 || off < 0 ||
 	    uoff >= (uoff + size) || vmo->vmo_size < (uoff + size)) {
 		return (EINVAL);
 	}
 
-	if (*addr >= vms->vms_size) {
+	if (addr >= vms->vms_size) {
 		return (ENOMEM);
 	}
 
@@ -623,9 +606,6 @@ vm_map_find(struct vmspace *vms, vm_object_t vmo, vm_ooffset_t off,
 		vmsm->vmsm_offset = (off_t)uoff;
 		vmsm->vmsm_prot = prot;
 		list_insert_tail(&vms->vms_maplist, vmsm);
-
-		/* Communicate out the chosen address. */
-		*addr = (vm_offset_t)base;
 	}
 out:
 	vms->vms_map_changing = B_FALSE;
@@ -667,7 +647,7 @@ vm_map_remove(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 }
 
 int
-vm_map_wire(struct vmspace *vms, vm_offset_t start, vm_offset_t end, int flags)
+vm_map_wire(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 {
 	pmap_t pmap = &vms->vms_pmap;
 	void *pmi = pmap->pm_impl;
@@ -800,7 +780,7 @@ vm_segmap_space(struct vmspace *vms, off_t off, struct as *as, caddr_t *addrp,
 }
 
 void
-vm_page_unwire(vm_page_t vmp, uint8_t nqueue __unused)
+vm_page_unwire(vm_page_t vmp)
 {
 	ASSERT(!MUTEX_HELD(&vmp->vmp_lock));
 	mutex_enter(&vmp->vmp_lock);

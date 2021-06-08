@@ -24,29 +24,6 @@
 #include <machine/pmap.h>
 
 /*
- * vm_map_wire and vm_map_unwire option flags
- */
-#define	VM_MAP_WIRE_SYSTEM	0	/* wiring in a kernel map */
-#define	VM_MAP_WIRE_USER	1	/* wiring in a user map */
-
-#define	VM_MAP_WIRE_NOHOLES	0	/* region must not have holes */
-#define	VM_MAP_WIRE_HOLESOK	2	/* region may have holes */
-
-#define	VM_MAP_WIRE_WRITE	4	/* Validate writable. */
-
-/*
- * The following "find_space" options are supported by vm_map_find().
- *
- * For VMFS_ALIGNED_SPACE, the desired alignment is specified to
- * the macro argument as log base 2 of the desired alignment.
- */
-#define	VMFS_NO_SPACE		0	/* don't find; use the given range */
-#define	VMFS_ANY_SPACE		1	/* find range with any alignment */
-#define	VMFS_OPTIMAL_SPACE	2	/* find range with optimal alignment */
-#define	VMFS_SUPER_SPACE	3	/* find superpage-aligned range */
-#define	VMFS_ALIGNED_SPACE(x) ((x) << 8) /* find range with fixed alignment */
-
-/*
  * vm_fault option flags
  */
 #define	VM_FAULT_NORMAL		0	/* Nothing special */
@@ -67,7 +44,6 @@
 typedef uchar_t vm_prot_t;
 
 /* New type declarations. */
-struct vm;
 struct vmspace;
 struct pmap;
 
@@ -79,19 +55,12 @@ struct vmm_pt_ops;
 struct vm_page;
 typedef struct vm_page *vm_page_t;
 
-union vm_map_object;
-typedef union vm_map_object vm_map_object_t;
-
-struct vm_map_entry;
-typedef struct vm_map_entry *vm_map_entry_t;
-
 pmap_t vmspace_pmap(struct vmspace *);
 
-int vm_map_find(struct vmspace *, vm_object_t, vm_ooffset_t, vm_offset_t *,
-    vm_size_t, vm_offset_t, int, vm_prot_t, vm_prot_t, int);
+int vm_map_add(struct vmspace *, vm_object_t, vm_ooffset_t, vm_offset_t,
+    vm_size_t, vm_prot_t);
 int vm_map_remove(struct vmspace *, vm_offset_t, vm_offset_t);
-int vm_map_wire(struct vmspace *, vm_offset_t start, vm_offset_t end,
-   int flags);
+int vm_map_wire(struct vmspace *, vm_offset_t start, vm_offset_t end);
 
 long vmspace_resident_count(struct vmspace *vmspace);
 
@@ -152,12 +121,7 @@ pfn_t vm_object_pfn(vm_object_t, uintptr_t);
 struct vm_object *vmm_mmio_alloc(struct vmspace *, vm_paddr_t gpa, size_t len,
     vm_paddr_t hpa);
 
-#define	VM_OBJECT_WLOCK(vmo)	mutex_enter(&(vmo)->vmo_lock)
-#define	VM_OBJECT_WUNLOCK(vmo)	mutex_exit(&(vmo)->vmo_lock)
-
-#define	PQ_ACTIVE	1
-
-void vm_page_unwire(vm_page_t, uint8_t);
+void vm_page_unwire(vm_page_t);
 
 #define	VM_PAGE_TO_PHYS(page)	(mmu_ptob((uintptr_t)((page)->vmp_pfn)))
 

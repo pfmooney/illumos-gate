@@ -804,16 +804,14 @@ vm_mmap_memseg(struct vm *vm, vm_paddr_t gpa, int segid, vm_ooffset_t first,
 	if (map == NULL)
 		return (ENOSPC);
 
-	error = vm_map_find(vm->vmspace, seg->object, first, &gpa,
-	    len, 0, VMFS_NO_SPACE, prot, prot, 0);
+	error = vm_map_add(vm->vmspace, seg->object, first, gpa, len, prot);
 	if (error != 0)
 		return (EFAULT);
 
 	vm_object_reference(seg->object);
 
 	if ((flags & VM_MEMMAP_F_WIRED) != 0) {
-		error = vm_map_wire(vm->vmspace, gpa, gpa + len,
-		    VM_MAP_WIRE_USER | VM_MAP_WIRE_NOHOLES);
+		error = vm_map_wire(vm->vmspace, gpa, gpa + len);
 		if (error != 0) {
 			vm_map_remove(vm->vmspace, gpa, gpa + len);
 			return (EFAULT);
@@ -1095,7 +1093,7 @@ vm_gpa_release(void *cookie)
 {
 	vm_page_t m = cookie;
 
-	vm_page_unwire(m, PQ_ACTIVE);
+	vm_page_unwire(m);
 }
 
 int

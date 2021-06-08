@@ -24,13 +24,6 @@
 #include <machine/pmap.h>
 
 /*
- * vm_fault option flags
- */
-#define	VM_FAULT_NORMAL		0	/* Nothing special */
-#define	VM_FAULT_WIRE		1	/* Wire the mapped page */
-#define	VM_FAULT_DIRTY		2	/* Dirty the page; use w/PROT_COPY */
-
-/*
  * The VM_MAXUSER_ADDRESS determines the upper size limit of a vmspace.
  * This value is sized well below the host userlimit, halving the
  * available space below the VA hole to avoid Intel EPT limits and
@@ -46,14 +39,13 @@ typedef uchar_t vm_prot_t;
 /* New type declarations. */
 struct vmspace;
 struct pmap;
-
 struct vm_object;
+struct vm_page;
+
 typedef struct vm_object *vm_object_t;
+typedef struct vm_page *vm_page_t;
 
 struct vmm_pt_ops;
-
-struct vm_page;
-typedef struct vm_page *vm_page_t;
 
 pmap_t vmspace_pmap(struct vmspace *);
 
@@ -80,12 +72,6 @@ struct pmap {
 	void		*pm_impl;
 };
 
-struct vm_page {
-	kmutex_t		vmp_lock;
-	pfn_t			vmp_pfn;
-	struct vm_object	*vmp_obj_held;
-};
-
 /* illumos-specific functions for setup and operation */
 int vm_segmap_obj(vm_object_t, off_t, size_t, struct as *, caddr_t *, uint_t,
     uint_t, uint_t);
@@ -110,7 +96,7 @@ typedef int (*pmap_pinit_t)(struct pmap *pmap);
 struct vmspace *vmspace_alloc(vm_offset_t, vm_offset_t, pmap_pinit_t);
 void vmspace_free(struct vmspace *);
 
-int vm_fault(struct vmspace *, vm_offset_t, vm_prot_t, int);
+int vm_fault(struct vmspace *, vm_offset_t, vm_prot_t);
 int vm_fault_quick_hold_pages(struct vmspace *, vm_offset_t addr, vm_size_t len,
     vm_prot_t prot, vm_page_t *ma, int max_count);
 
@@ -121,8 +107,7 @@ pfn_t vm_object_pfn(vm_object_t, uintptr_t);
 struct vm_object *vmm_mmio_alloc(struct vmspace *, vm_paddr_t gpa, size_t len,
     vm_paddr_t hpa);
 
-void vm_page_unwire(vm_page_t);
-
-#define	VM_PAGE_TO_PHYS(page)	(mmu_ptob((uintptr_t)((page)->vmp_pfn)))
+void *vm_page_ptr(vm_page_t);
+void vm_page_release(vm_page_t);
 
 #endif /* _VMM_VM_H */

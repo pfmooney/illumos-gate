@@ -78,6 +78,11 @@ struct vm_object {
 	vm_memattr_t	vmo_attr;
 };
 
+struct vm_page {
+	pfn_t			vmp_pfn;
+	struct vm_object	*vmp_obj_held;
+};
+
 
 /* Private glue interfaces */
 static void pmap_free(pmap_t);
@@ -464,7 +469,7 @@ vm_mapping_remove(struct vmspace *vms, vmspace_mapping_t *vmsm)
 }
 
 int
-vm_fault(struct vmspace *vms, vm_offset_t off, vm_prot_t type, int flag)
+vm_fault(struct vmspace *vms, vm_offset_t off, vm_prot_t type)
 {
 	pmap_t pmap = &vms->vms_pmap;
 	void *pmi = pmap->pm_impl;
@@ -779,20 +784,25 @@ vm_segmap_space(struct vmspace *vms, off_t off, struct as *as, caddr_t *addrp,
 	return (err);
 }
 
-void
-vm_page_unwire(vm_page_t vmp)
+void *
+vm_page_ptr(vm_page_t vmp)
 {
-	ASSERT(!MUTEX_HELD(&vmp->vmp_lock));
-	mutex_enter(&vmp->vmp_lock);
+	ASSERT3U(vmp->vmp_pfn, !=, PFN_INVALID);
 
+	const uintptr_t paddr = (vmp->vmp_pfn << PAGESHIFT);
+
+	return ((void *)((uintptr_t)kpm_vbase + paddr));
+}
+
+void
+vm_page_release(vm_page_t vmp)
+{
 	VERIFY(vmp->vmp_pfn != PFN_INVALID);
+	VERIFY(vmp->vmp_obj_held != NULL);
 
 	vm_object_deallocate(vmp->vmp_obj_held);
 	vmp->vmp_obj_held = NULL;
 	vmp->vmp_pfn = PFN_INVALID;
 
-	mutex_exit(&vmp->vmp_lock);
-
-	mutex_destroy(&vmp->vmp_lock);
 	kmem_free(vmp, sizeof (*vmp));
 }

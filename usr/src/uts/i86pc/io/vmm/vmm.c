@@ -1081,7 +1081,7 @@ vm_gpa_hold(struct vm *vm, int vcpuid, vm_paddr_t gpa, size_t len, int reqprot,
 
 	if (count == 1) {
 		*cookie = m;
-		return ((void *)(PHYS_TO_DMAP(VM_PAGE_TO_PHYS(m)) + pageoff));
+		return (vm_page_ptr(m));
 	} else {
 		*cookie = NULL;
 		return (NULL);
@@ -1093,7 +1093,7 @@ vm_gpa_release(void *cookie)
 {
 	vm_page_t m = cookie;
 
-	vm_page_unwire(m);
+	vm_page_release(m);
 }
 
 int
@@ -1474,7 +1474,7 @@ vm_handle_paging(struct vm *vm, int vcpuid)
 		}
 	}
 
-	rv = vm_fault(vm->vmspace, vme->u.paging.gpa, ftype, VM_FAULT_NORMAL);
+	rv = vm_fault(vm->vmspace, vme->u.paging.gpa, ftype);
 
 	VCPU_CTR3(vm, vcpuid, "vm_handle_paging rv = %d, gpa = %lx, "
 	    "ftype = %d", rv, vme->u.paging.gpa, ftype);

@@ -33,6 +33,7 @@
 /* Glue functions */
 
 vm_paddr_t vtophys(void *);
+void invalidate_cache_all(void);
 
 /*
  * Type definitions used in the hypervisor.
@@ -56,7 +57,6 @@ int vm_map_wire(struct vmspace *, vm_offset_t start, vm_offset_t end);
 
 long vmspace_resident_count(struct vmspace *vmspace);
 
-void	pmap_invalidate_cache(void);
 
 void vmspace_get_mapping(struct vmspace *, vm_offset_t, uint64_t *, int *);
 int vmspace_emulate_accessed_dirty(struct vmspace *, vm_offset_t, int);

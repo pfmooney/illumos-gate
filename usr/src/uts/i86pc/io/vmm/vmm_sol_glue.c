@@ -94,7 +94,7 @@ uint8_t const bin2bcd_data[] = {
 };
 
 void
-pmap_invalidate_cache(void)
+invalidate_cache_all(void)
 {
 	cpuset_t cpuset;
 

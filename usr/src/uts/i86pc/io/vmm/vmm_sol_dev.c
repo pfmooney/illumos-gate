@@ -1164,7 +1164,7 @@ vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
 		}
 #ifdef __FreeBSD__
 		/* XXXJOY: add function? */
-		pmap_get_mapping(vmspace_pmap(vm_get_vmspace(sc->vmm_vm)),
+		vmspace_get_mapping(vm_get_vmspace(sc->vmm_vm),
 		    gpapte.gpa, gpapte.pte, &gpapte.ptenum);
 #endif
 		error = 0;

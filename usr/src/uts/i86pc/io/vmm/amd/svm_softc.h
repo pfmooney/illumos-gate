@@ -50,7 +50,7 @@ struct svm_vcpu {
 	uint64_t	nextrip; /* next instruction to be executed by guest */
 	int		lastcpu; /* host cpu that the vcpu last ran on */
 	uint32_t	dirty;	 /* state cache bits that must be cleared */
-	long		eptgen;	 /* pmap->pm_eptgen when the vcpu last ran */
+	uint64_t	eptgen;	 /* pmap eptgen when the vcpu last ran */
 	hma_svm_asid_t	hma_asid;
 	boolean_t	loaded;
 } __aligned(PAGE_SIZE);

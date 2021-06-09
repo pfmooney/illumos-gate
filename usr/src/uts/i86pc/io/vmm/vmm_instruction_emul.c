@@ -361,6 +361,27 @@ static const struct vie_op one_byte_opcodes[256] = {
 
 #define	GB				(1024 * 1024 * 1024)
 
+
+/*
+ * Paging defines, normally pulled in from machine/pmap.h
+ */
+#define	PG_V	(1 << 0) /* Present */
+#define	PG_RW	(1 << 1) /* Read/Write */
+#define	PG_U	(1 << 2) /* User/Supervisor */
+#define	PG_A	(1 << 5) /* Accessed */
+#define	PG_M	(1 << 6) /* Dirty */
+#define	PG_PS	(1 << 7) /* Largepage */
+
+/*
+ * Paging except defines, normally pulled in from machine/pmap.h
+ */
+#define	PGEX_P		(1 << 0) /* Non-present/Protection */
+#define	PGEX_W		(1 << 1) /* Read/Write */
+#define	PGEX_U		(1 << 2) /* User/Supervisor */
+#define	PGEX_RSV	(1 << 3) /* (Non-)Reserved */
+#define	PGEX_I		(1 << 4) /* Instruction */
+
+
 static enum vm_reg_name gpr_map[16] = {
 	VM_REG_GUEST_RAX,
 	VM_REG_GUEST_RCX,

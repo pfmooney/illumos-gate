@@ -21,7 +21,6 @@
 #include <sys/list.h>
 #include <sys/types.h>
 #include <vm/hat_pte.h>
-#include <machine/pmap.h>
 
 /*
  * The VM_MAXUSER_ADDRESS determines the upper size limit of a vmspace.
@@ -31,6 +30,10 @@
  */
 #define	VM_MAXUSER_ADDRESS	0x00003ffffffffffful
 
+/* Glue functions */
+
+vm_paddr_t vtophys(void *);
+
 /*
  * Type definitions used in the hypervisor.
  */
@@ -38,7 +41,6 @@ typedef uchar_t vm_prot_t;
 
 /* New type declarations. */
 struct vmspace;
-struct pmap;
 struct vm_object;
 struct vm_page;
 
@@ -46,8 +48,6 @@ typedef struct vm_object *vm_object_t;
 typedef struct vm_page *vm_page_t;
 
 struct vmm_pt_ops;
-
-pmap_t vmspace_pmap(struct vmspace *);
 
 int vm_map_add(struct vmspace *, vm_object_t, vm_ooffset_t, vm_offset_t,
     vm_size_t, vm_prot_t);
@@ -57,18 +57,10 @@ int vm_map_wire(struct vmspace *, vm_offset_t start, vm_offset_t end);
 long vmspace_resident_count(struct vmspace *vmspace);
 
 void	pmap_invalidate_cache(void);
-void	pmap_get_mapping(pmap_t pmap, vm_offset_t va, uint64_t *ptr, int *num);
-int	pmap_emulate_accessed_dirty(pmap_t pmap, vm_offset_t va, int ftype);
-long	pmap_wired_count(pmap_t pmap);
 
-struct pmap {
-	cpuset_t	pm_active;
-	long		pm_eptgen;
-
-	/* Implementation private */
-	struct vmm_pt_ops *pm_ops;
-	void		*pm_impl;
-};
+void vmspace_get_mapping(struct vmspace *, vm_offset_t, uint64_t *, int *);
+int vmspace_emulate_accessed_dirty(struct vmspace *, vm_offset_t, int);
+long vmspace_wired_count(struct vmspace *);
 
 /* illumos-specific functions for setup and operation */
 int vm_segmap_obj(vm_object_t, off_t, size_t, struct as *, caddr_t *, uint_t,
@@ -91,11 +83,10 @@ struct vmm_pt_ops {
 extern struct vmm_pt_ops ept_ops;
 extern struct vmm_pt_ops rvi_ops;
 
-typedef int (*pmap_pinit_t)(struct pmap *pmap);
-
 struct vmspace *vmspace_alloc(size_t, struct vmm_pt_ops *);
 void vmspace_free(struct vmspace *);
 uint64_t vmspace_pmtp(struct vmspace *);
+uint64_t vmspace_pmtgen(struct vmspace *);
 
 int vm_fault(struct vmspace *, vm_offset_t, vm_prot_t);
 int vm_fault_quick_hold_pages(struct vmspace *, vm_offset_t addr, vm_size_t len,

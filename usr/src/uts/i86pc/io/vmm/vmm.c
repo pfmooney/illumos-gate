@@ -229,9 +229,8 @@ static struct vmm_pt_ops *pt_ops = NULL;
 #define	VMM_CLEANUP()			((*ops->cleanup)())
 #define	VMM_RESUME()			((*ops->resume)())
 
-#define	VMINIT(vm, pmap)		((*ops->vminit)(vm, pmap))
-#define	VMRUN(vmi, vcpu, rip, pmap) \
-	((*ops->vmrun)(vmi, vcpu, rip, pmap))
+#define	VMINIT(vm)		((*ops->vminit)(vm))
+#define	VMRUN(vmi, vcpu, rip)	((*ops->vmrun)(vmi, vcpu, rip))
 #define	VMCLEANUP(vmi)			((*ops->vmcleanup)(vmi))
 
 #define	VMGETREG(vmi, vcpu, num, rv)	((*ops->vmgetreg)(vmi, vcpu, num, rv))
@@ -447,7 +446,7 @@ vm_init(struct vm *vm, bool create)
 {
 	int i;
 
-	vm->cookie = VMINIT(vm, vmspace_pmap(vm->vmspace));
+	vm->cookie = VMINIT(vm);
 	vm->iommu = NULL;
 	vm->vioapic = vioapic_init(vm);
 	vm->vhpet = vhpet_init(vm);
@@ -1465,7 +1464,7 @@ vm_handle_paging(struct vm *vm, int vcpuid)
 	    ("vm_handle_paging: invalid fault_type %d", ftype));
 
 	if (ftype == PROT_READ || ftype == PROT_WRITE) {
-		rv = pmap_emulate_accessed_dirty(vmspace_pmap(vm->vmspace),
+		rv = vmspace_emulate_accessed_dirty(vm->vmspace,
 		    vme->u.paging.gpa, ftype);
 		if (rv == 0) {
 			VCPU_CTR2(vm, vcpuid, "%s bit emulation for gpa %lx",
@@ -2180,7 +2179,6 @@ vm_run(struct vm *vm, int vcpuid, const struct vm_entry *entry)
 	struct vcpu *vcpu;
 	struct vm_exit *vme;
 	bool intr_disabled;
-	pmap_t pmap;
 	vm_thread_ctx_t vtc;
 	int affinity_type = CPU_CURRENT;
 
@@ -2191,7 +2189,6 @@ vm_run(struct vm *vm, int vcpuid, const struct vm_entry *entry)
 	if (CPU_ISSET(vcpuid, &vm->suspended_cpus))
 		return (EINVAL);
 
-	pmap = vmspace_pmap(vm->vmspace);
 	vcpu = &vm->vcpu[vcpuid];
 	vme = &vcpu->exitinfo;
 
@@ -2227,9 +2224,6 @@ restart:
 	affinity_type = CPU_CURRENT;
 	critical_enter();
 
-	KASSERT(!CPU_ISSET(curcpu, &pmap->pm_active),
-	    ("vm_run: absurd pm_active"));
-
 	/* Force a trip through update_sregs to reload %fs/%gs and friends */
 	PCB_SET_UPDATE_SEGS(&ttolwp(curthread)->lwp_pcb);
 
@@ -2240,7 +2234,7 @@ restart:
 	vtc.vtc_status |= VTCS_FPU_CTX_CRITICAL;
 
 	vcpu_require_state(vm, vcpuid, VCPU_RUNNING);
-	error = VMRUN(vm->cookie, vcpuid, vcpu->nextrip, pmap);
+	error = VMRUN(vm->cookie, vcpuid, vcpu->nextrip);
 	vcpu_require_state(vm, vcpuid, VCPU_FROZEN);
 
 	/*
@@ -3541,7 +3535,7 @@ vm_get_wiredcnt(struct vm *vm, int vcpu, struct vmm_stat_type *stat)
 
 	if (vcpu == 0) {
 		vmm_stat_set(vm, vcpu, VMM_MEM_WIRED,
-		    PAGE_SIZE * pmap_wired_count(vmspace_pmap(vm->vmspace)));
+		    PAGE_SIZE * vmspace_wired_count(vm->vmspace));
 	}
 }
 

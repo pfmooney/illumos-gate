@@ -63,14 +63,12 @@ struct vlapic;
 struct vmspace;
 struct vm_object;
 struct vm_guest_paging;
-struct pmap;
 
 typedef int	(*vmm_init_func_t)();
 typedef int	(*vmm_cleanup_func_t)(void);
 typedef void	(*vmm_resume_func_t)(void);
-typedef void *	(*vmi_init_func_t)(struct vm *vm, struct pmap *pmap);
-typedef int	(*vmi_run_func_t)(void *vmi, int vcpu, uint64_t rip,
-    struct pmap *pmap);
+typedef void *	(*vmi_init_func_t)(struct vm *vm);
+typedef int	(*vmi_run_func_t)(void *vmi, int vcpu, uint64_t rip);
 typedef void	(*vmi_cleanup_func_t)(void *vmi);
 typedef int	(*vmi_get_register_t)(void *vmi, int vcpu, int num,
     uint64_t *retval);

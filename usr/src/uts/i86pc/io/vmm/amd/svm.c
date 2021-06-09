@@ -421,7 +421,7 @@ vmcb_init(struct svm_softc *sc, int vcpu, uint64_t iopm_base_pa,
  * Initialize a virtual machine.
  */
 static void *
-svm_vminit(struct vm *vm, pmap_t pmap)
+svm_vminit(struct vm *vm)
 {
 	struct svm_softc *svm_sc;
 	struct svm_vcpu *vcpu;
@@ -1765,14 +1765,15 @@ svm_inject_recheck(struct svm_softc *sc, int vcpu,
 
 
 static void
-check_asid(struct svm_softc *sc, int vcpuid, pmap_t pmap, uint_t thiscpu)
+check_asid(struct svm_softc *sc, int vcpuid, uint_t thiscpu)
 {
 	struct svm_vcpu *vcpustate = svm_get_vcpu(sc, vcpuid);
 	struct vmcb_ctrl *ctrl = svm_get_vmcb_ctrl(sc, vcpuid);
-	long eptgen;
+	struct vmspace *vms = vm_get_vmspace(sc->vm);
+	uint64_t eptgen;
 	uint8_t flush;
 
-	eptgen = pmap->pm_eptgen;
+	eptgen = vmspace_pmtgen(vms);
 	flush = hma_svm_asid_update(&vcpustate->hma_asid, flush_by_asid(),
 	    vcpustate->eptgen != eptgen);
 
@@ -1888,7 +1889,7 @@ svm_apply_tsc_adjust(struct svm_softc *svm_sc, int vcpuid)
  * Start vcpu with specified RIP.
  */
 static int
-svm_vmrun(void *arg, int vcpu, uint64_t rip, pmap_t pmap)
+svm_vmrun(void *arg, int vcpu, uint64_t rip)
 {
 	struct svm_regctx *gctx;
 	struct svm_softc *svm_sc;
@@ -2010,14 +2011,11 @@ svm_vmrun(void *arg, int vcpu, uint64_t rip, pmap_t pmap)
 		 */
 		ldt_sel = sldt();
 
-		/* Activate the nested pmap on 'curcpu' */
-		CPU_SET_ATOMIC_ACQ(curcpu, &pmap->pm_active);
-
 		/*
 		 * Check the pmap generation and the ASID generation to
 		 * ensure that the vcpu does not use stale TLB mappings.
 		 */
-		check_asid(svm_sc, vcpu, pmap, curcpu);
+		check_asid(svm_sc, vcpu, curcpu);
 
 		ctrl->vmcb_clean = vmcb_clean & ~vcpustate->dirty;
 		vcpustate->dirty = 0;
@@ -2030,8 +2028,6 @@ svm_vmrun(void *arg, int vcpu, uint64_t rip, pmap_t pmap)
 		svm_launch(vmcb_pa, gctx, get_pcpu());
 		svm_dr_leave_guest(gctx);
 		vcpu_ustate_change(vm, vcpu, VU_EMU_KERN);
-
-		CPU_CLR_ATOMIC(curcpu, &pmap->pm_active);
 
 		/* Restore host LDTR. */
 		lldt(ldt_sel);

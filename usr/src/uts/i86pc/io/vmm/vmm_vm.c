@@ -51,6 +51,14 @@ typedef struct vmspace_mapping vmspace_mapping_t;
 	    (vmsm)->vmsm_offset +			\
 	    ((addr) - (uintptr_t)(vmsm)->vmsm_addr))
 
+struct pmap {
+	cpuset_t	pm_active;
+	long		pm_eptgen;
+
+	/* Implementation private */
+	struct vmm_pt_ops *pm_ops;
+	void		*pm_impl;
+};
 
 struct vmspace {
 	/* Implementation private */
@@ -85,8 +93,8 @@ struct vm_page {
 
 
 /* Private glue interfaces */
-static void pmap_free(pmap_t);
-static void pmap_init(pmap_t, struct vmm_pt_ops *);
+static void pmap_free(struct pmap *);
+static void pmap_init(struct pmap *, struct vmm_pt_ops *);
 static vmspace_mapping_t *vm_mapping_find(struct vmspace *, uintptr_t, size_t,
     boolean_t);
 static void vm_mapping_remove(struct vmspace *, vmspace_mapping_t *);
@@ -122,12 +130,6 @@ vmspace_free(struct vmspace *vms)
 
 	pmap_free(&vms->vms_pmap);
 	kmem_free(vms, sizeof (*vms));
-}
-
-pmap_t
-vmspace_pmap(struct vmspace *vms)
-{
-	return (&vms->vms_pmap);
 }
 
 long
@@ -166,7 +168,7 @@ vmspace_find_kva(struct vmspace *vms, uintptr_t addr, size_t size)
 static int
 vmspace_pmap_iswired(struct vmspace *vms, uintptr_t addr, uint_t *prot)
 {
-	pmap_t pmap = &vms->vms_pmap;
+	struct pmap *pmap = &vms->vms_pmap;
 	int rv;
 
 	ASSERT(MUTEX_HELD(&vms->vms_lock));
@@ -176,7 +178,7 @@ vmspace_pmap_iswired(struct vmspace *vms, uintptr_t addr, uint_t *prot)
 }
 
 static void
-pmap_free(pmap_t pmap)
+pmap_free(struct pmap *pmap)
 {
 	void *pmi = pmap->pm_impl;
 	struct vmm_pt_ops *ops = pmap->pm_ops;
@@ -188,7 +190,7 @@ pmap_free(pmap_t pmap)
 }
 
 static void
-pmap_init(pmap_t pmap, struct vmm_pt_ops *ops)
+pmap_init(struct pmap *pmap, struct vmm_pt_ops *ops)
 {
 	void *pmi;
 
@@ -208,19 +210,27 @@ vmspace_pmtp(struct vmspace *vms)
 	return (ops->vpo_pmtp(pmi));
 }
 
-long
-pmap_wired_count(pmap_t pmap)
+uint64_t
+vmspace_pmtgen(struct vmspace *vms)
 {
+	return (vms->vms_pmap.pm_eptgen);
+}
+
+long
+vmspace_wired_count(struct vmspace *vms)
+{
+	struct vmm_pt_ops *ops = vms->vms_pmap.pm_ops;
+	void *pmi = vms->vms_pmap.pm_impl;
 	long val;
 
-	val = pmap->pm_ops->vpo_wired_cnt(pmap->pm_impl);
+	val = ops->vpo_wired_cnt(pmi);
 	VERIFY3S(val, >=, 0);
 
 	return (val);
 }
 
 int
-pmap_emulate_accessed_dirty(pmap_t pmap, vm_offset_t va, int ftype)
+vmspace_emulate_accessed_dirty(struct vmspace *vms, vm_offset_t va, int ftype)
 {
 	/* Allow the fallback to vm_fault to handle this */
 	return (-1);
@@ -453,7 +463,7 @@ vm_mapping_remove(struct vmspace *vms, vmspace_mapping_t *vmsm)
 int
 vm_fault(struct vmspace *vms, vm_offset_t off, vm_prot_t type)
 {
-	pmap_t pmap = &vms->vms_pmap;
+	struct pmap *pmap = &vms->vms_pmap;
 	void *pmi = pmap->pm_impl;
 	const uintptr_t addr = off;
 	vmspace_mapping_t *vmsm;
@@ -606,7 +616,7 @@ out:
 int
 vm_map_remove(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 {
-	pmap_t pmap = &vms->vms_pmap;
+	struct pmap *pmap = &vms->vms_pmap;
 	void *pmi = pmap->pm_impl;
 	const uintptr_t addr = start;
 	const size_t size = (size_t)(end - start);
@@ -636,7 +646,7 @@ vm_map_remove(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 int
 vm_map_wire(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 {
-	pmap_t pmap = &vms->vms_pmap;
+	struct pmap *pmap = &vms->vms_pmap;
 	void *pmi = pmap->pm_impl;
 	const uintptr_t addr = start;
 	const size_t size = end - start;

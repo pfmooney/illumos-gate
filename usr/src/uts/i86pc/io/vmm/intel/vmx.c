@@ -633,7 +633,7 @@ vmx_trigger_hostintr(int vector)
 }
 
 static void *
-vmx_vminit(struct vm *vm, pmap_t pmap)
+vmx_vminit(struct vm *vm)
 {
 	uint16_t vpid[VM_MAXCPU];
 	int i, error, datasel;
@@ -773,8 +773,8 @@ vmx_vminit(struct vm *vm, pmap_t pmap)
 		vmcs_write(VMCS_VPID, vpid[i]);
 
 		if (guest_l1d_flush && !guest_l1d_flush_sw) {
-			vmcs_write(VMCS_ENTRY_MSR_LOAD, pmap_kextract(
-			    (vm_offset_t)&msr_load_list[0]));
+			vmcs_write(VMCS_ENTRY_MSR_LOAD,
+			    vtophys(&msr_load_list[0]));
 			vmcs_write(VMCS_ENTRY_MSR_LOAD_COUNT,
 			    nitems(msr_load_list));
 			vmcs_write(VMCS_EXIT_MSR_STORE, 0);
@@ -828,9 +828,6 @@ vmx_vminit(struct vm *vm, pmap_t pmap)
 		vmx->state[i].nextrip = ~0;
 		vmx->state[i].lastcpu = NOCPU;
 		vmx->state[i].vpid = vpid[i];
-
-
-		vmx->ctx[i].pmap = pmap;
 	}
 
 	return (vmx);
@@ -897,14 +894,16 @@ invvpid(uint64_t type, struct invvpid_desc desc)
  * Invalidate guest mappings identified by its vpid from the TLB.
  */
 static __inline void
-vmx_invvpid(struct vmx *vmx, int vcpu, pmap_t pmap, int running)
+vmx_invvpid(struct vmx *vmx, int vcpu, int running)
 {
 	struct vmxstate *vmxstate;
 	struct invvpid_desc invvpid_desc;
+	struct vmspace *vms;
 
 	vmxstate = &vmx->state[vcpu];
 	if (vmxstate->vpid == 0)
 		return;
+	vms = vm_get_vmspace(vmx->vm);
 
 	if (!running) {
 		/*
@@ -932,7 +931,7 @@ vmx_invvpid(struct vmx *vmx, int vcpu, pmap_t pmap, int running)
 	 * Note also that this will invalidate mappings tagged with 'vpid'
 	 * for "all" EP4TAs.
 	 */
-	if (pmap->pm_eptgen == vmx->eptgen[curcpu]) {
+	if (vmspace_pmtgen(vms) == vmx->eptgen[curcpu]) {
 		invvpid_desc._res1 = 0;
 		invvpid_desc._res2 = 0;
 		invvpid_desc.vpid = vmxstate->vpid;
@@ -950,8 +949,29 @@ vmx_invvpid(struct vmx *vmx, int vcpu, pmap_t pmap, int running)
 	}
 }
 
+struct invept_desc {
+	uint64_t eptp;
+	uint64_t _resv;
+};
+
+static __inline void
+invept(uint64_t type, uint64_t eptp)
+{
+	int error;
+	struct invept_desc desc = { eptp, 0 };
+
+	__asm __volatile("invept %[desc], %[type];"
+	    VMX_SET_ERROR_CODE_ASM
+	    : [error] "=r" (error)
+	    : [desc] "m" (desc), [type] "r" (type)
+	    : "memory");
+
+	if (error)
+		panic("invvpid error %d", error);
+}
+
 static void
-vmx_set_pcpu_defaults(struct vmx *vmx, int vcpu, pmap_t pmap)
+vmx_set_pcpu_defaults(struct vmx *vmx, int vcpu)
 {
 	struct vmxstate *vmxstate;
 
@@ -982,7 +1002,7 @@ vmx_set_pcpu_defaults(struct vmx *vmx, int vcpu, pmap_t pmap)
 	vmcs_write(VMCS_HOST_TR_BASE, vmm_get_host_trbase());
 	vmcs_write(VMCS_HOST_GDTR_BASE, vmm_get_host_gdtrbase());
 	vmcs_write(VMCS_HOST_GS_BASE, vmm_get_host_gsbase());
-	vmx_invvpid(vmx, vcpu, pmap, 1);
+	vmx_invvpid(vmx, vcpu, 1);
 }
 
 /*
@@ -2607,7 +2627,7 @@ vmx_dr_leave_guest(struct vmxctx *vmxctx)
 }
 
 static int
-vmx_run(void *arg, int vcpu, uint64_t rip, pmap_t pmap)
+vmx_run(void *arg, int vcpu, uint64_t rip)
 {
 	int rc, handled, launched;
 	struct vmx *vmx;
@@ -2630,9 +2650,6 @@ vmx_run(void *arg, int vcpu, uint64_t rip, pmap_t pmap)
 	    !vmx_cap_en(vmx, VMX_CAP_APICV) &&
 	    (vmx->cap[vcpu].proc_ctls & PROCBASED_USE_TPR_SHADOW) != 0;
 
-	KASSERT(vmxctx->pmap == pmap,
-	    ("pmap %p different than ctx pmap %p", pmap, vmxctx->pmap));
-
 	vmx_msr_guest_enter(vmx, vcpu);
 
 	vmcs_load(vmcs_pa);
@@ -2651,7 +2668,7 @@ vmx_run(void *arg, int vcpu, uint64_t rip, pmap_t pmap)
 	vmcs_write(VMCS_HOST_CR3, rcr3());
 
 	vmcs_write(VMCS_GUEST_RIP, rip);
-	vmx_set_pcpu_defaults(vmx, vcpu, pmap);
+	vmx_set_pcpu_defaults(vmx, vcpu);
 	do {
 		enum event_inject_state inject_state;
 
@@ -2767,6 +2784,19 @@ vmx_run(void *arg, int vcpu, uint64_t rip, pmap_t pmap)
 		vmx_run_trace(vmx, vcpu);
 		vcpu_ustate_change(vm, vcpu, VU_RUN);
 		vmx_dr_enter_guest(vmxctx);
+
+		/* check EPT table generation prior to entry */
+		struct vmspace *vms = vm_get_vmspace(vm);
+		if (vmspace_pmtgen(vms) != vmx->eptgen[vcpu]) {
+			/*
+			 * VMspace generate does not match what was previously
+			 * used for this CPU so all mappings associated with
+			 * this EPTP must be invalidated.
+			 */
+			invept(1, vmspace_pmtp(vms));
+			vmx->eptgen[vcpu] = vmspace_pmtgen(vms);
+		}
+
 		rc = vmx_enter_guest(vmxctx, vmx, launched);
 		vmx_dr_leave_guest(vmxctx);
 		vcpu_ustate_change(vm, vcpu, VU_EMU_KERN);
@@ -3024,7 +3054,7 @@ vmx_setreg(void *arg, int vcpu, int reg, uint64_t val)
 			 * XXX the processor retains global mappings when %cr3
 			 * is updated but vmx_invvpid() does not.
 			 */
-			vmx_invvpid(vmx, vcpu, vmx->ctx[vcpu].pmap, running);
+			vmx_invvpid(vmx, vcpu, running);
 			break;
 		case VMCS_INVALID_ENCODING:
 			error = EINVAL;

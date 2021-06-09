@@ -60,7 +60,6 @@
 #include <machine/cpufunc.h>
 #include <machine/fpu.h>
 #include <machine/md_var.h>
-#include <machine/pmap.h>
 #include <machine/specialreg.h>
 #include <machine/vmm.h>
 #include <machine/vmparam.h>
@@ -108,7 +107,7 @@ pmap_invalidate_cache(void)
 }
 
 vm_paddr_t
-pmap_kextract(vm_offset_t va)
+vtophys(void *va)
 {
 	pfn_t	pfn;
 

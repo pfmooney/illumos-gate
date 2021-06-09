@@ -44,7 +44,6 @@ __FBSDID("$FreeBSD$");
 
 #include <machine/resource.h>
 #include <machine/vmm.h>
-#include <machine/pmap.h>
 #include <machine/vmparam.h>
 #include <machine/pci_cfgreg.h>
 

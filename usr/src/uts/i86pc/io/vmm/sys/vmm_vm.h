@@ -50,10 +50,6 @@ typedef struct vm_page *vm_page_t;
 
 struct vmm_pt_ops;
 
-int vm_map_add(struct vmspace *, vm_object_t, vm_ooffset_t, vm_offset_t,
-    vm_size_t, vm_prot_t);
-int vm_map_remove(struct vmspace *, vm_offset_t, vm_offset_t);
-int vm_map_wire(struct vmspace *, vm_offset_t start, vm_offset_t end);
 
 long vmspace_resident_count(struct vmspace *vmspace);
 
@@ -84,7 +80,13 @@ extern struct vmm_pt_ops ept_ops;
 extern struct vmm_pt_ops rvi_ops;
 
 struct vmspace *vmspace_alloc(size_t, struct vmm_pt_ops *);
-void vmspace_free(struct vmspace *);
+void vmspace_destroy(struct vmspace *);
+int vmspace_map(struct vmspace *, vm_object_t, vm_ooffset_t, vm_offset_t,
+    vm_size_t, vm_prot_t);
+int vmspace_unmap(struct vmspace *, vm_offset_t, vm_offset_t);
+int vmspace_populate(struct vmspace *, vm_offset_t start, vm_offset_t end);
+
+
 uint64_t vmspace_pmtp(struct vmspace *);
 uint64_t vmspace_pmtgen(struct vmspace *);
 

@@ -124,7 +124,7 @@ vmspace_alloc(size_t end, struct vmm_pt_ops *ops)
 }
 
 void
-vmspace_free(struct vmspace *vms)
+vmspace_destroy(struct vmspace *vms)
 {
 	VERIFY(list_is_empty(&vms->vms_maplist));
 
@@ -321,7 +321,7 @@ vmm_mmio_alloc(struct vmspace *vmspace, vm_paddr_t gpa, size_t len,
 
 	obj = vm_object_mmio_allocate(len, hpa);
 	if (obj != NULL) {
-		error = vm_map_add(vmspace, obj, 0, gpa, len,
+		error = vmspace_map(vmspace, obj, 0, gpa, len,
 		    PROT_READ | PROT_WRITE);
 		if (error != 0) {
 			vm_object_deallocate(obj);
@@ -569,7 +569,7 @@ vm_fault_quick_hold_pages(struct vmspace *vms, vm_offset_t addr, vm_size_t len,
  * Find a suitable location for a mapping (and install it).
  */
 int
-vm_map_add(struct vmspace *vms, vm_object_t vmo, vm_ooffset_t off,
+vmspace_map(struct vmspace *vms, vm_object_t vmo, vm_ooffset_t off,
     vm_offset_t addr, vm_size_t len, vm_prot_t prot)
 {
 	const size_t size = (size_t)len;
@@ -614,7 +614,7 @@ out:
 }
 
 int
-vm_map_remove(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
+vmspace_unmap(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 {
 	struct pmap *pmap = &vms->vms_pmap;
 	void *pmi = pmap->pm_impl;
@@ -644,7 +644,7 @@ vm_map_remove(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 }
 
 int
-vm_map_wire(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
+vmspace_populate(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 {
 	struct pmap *pmap = &vms->vms_pmap;
 	void *pmi = pmap->pm_impl;

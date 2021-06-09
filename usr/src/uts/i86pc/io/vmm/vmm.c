@@ -614,7 +614,7 @@ vm_cleanup(struct vm *vm, bool destroy)
 		for (i = 0; i < VM_MAX_MEMSEGS; i++)
 			vm_free_memseg(vm, i);
 
-		vmspace_free(vm->vmspace);
+		vmspace_destroy(vm->vmspace);
 		vm->vmspace = NULL;
 	}
 }
@@ -665,7 +665,7 @@ vm_map_mmio(struct vm *vm, vm_paddr_t gpa, size_t len, vm_paddr_t hpa)
 int
 vm_unmap_mmio(struct vm *vm, vm_paddr_t gpa, size_t len)
 {
-	return (vm_map_remove(vm->vmspace, gpa, gpa + len));
+	return (vmspace_unmap(vm->vmspace, gpa, gpa + len));
 }
 
 /*
@@ -804,16 +804,16 @@ vm_mmap_memseg(struct vm *vm, vm_paddr_t gpa, int segid, vm_ooffset_t first,
 	if (map == NULL)
 		return (ENOSPC);
 
-	error = vm_map_add(vm->vmspace, seg->object, first, gpa, len, prot);
+	error = vmspace_map(vm->vmspace, seg->object, first, gpa, len, prot);
 	if (error != 0)
 		return (EFAULT);
 
 	vm_object_reference(seg->object);
 
 	if ((flags & VM_MEMMAP_F_WIRED) != 0) {
-		error = vm_map_wire(vm->vmspace, gpa, gpa + len);
+		error = vmspace_populate(vm->vmspace, gpa, gpa + len);
 		if (error != 0) {
-			vm_map_remove(vm->vmspace, gpa, gpa + len);
+			vmspace_unmap(vm->vmspace, gpa, gpa + len);
 			return (EFAULT);
 		}
 	}
@@ -887,9 +887,9 @@ vm_free_memmap(struct vm *vm, int ident)
 
 	mm = &vm->mem_maps[ident];
 	if (mm->len) {
-		error = vm_map_remove(vm->vmspace, mm->gpa,
+		error = vmspace_unmap(vm->vmspace, mm->gpa,
 		    mm->gpa + mm->len);
-		KASSERT(error == 0, ("%s: vm_map_remove error %d",
+		KASSERT(error == 0, ("%s: vmspace_unmap error %d",
 		    __func__, error));
 		bzero(mm, sizeof (struct mem_map));
 	}

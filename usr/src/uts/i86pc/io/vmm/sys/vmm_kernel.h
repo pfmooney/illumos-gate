@@ -80,8 +80,6 @@ typedef int	(*vmi_set_desc_t)(void *vmi, int vcpu, int num,
     const struct seg_desc *desc);
 typedef int	(*vmi_get_cap_t)(void *vmi, int vcpu, int num, int *retval);
 typedef int	(*vmi_set_cap_t)(void *vmi, int vcpu, int num, int val);
-typedef struct vmspace *(*vmi_vmspace_alloc)(vm_offset_t min, vm_offset_t max);
-typedef void	(*vmi_vmspace_free)(struct vmspace *vmspace);
 typedef struct vlapic *(*vmi_vlapic_init)(void *vmi, int vcpu);
 typedef void	(*vmi_vlapic_cleanup)(void *vmi, struct vlapic *vlapic);
 typedef void	(*vmi_savectx)(void *vmi, int vcpu);

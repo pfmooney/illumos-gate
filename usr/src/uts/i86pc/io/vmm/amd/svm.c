@@ -443,7 +443,7 @@ svm_vminit(struct vm *vm)
 		panic("contigmalloc of SVM IO bitmap failed");
 
 	svm_sc->vm = vm;
-	svm_sc->nptp = vmspace_pmtp(vm_get_vmspace(vm));
+	svm_sc->nptp = vmspace_table_root(vm_get_vmspace(vm));
 
 	/*
 	 * Intercept read and write accesses to all MSRs.
@@ -1765,24 +1765,21 @@ svm_inject_recheck(struct svm_softc *sc, int vcpu,
 
 
 static void
-check_asid(struct svm_softc *sc, int vcpuid, uint_t thiscpu)
+check_asid(struct svm_softc *sc, int vcpuid, uint_t thiscpu, uint64_t nptgen)
 {
 	struct svm_vcpu *vcpustate = svm_get_vcpu(sc, vcpuid);
 	struct vmcb_ctrl *ctrl = svm_get_vmcb_ctrl(sc, vcpuid);
-	struct vmspace *vms = vm_get_vmspace(sc->vm);
-	uint64_t eptgen;
 	uint8_t flush;
 
-	eptgen = vmspace_pmtgen(vms);
 	flush = hma_svm_asid_update(&vcpustate->hma_asid, flush_by_asid(),
-	    vcpustate->eptgen != eptgen);
+	    vcpustate->nptgen != nptgen);
 
 	if (flush != VMCB_TLB_FLUSH_NOTHING) {
 		ctrl->asid = vcpustate->hma_asid.hsa_asid;
 		svm_set_dirty(sc, vcpuid, VMCB_CACHE_ASID);
 	}
 	ctrl->tlb_ctrl = flush;
-	vcpustate->eptgen = eptgen;
+	vcpustate->nptgen = nptgen;
 }
 
 static void
@@ -1800,8 +1797,8 @@ flush_asid(struct svm_softc *sc, int vcpuid)
 	ctrl->tlb_ctrl = flush;
 	svm_set_dirty(sc, vcpuid, VMCB_CACHE_ASID);
 	/*
-	 * A potential future optimization: We could choose to update the eptgen
-	 * associated with the vCPU, since any pending eptgen change requiring a
+	 * A potential future optimization: We could choose to update the nptgen
+	 * associated with the vCPU, since any pending nptgen change requiring a
 	 * flush will be satisfied by the one which has just now been queued.
 	 */
 }
@@ -1898,6 +1895,7 @@ svm_vmrun(void *arg, int vcpu, uint64_t rip)
 	struct vmcb_ctrl *ctrl;
 	struct vm_exit *vmexit;
 	struct vlapic *vlapic;
+	vm_client_t *vmc;
 	struct vm *vm;
 	uint64_t vmcb_pa;
 	int handled;
@@ -1911,6 +1909,7 @@ svm_vmrun(void *arg, int vcpu, uint64_t rip)
 	ctrl = svm_get_vmcb_ctrl(svm_sc, vcpu);
 	vmexit = vm_exitinfo(vm, vcpu);
 	vlapic = vm_lapic(vm, vcpu);
+	vmc = vm_get_vmclient(vm, vcpu);
 
 	gctx = svm_get_guest_regctx(svm_sc, vcpu);
 	vmcb_pa = svm_sc->vcpu[vcpu].vmcb_pa;
@@ -1952,6 +1951,7 @@ svm_vmrun(void *arg, int vcpu, uint64_t rip)
 
 	do {
 		enum event_inject_state inject_state;
+		uint64_t nptgen;
 
 		/*
 		 * Initial event injection is complex and may involve mutex
@@ -2015,7 +2015,8 @@ svm_vmrun(void *arg, int vcpu, uint64_t rip)
 		 * Check the pmap generation and the ASID generation to
 		 * ensure that the vcpu does not use stale TLB mappings.
 		 */
-		check_asid(svm_sc, vcpu, curcpu);
+		nptgen = vmc_table_enter(vmc);
+		check_asid(svm_sc, vcpu, curcpu, nptgen);
 
 		ctrl->vmcb_clean = vmcb_clean & ~vcpustate->dirty;
 		vcpustate->dirty = 0;
@@ -2034,6 +2035,8 @@ svm_vmrun(void *arg, int vcpu, uint64_t rip)
 
 		/* #VMEXIT disables interrupts so re-enable them here. */
 		enable_gintr();
+
+		vmc_table_exit(vmc);
 
 		/* Update 'nextrip' */
 		vcpustate->nextrip = state->rip;

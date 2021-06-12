@@ -21,7 +21,7 @@
 
 typedef struct segvmm_crargs {
 	uchar_t		prot;		/* protection */
-	vm_object_t	obj;
+	vm_object_t	*obj;
 	uintptr_t	offset;
 } segvmm_crargs_t;
 

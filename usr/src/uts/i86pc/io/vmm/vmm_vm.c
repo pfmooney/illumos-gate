@@ -35,11 +35,12 @@
 
 #include <sys/vmm_vm.h>
 #include <sys/seg_vmm.h>
+#include <sys/vmm_kernel.h>
 #include <sys/vmm_reservoir.h>
 
 struct vmspace_mapping {
 	list_node_t	vmsm_node;
-	vm_object_t	vmsm_object;
+	vm_object_t	*vmsm_object;
 	uintptr_t	vmsm_addr;
 	size_t		vmsm_len;
 	off_t		vmsm_offset;
@@ -51,23 +52,39 @@ typedef struct vmspace_mapping vmspace_mapping_t;
 	    (vmsm)->vmsm_offset +			\
 	    ((addr) - (uintptr_t)(vmsm)->vmsm_addr))
 
-struct pmap {
-	cpuset_t	pm_active;
-	long		pm_eptgen;
-
-	/* Implementation private */
-	struct vmm_pt_ops *pm_ops;
-	void		*pm_impl;
+enum vm_client_state {
+	VCS_IDLE	= 0,
+	VCS_ACTIVE	= (1 << 0),
+	VCS_HOLD	= (1 << 1),
+	VCS_ON_CPU	= (1 << 2),
 };
 
+
 struct vmspace {
-	/* Implementation private */
 	kmutex_t	vms_lock;
 	boolean_t	vms_map_changing;
-	struct pmap	vms_pmap;
 	uintptr_t	vms_size;	/* fixed after creation */
 
+	/* (nested) page table state */
+	struct vmm_pt_ops *vms_pt_ops;
+	void		*vms_pt_data;
+	long		vms_pt_gen;
+
 	list_t		vms_maplist;
+	list_t		vms_clients;
+};
+
+struct vm_client {
+	vmspace_t	*vmc_space;
+	list_node_t	vmc_node;
+
+	kmutex_t	vmc_lock;
+	kcondvar_t	vmc_cv;
+	enum vm_client_state vmc_state;
+	int		vmc_cpu_active;
+	uint64_t	vmc_cpu_gen;
+
+	list_t		vmc_held_pages;
 };
 
 enum vm_object_type {
@@ -79,7 +96,7 @@ enum vm_object_type {
 struct vm_object {
 	uint_t		vmo_refcnt;	/* manipulated with atomic ops */
 
-	/* This group of fields are fixed at creation time */
+	/* Fields below are fixed at creation time */
 	enum vm_object_type vmo_type;
 	size_t		vmo_size;
 	void		*vmo_data;
@@ -87,17 +104,19 @@ struct vm_object {
 };
 
 struct vm_page {
-	pfn_t			vmp_pfn;
-	struct vm_object	*vmp_obj_held;
+	vm_client_t	*vmp_client;
+	list_node_t	vmp_node;
+	vm_page_t	*vmp_chain;
+	uintptr_t	vmp_gpa;
+	pfn_t		vmp_pfn;
+	int		vmp_prot;
 };
 
 
-/* Private glue interfaces */
-static void pmap_free(struct pmap *);
-static void pmap_init(struct pmap *, struct vmm_pt_ops *);
 static vmspace_mapping_t *vm_mapping_find(struct vmspace *, uintptr_t, size_t,
     boolean_t);
 static void vm_mapping_remove(struct vmspace *, vmspace_mapping_t *);
+
 
 struct vmspace *
 vmspace_alloc(size_t end, struct vmm_pt_ops *ops)
@@ -117,8 +136,12 @@ vmspace_alloc(size_t end, struct vmm_pt_ops *ops)
 	vms->vms_size = size;
 	list_create(&vms->vms_maplist, sizeof (vmspace_mapping_t),
 	    offsetof(vmspace_mapping_t, vmsm_node));
+	list_create(&vms->vms_clients, sizeof (vm_client_t),
+	    offsetof(vm_client_t, vmc_node));
 
-	pmap_init(&vms->vms_pmap, ops);
+	vms->vms_pt_ops = ops;
+	vms->vms_pt_data = ops->vpo_alloc();
+	vms->vms_pt_gen = 1;
 
 	return (vms);
 }
@@ -127,16 +150,10 @@ void
 vmspace_destroy(struct vmspace *vms)
 {
 	VERIFY(list_is_empty(&vms->vms_maplist));
+	VERIFY(list_is_empty(&vms->vms_clients));
 
-	pmap_free(&vms->vms_pmap);
+	vms->vms_pt_ops->vpo_free(vms->vms_pt_data);
 	kmem_free(vms, sizeof (*vms));
-}
-
-long
-vmspace_resident_count(struct vmspace *vms)
-{
-	/* XXXJOY: finish */
-	return (0);
 }
 
 void *
@@ -166,78 +183,21 @@ vmspace_find_kva(struct vmspace *vms, uintptr_t addr, size_t size)
 }
 
 static int
-vmspace_pmap_iswired(struct vmspace *vms, uintptr_t addr, uint_t *prot)
+vmspace_pmap_isresident(struct vmspace *vms, uintptr_t addr, uint_t *prot)
 {
-	struct pmap *pmap = &vms->vms_pmap;
-	int rv;
-
 	ASSERT(MUTEX_HELD(&vms->vms_lock));
 
-	rv = pmap->pm_ops->vpo_is_wired(pmap->pm_impl, addr, prot);
-	return (rv);
-}
-
-static void
-pmap_free(struct pmap *pmap)
-{
-	void *pmi = pmap->pm_impl;
-	struct vmm_pt_ops *ops = pmap->pm_ops;
-
-	pmap->pm_impl = NULL;
-	pmap->pm_ops = NULL;
-
-	ops->vpo_free(pmi);
-}
-
-static void
-pmap_init(struct pmap *pmap, struct vmm_pt_ops *ops)
-{
-	void *pmi;
-
-	ASSERT3P(ops, !=, NULL);
-
-	pmi = ops->vpo_alloc();
-	pmap->pm_ops = ops;
-	pmap->pm_impl = pmi;
+	return (vms->vms_pt_ops->vpo_is_wired(vms->vms_pt_data, addr, prot));
 }
 
 uint64_t
-vmspace_pmtp(struct vmspace *vms)
+vmspace_resident_count(struct vmspace *vms)
 {
-	struct vmm_pt_ops *ops = vms->vms_pmap.pm_ops;
-	void *pmi = vms->vms_pmap.pm_impl;
-
-	return (ops->vpo_pmtp(pmi));
-}
-
-uint64_t
-vmspace_pmtgen(struct vmspace *vms)
-{
-	return (vms->vms_pmap.pm_eptgen);
-}
-
-long
-vmspace_wired_count(struct vmspace *vms)
-{
-	struct vmm_pt_ops *ops = vms->vms_pmap.pm_ops;
-	void *pmi = vms->vms_pmap.pm_impl;
-	long val;
-
-	val = ops->vpo_wired_cnt(pmi);
-	VERIFY3S(val, >=, 0);
-
-	return (val);
-}
-
-int
-vmspace_emulate_accessed_dirty(struct vmspace *vms, vm_offset_t va, int ftype)
-{
-	/* Allow the fallback to vm_fault to handle this */
-	return (-1);
+	return (vms->vms_pt_ops->vpo_wired_cnt(vms->vms_pt_data));
 }
 
 static pfn_t
-vm_object_pager_reservoir(vm_object_t vmo, uintptr_t off)
+vm_object_pager_reservoir(vm_object_t *vmo, uintptr_t off)
 {
 	vmmr_region_t *region;
 	pfn_t pfn;
@@ -251,7 +211,7 @@ vm_object_pager_reservoir(vm_object_t vmo, uintptr_t off)
 }
 
 static pfn_t
-vm_object_pager_mmio(vm_object_t vmo, uintptr_t off)
+vm_object_pager_mmio(vm_object_t *vmo, uintptr_t off)
 {
 	pfn_t pfn;
 
@@ -264,12 +224,12 @@ vm_object_pager_mmio(vm_object_t vmo, uintptr_t off)
 	return (pfn);
 }
 
-vm_object_t
+vm_object_t *
 vm_object_mem_allocate(size_t size, bool transient)
 {
 	int err;
 	vmmr_region_t *region = NULL;
-	vm_object_t vmo;
+	vm_object_t *vmo;
 
 	ASSERT3U(size, !=, 0);
 	ASSERT3U(size & PAGEOFFSET, ==, 0);
@@ -279,7 +239,7 @@ vm_object_mem_allocate(size_t size, bool transient)
 		return (NULL);
 	}
 
-	vmo = kmem_alloc(sizeof (*vmo), KM_SLEEP);
+	vmo = kmem_alloc(sizeof (vm_object_t), KM_SLEEP);
 
 	/* For now, these are to stay fixed after allocation */
 	vmo->vmo_type = VMOT_MEM;
@@ -291,16 +251,16 @@ vm_object_mem_allocate(size_t size, bool transient)
 	return (vmo);
 }
 
-static vm_object_t
+static vm_object_t *
 vm_object_mmio_allocate(size_t size, uintptr_t hpa)
 {
-	vm_object_t vmo;
+	vm_object_t *vmo;
 
 	ASSERT3U(size, !=, 0);
 	ASSERT3U(size & PAGEOFFSET, ==, 0);
 	ASSERT3U(hpa & PAGEOFFSET, ==, 0);
 
-	vmo = kmem_alloc(sizeof (*vmo), KM_SLEEP);
+	vmo = kmem_alloc(sizeof (vm_object_t), KM_SLEEP);
 
 	/* For now, these are to stay fixed after allocation */
 	vmo->vmo_type = VMOT_MMIO;
@@ -312,19 +272,19 @@ vm_object_mmio_allocate(size_t size, uintptr_t hpa)
 	return (vmo);
 }
 
-vm_object_t
+vm_object_t *
 vmm_mmio_alloc(struct vmspace *vmspace, vm_paddr_t gpa, size_t len,
     vm_paddr_t hpa)
 {
 	int error;
-	vm_object_t obj;
+	vm_object_t *obj;
 
 	obj = vm_object_mmio_allocate(len, hpa);
 	if (obj != NULL) {
 		error = vmspace_map(vmspace, obj, 0, gpa, len,
 		    PROT_READ | PROT_WRITE);
 		if (error != 0) {
-			vm_object_deallocate(obj);
+			vm_object_release(obj);
 			obj = NULL;
 		}
 	}
@@ -333,7 +293,7 @@ vmm_mmio_alloc(struct vmspace *vmspace, vm_paddr_t gpa, size_t len,
 }
 
 void
-vm_object_deallocate(vm_object_t vmo)
+vm_object_release(vm_object_t *vmo)
 {
 	ASSERT(vmo != NULL);
 
@@ -361,7 +321,7 @@ vm_object_deallocate(vm_object_t vmo)
 }
 
 void
-vm_object_reference(vm_object_t vmo)
+vm_object_reference(vm_object_t *vmo)
 {
 	ASSERT(vmo != NULL);
 
@@ -371,7 +331,7 @@ vm_object_reference(vm_object_t vmo)
 }
 
 pfn_t
-vm_object_pfn(vm_object_t vmo, uintptr_t off)
+vm_object_pfn(vm_object_t *vmo, uintptr_t off)
 {
 	switch (vmo->vmo_type) {
 	case VMOT_MEM:
@@ -456,24 +416,22 @@ vm_mapping_remove(struct vmspace *vms, vmspace_mapping_t *vmsm)
 	ASSERT(vms->vms_map_changing);
 
 	list_remove(ml, vmsm);
-	vm_object_deallocate(vmsm->vmsm_object);
+	vm_object_release(vmsm->vmsm_object);
 	kmem_free(vmsm, sizeof (*vmsm));
 }
 
 int
 vm_fault(struct vmspace *vms, vm_offset_t off, vm_prot_t type)
 {
-	struct pmap *pmap = &vms->vms_pmap;
-	void *pmi = pmap->pm_impl;
 	const uintptr_t addr = off;
 	vmspace_mapping_t *vmsm;
-	struct vm_object *vmo;
+	vm_object_t *vmo;
 	uint_t prot, map_lvl;
 	pfn_t pfn;
 	uintptr_t map_addr;
 
 	mutex_enter(&vms->vms_lock);
-	if (vmspace_pmap_iswired(vms, addr, &prot) == 0) {
+	if (vmspace_pmap_isresident(vms, addr, &prot) == 0) {
 		int err = 0;
 
 		/*
@@ -510,66 +468,16 @@ vm_fault(struct vmspace *vms, vm_offset_t off, vm_prot_t type)
 	 * If pmap failure is to be handled, the previously acquired page locks
 	 * would need to be released.
 	 */
-	VERIFY0(pmap->pm_ops->vpo_map(pmi, map_addr, pfn, map_lvl, prot,
-	    vmo->vmo_attr));
-	pmap->pm_eptgen++;
+	VERIFY0(vms->vms_pt_ops->vpo_map(vms->vms_pt_data, map_addr, pfn,
+	    map_lvl, prot, vmo->vmo_attr));
+	vms->vms_pt_gen++;
 
 	mutex_exit(&vms->vms_lock);
 	return (0);
 }
 
 int
-vm_fault_quick_hold_pages(struct vmspace *vms, vm_offset_t addr, vm_size_t len,
-    vm_prot_t prot, vm_page_t *ma, int max_count)
-{
-	const uintptr_t vaddr = addr;
-	vmspace_mapping_t *vmsm;
-	struct vm_object *vmo;
-	vm_page_t vmp;
-
-	ASSERT0(addr & PAGEOFFSET);
-	ASSERT(len == PAGESIZE);
-	ASSERT(max_count == 1);
-
-	/*
-	 * Unlike practically all of the other logic that queries or
-	 * manipulates vmspace objects, vm_fault_quick_hold_pages() does so
-	 * without holding vms_lock.  This is safe because bhyve ensures that
-	 * changes to the vmspace map occur only when all other threads have
-	 * been excluded from running.
-	 *
-	 * Since this task can count on vms_maplist remaining static and does
-	 * not need to modify the pmap (like vm_fault might), it can proceed
-	 * without the lock.  The vm_object has independent refcount and lock
-	 * protection, while the vmo_pager methods do not rely on vms_lock for
-	 * safety.
-	 *
-	 * Performing this work without locks is critical in cases where
-	 * multiple vCPUs require simultaneous instruction emulation, such as
-	 * for frequent guest APIC accesses on a host that lacks hardware
-	 * acceleration for that behavior.
-	 */
-	if ((vmsm = vm_mapping_find(vms, vaddr, PAGESIZE, B_TRUE)) == NULL ||
-	    (prot & ~vmsm->vmsm_prot) != 0) {
-		return (-1);
-	}
-
-	vmp = kmem_zalloc(sizeof (struct vm_page), KM_SLEEP);
-
-	vmo = vmsm->vmsm_object;
-	vm_object_reference(vmo);
-	vmp->vmp_obj_held = vmo;
-	vmp->vmp_pfn = vm_object_pfn(vmo, VMSM_OFFSET(vmsm, vaddr));
-
-	*ma = vmp;
-	return (1);
-}
-
-/*
- * Find a suitable location for a mapping (and install it).
- */
-int
-vmspace_map(struct vmspace *vms, vm_object_t vmo, vm_ooffset_t off,
+vmspace_map(struct vmspace *vms, vm_object_t *vmo, vm_ooffset_t off,
     vm_offset_t addr, vm_size_t len, vm_prot_t prot)
 {
 	const size_t size = (size_t)len;
@@ -616,8 +524,6 @@ out:
 int
 vmspace_unmap(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 {
-	struct pmap *pmap = &vms->vms_pmap;
-	void *pmi = pmap->pm_impl;
 	const uintptr_t addr = start;
 	const size_t size = (size_t)(end - start);
 	vmspace_mapping_t *vmsm;
@@ -634,8 +540,8 @@ vmspace_unmap(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 		return (ENOENT);
 	}
 
-	(void) pmap->pm_ops->vpo_unmap(pmi, addr, end);
-	pmap->pm_eptgen++;
+	(void) vms->vms_pt_ops->vpo_unmap(vms->vms_pt_data, addr, end);
+	vms->vms_pt_gen++;
 
 	vm_mapping_remove(vms, vmsm);
 	vms->vms_map_changing = B_FALSE;
@@ -646,12 +552,10 @@ vmspace_unmap(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 int
 vmspace_populate(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 {
-	struct pmap *pmap = &vms->vms_pmap;
-	void *pmi = pmap->pm_impl;
 	const uintptr_t addr = start;
 	const size_t size = end - start;
 	vmspace_mapping_t *vmsm;
-	struct vm_object *vmo;
+	vm_object_t *vmo;
 	uint_t prot;
 
 	mutex_enter(&vms->vms_lock);
@@ -675,9 +579,9 @@ vmspace_populate(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 		map_addr = P2ALIGN(pos, pg_size);
 		VERIFY(pfn != PFN_INVALID);
 
-		VERIFY0(pmap->pm_ops->vpo_map(pmi, map_addr, pfn, map_lvl,
-		    prot, vmo->vmo_attr));
-		vms->vms_pmap.pm_eptgen++;
+		VERIFY0(vms->vms_pt_ops->vpo_map(vms->vms_pt_data, map_addr,
+		    pfn, map_lvl, prot, vmo->vmo_attr));
+		vms->vms_pt_gen++;
 
 		pos += pg_size;
 	}
@@ -687,16 +591,236 @@ vmspace_populate(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 	return (0);
 }
 
-/* Provided custom for bhyve 'devmem' segment mapping */
-int
-vm_segmap_obj(vm_object_t vmo, off_t map_off, size_t size, struct as *as,
-    caddr_t *addrp, uint_t prot, uint_t maxprot, uint_t flags)
+
+vm_client_t *
+vmspace_client_alloc(vmspace_t *vms)
 {
+	vm_client_t *vmc;
+
+	vmc = kmem_zalloc(sizeof (vm_client_t), KM_SLEEP);
+	vmc->vmc_space = vms;
+	mutex_init(&vmc->vmc_lock, NULL, MUTEX_DRIVER, NULL);
+	cv_init(&vmc->vmc_cv, NULL, CV_DRIVER, NULL);
+	vmc->vmc_state = VCS_IDLE;
+	list_create(&vmc->vmc_held_pages, sizeof (vm_page_t),
+	    offsetof(vm_page_t, vmp_node));
+
+	mutex_enter(&vms->vms_lock);
+	list_insert_tail(&vms->vms_clients, vmc);
+	mutex_exit(&vms->vms_lock);
+
+	return (vmc);
+}
+
+void
+vmspace_client_destroy(vmspace_t *vms, vm_client_t *vmc)
+{
+	VERIFY3P(vms, ==, vmc->vmc_space);
+	VERIFY(list_is_empty(&vmc->vmc_held_pages));
+
+	mutex_enter(&vms->vms_lock);
+	list_remove(&vms->vms_clients, vmc);
+	mutex_exit(&vms->vms_lock);
+
+	kmem_free(vmc, sizeof (vm_client_t));
+}
+
+uint64_t
+vmspace_table_root(vmspace_t *vms)
+{
+	return (vms->vms_pt_ops->vpo_pmtp(vms->vms_pt_data));
+}
+
+uint64_t
+vmspace_table_gen(vmspace_t *vms)
+{
+	return (vms->vms_pt_gen);
+}
+
+/*
+ * Returns with vmc_lock held
+ */
+static void
+vmc_activate(vm_client_t *vmc)
+{
+	mutex_enter(&vmc->vmc_lock);
+	VERIFY0(vmc->vmc_state & VCS_ACTIVE);
+	while ((vmc->vmc_state & VCS_HOLD) != 0) {
+		cv_wait(&vmc->vmc_cv, &vmc->vmc_lock);
+	}
+	vmc->vmc_state |= VCS_ACTIVE;
+}
+
+/*
+ * Returns with vmc_lock held
+ */
+static void
+vmc_deactivate(vm_client_t *vmc)
+{
+	ASSERT(MUTEX_HELD(&vmc->vmc_lock));
+	VERIFY(vmc->vmc_state & VCS_ACTIVE);
+
+	vmc->vmc_state ^= VCS_ACTIVE;
+	if ((vmc->vmc_state & VCS_HOLD) != 0) {
+		cv_broadcast(&vmc->vmc_cv);
+	}
+	mutex_exit(&vmc->vmc_lock);
+}
+
+vm_page_t *
+vmc_hold(vm_client_t *vmc, uintptr_t gpa, int prot)
+{
+	vmspace_t *vms = vmc->vmc_space;
+	vmspace_mapping_t *vmsm;
+	vm_object_t *vmo;
+	vm_page_t *vmp;
+
+	ASSERT0(gpa & PAGEOFFSET);
+
+	vmp = kmem_alloc(sizeof (vm_page_t), KM_SLEEP);
+	vmc_activate(vmc);
+
+	if ((vmsm = vm_mapping_find(vms, gpa, PAGESIZE, B_TRUE)) == NULL ||
+	    (prot & ~vmsm->vmsm_prot) != 0) {
+		vmc_deactivate(vmc);
+		kmem_free(vmp, sizeof (vm_page_t));
+		return (NULL);
+	}
+	vmo = vmsm->vmsm_object;
+
+	vmp->vmp_client = vmc;
+	vmp->vmp_gpa = gpa;
+	vmp->vmp_pfn = vm_object_pfn(vmo, VMSM_OFFSET(vmsm, gpa));
+	vmp->vmp_prot = prot;
+	list_insert_tail(&vmc->vmc_held_pages, vmp);
+	vmc_deactivate(vmc);
+
+	return (vmp);
+}
+
+/*
+ * Indicate that a CPU will be utilizing the nested page tables through this VM
+ * client.  Interrpts (and/or the GIF) are expected to be disabled when calling
+ * this function.
+ */
+uint64_t
+vmc_table_enter(vm_client_t *vmc)
+{
+	vmspace_t *vms = vmc->vmc_space;
+	uint64_t gen;
+
+	ASSERT0(vmc->vmc_state & (VCS_ACTIVE | VCS_ON_CPU));
+	ASSERT3S(vmc->vmc_cpu_active, ==, -1);
+
+	/*
+	 * Since the NPT activation occurs with interrupts disabled, this must
+	 * be done without taking vmc_lock like normal.
+	 */
+	gen = vms->vms_pt_gen;
+	vmc->vmc_cpu_active = CPU->cpu_id;
+	vmc->vmc_cpu_gen = gen;
+	atomic_or_uint(&vmc->vmc_state, VCS_ON_CPU);
+
+	return (gen);
+}
+
+/*
+ * Indicate that this VM client is not longer (directly) using the underlying
+ * page tables.  Interrupts (and/or the GIF) must be enabled prior to calling
+ * this function.
+ */
+void
+vmc_table_exit(vm_client_t *vmc)
+{
+	mutex_enter(&vmc->vmc_lock);
+
+	ASSERT(vmc->vmc_state & VCS_ON_CPU);
+	vmc->vmc_state ^= VCS_ON_CPU;
+	vmc->vmc_cpu_active = -1;
+	if ((vmc->vmc_state & VCS_HOLD) != 0) {
+		cv_broadcast(&vmc->vmc_cv);
+	}
+
+	mutex_exit(&vmc->vmc_lock);
+}
+
+
+static __inline void *
+vmp_ptr(const vm_page_t *vmp)
+{
+	ASSERT3U(vmp->vmp_pfn, !=, PFN_INVALID);
+
+	const uintptr_t paddr = (vmp->vmp_pfn << PAGESHIFT);
+	return ((void *)((uintptr_t)kpm_vbase + paddr));
+}
+
+const void *
+vmp_get_readable(const vm_page_t *vmp)
+{
+	ASSERT(vmp->vmp_prot & PROT_READ);
+
+	return (vmp_ptr(vmp));
+}
+
+void *
+vmp_get_writable(const vm_page_t *vmp)
+{
+	ASSERT(vmp->vmp_prot & PROT_WRITE);
+	return (vmp_ptr(vmp));
+}
+
+pfn_t
+vmp_get_pfn(const vm_page_t *vmp)
+{
+	return (vmp->vmp_pfn);
+}
+
+vm_page_t *
+vmp_chain(vm_page_t *vmp, vm_page_t *to_chain)
+{
+	vm_page_t *old = vmp->vmp_chain;
+	vmp->vmp_chain = to_chain;
+	return (old);
+}
+
+vm_page_t *
+vmp_next(const vm_page_t *vmp)
+{
+	return (vmp->vmp_chain);
+}
+
+void
+vmp_release(vm_page_t *vmp)
+{
+	vm_client_t *vmc = vmp->vmp_client;
+
+	mutex_enter(&vmc->vmc_lock);
+	list_remove(&vmc->vmc_held_pages, vmp);
+	mutex_exit(&vmc->vmc_lock);
+	/* TODO: re-dirty page if necessary */
+	kmem_free(vmp, sizeof (vm_page_t));
+}
+
+
+int
+vm_segmap_obj(struct vm *vm, int segid, off_t segoff, off_t len,
+    struct as *as, caddr_t *addrp, uint_t prot, uint_t maxprot, uint_t flags)
+{
+	vm_object_t *vmo;
 	int err;
 
-	VERIFY(map_off >= 0);
-	VERIFY(size <= vmo->vmo_size);
-	VERIFY((size + map_off) <= vmo->vmo_size);
+	if (segoff < 0 || len <= 0 ||
+	    (segoff & PAGEOFFSET) != 0 || (len & PAGEOFFSET) != 0) {
+		return (EINVAL);
+	}
+	err = vm_get_memseg(vm, segid, NULL, NULL, &vmo);
+	if (err != 0) {
+		return (err);
+	}
+
+	VERIFY(segoff >= 0);
+	VERIFY(len <= vmo->vmo_size);
+	VERIFY((len + segoff) <= vmo->vmo_size);
 
 	if (vmo->vmo_type != VMOT_MEM) {
 		/* Only support memory objects for now */
@@ -705,15 +829,15 @@ vm_segmap_obj(vm_object_t vmo, off_t map_off, size_t size, struct as *as,
 
 	as_rangelock(as);
 
-	err = choose_addr(as, addrp, size, 0, ADDR_VACALIGN, flags);
+	err = choose_addr(as, addrp, (size_t)len, 0, ADDR_VACALIGN, flags);
 	if (err == 0) {
 		segvmm_crargs_t svma;
 
 		svma.obj = vmo;
-		svma.offset = map_off;
+		svma.offset = segoff;
 		svma.prot = prot;
 
-		err = as_map(as, *addrp, size, segvmm_create, &svma);
+		err = as_map(as, *addrp, (size_t)len, segvmm_create, &svma);
 	}
 
 	as_rangeunlock(as);
@@ -721,13 +845,12 @@ vm_segmap_obj(vm_object_t vmo, off_t map_off, size_t size, struct as *as,
 }
 
 int
-vm_segmap_space(struct vmspace *vms, off_t off, struct as *as, caddr_t *addrp,
+vm_segmap_space(struct vm *vm, off_t off, struct as *as, caddr_t *addrp,
     off_t len, uint_t prot, uint_t maxprot, uint_t flags)
 {
+
 	const uintptr_t addr = (uintptr_t)off;
 	const size_t size = (uintptr_t)len;
-	vmspace_mapping_t *vmsm;
-	vm_object_t vmo;
 	int err;
 
 	if (off < 0 || len <= 0 ||
@@ -735,66 +858,25 @@ vm_segmap_space(struct vmspace *vms, off_t off, struct as *as, caddr_t *addrp,
 		return (EINVAL);
 	}
 
-	mutex_enter(&vms->vms_lock);
-	if ((vmsm = vm_mapping_find(vms, addr, size, B_FALSE)) == NULL) {
-		mutex_exit(&vms->vms_lock);
-		return (ENXIO);
-	}
-	if ((prot & ~(vmsm->vmsm_prot | PROT_USER)) != 0) {
-		mutex_exit(&vms->vms_lock);
-		return (EACCES);
-	}
-	vmo = vmsm->vmsm_object;
-	if (vmo->vmo_type != VMOT_MEM) {
-		/* Only support memory objects for now */
-		mutex_exit(&vms->vms_lock);
-		return (ENOTSUP);
-	}
+	/* TODO: actually wire this up */
+	/* if ((prot & ~(vmsm->vmsm_prot | PROT_USER)) != 0) { */
+	/* 	mutex_exit(&vms->vms_lock); */
+	/* 	return (EACCES); */
+	/* } */
 
 	as_rangelock(as);
 
 	err = choose_addr(as, addrp, size, off, ADDR_VACALIGN, flags);
 	if (err == 0) {
 		segvmm_crargs_t svma;
-		const uintptr_t addroff = addr - vmsm->vmsm_addr;
-		const uintptr_t mapoff = addroff + vmsm->vmsm_offset;
 
-		VERIFY(addroff < vmsm->vmsm_len);
-		VERIFY((vmsm->vmsm_len - addroff) >= size);
-		VERIFY(mapoff < vmo->vmo_size);
-		VERIFY((mapoff + size) <= vmo->vmo_size);
-
-		svma.obj = vmo;
-		svma.offset = mapoff;
+		/* svma.obj = vmo; */
+		/* svma.offset = mapoff; */
 		svma.prot = prot;
 
 		err = as_map(as, *addrp, len, segvmm_create, &svma);
 	}
 
 	as_rangeunlock(as);
-	mutex_exit(&vms->vms_lock);
 	return (err);
-}
-
-void *
-vm_page_ptr(vm_page_t vmp)
-{
-	ASSERT3U(vmp->vmp_pfn, !=, PFN_INVALID);
-
-	const uintptr_t paddr = (vmp->vmp_pfn << PAGESHIFT);
-
-	return ((void *)((uintptr_t)kpm_vbase + paddr));
-}
-
-void
-vm_page_release(vm_page_t vmp)
-{
-	VERIFY(vmp->vmp_pfn != PFN_INVALID);
-	VERIFY(vmp->vmp_obj_held != NULL);
-
-	vm_object_deallocate(vmp->vmp_obj_held);
-	vmp->vmp_obj_held = NULL;
-	vmp->vmp_pfn = PFN_INVALID;
-
-	kmem_free(vmp, sizeof (*vmp));
 }

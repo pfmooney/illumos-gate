@@ -46,7 +46,7 @@
 
 typedef struct segvmm_data {
 	krwlock_t	svmd_lock;
-	vm_object_t	svmd_obj;
+	vm_object_t	*svmd_obj;
 	uintptr_t	svmd_obj_off;
 	uchar_t		svmd_prot;
 	size_t		svmd_softlockcnt;
@@ -170,7 +170,7 @@ segvmm_unmap(struct seg *seg, caddr_t addr, size_t len)
 	hat_unload(seg->s_as->a_hat, addr, len, HAT_UNLOAD_UNMAP);
 
 	/* Release the VM object hold this segment possessed */
-	vm_object_deallocate(svmd->svmd_obj);
+	vm_object_release(svmd->svmd_obj);
 
 	seg_free(seg);
 	return (0);

@@ -40,29 +40,22 @@ void invalidate_cache_all(void);
  */
 typedef uchar_t vm_prot_t;
 
-/* New type declarations. */
 struct vmspace;
 struct vm_object;
 struct vm_page;
+struct vm_client;
 
-typedef struct vm_object *vm_object_t;
-typedef struct vm_page *vm_page_t;
+typedef struct vmspace vmspace_t;
+typedef struct vm_client vm_client_t;
+typedef struct vm_page vm_page_t;
+typedef struct vm_object vm_object_t;
 
-struct vmm_pt_ops;
-
-
-long vmspace_resident_count(struct vmspace *vmspace);
-
-
-void vmspace_get_mapping(struct vmspace *, vm_offset_t, uint64_t *, int *);
-int vmspace_emulate_accessed_dirty(struct vmspace *, vm_offset_t, int);
-long vmspace_wired_count(struct vmspace *);
-
-/* illumos-specific functions for setup and operation */
-int vm_segmap_obj(vm_object_t, off_t, size_t, struct as *, caddr_t *, uint_t,
-    uint_t, uint_t);
-int vm_segmap_space(struct vmspace *, off_t, struct as *, caddr_t *, off_t,
+struct vm;
+int vm_segmap_obj(struct vm *, int, off_t, off_t, struct as *, caddr_t *,
     uint_t, uint_t, uint_t);
+int vm_segmap_space(struct vm *, off_t, struct as *, caddr_t *, off_t, uint_t,
+    uint_t, uint_t);
+
 void *vmspace_find_kva(struct vmspace *, uintptr_t, size_t);
 
 struct vmm_pt_ops {
@@ -79,29 +72,42 @@ struct vmm_pt_ops {
 extern struct vmm_pt_ops ept_ops;
 extern struct vmm_pt_ops rvi_ops;
 
+/* vmspace_t operations */
 struct vmspace *vmspace_alloc(size_t, struct vmm_pt_ops *);
 void vmspace_destroy(struct vmspace *);
-int vmspace_map(struct vmspace *, vm_object_t, vm_ooffset_t, vm_offset_t,
+int vmspace_map(struct vmspace *, vm_object_t *, vm_ooffset_t, vm_offset_t,
     vm_size_t, vm_prot_t);
 int vmspace_unmap(struct vmspace *, vm_offset_t, vm_offset_t);
 int vmspace_populate(struct vmspace *, vm_offset_t start, vm_offset_t end);
+vm_client_t *vmspace_client_alloc(vmspace_t *);
+void vmspace_client_destroy(vmspace_t *, vm_client_t *);
+uint64_t vmspace_table_root(vmspace_t *);
+uint64_t vmspace_table_gen(vmspace_t *);
+
+uint64_t vmspace_resident_count(struct vmspace *);
 
 
-uint64_t vmspace_pmtp(struct vmspace *);
-uint64_t vmspace_pmtgen(struct vmspace *);
+/* vm_client_t operations */
+vm_page_t *vmc_hold(vm_client_t *, uintptr_t, int);
+uint64_t vmc_table_enter(vm_client_t *);
+void vmc_table_exit(vm_client_t *);
 
 int vm_fault(struct vmspace *, vm_offset_t, vm_prot_t);
-int vm_fault_quick_hold_pages(struct vmspace *, vm_offset_t addr, vm_size_t len,
-    vm_prot_t prot, vm_page_t *ma, int max_count);
 
-vm_object_t vm_object_mem_allocate(size_t, bool);
-void vm_object_deallocate(vm_object_t);
-void vm_object_reference(vm_object_t);
-pfn_t vm_object_pfn(vm_object_t, uintptr_t);
+/* vm_object_t operations */
+vm_object_t *vm_object_mem_allocate(size_t, bool);
+void vm_object_reference(vm_object_t *);
+void vm_object_release(vm_object_t *);
+pfn_t vm_object_pfn(vm_object_t *, uintptr_t);
 struct vm_object *vmm_mmio_alloc(struct vmspace *, vm_paddr_t gpa, size_t len,
     vm_paddr_t hpa);
 
-void *vm_page_ptr(vm_page_t);
-void vm_page_release(vm_page_t);
+/* vm_page_t operations */
+const void *vmp_get_readable(const vm_page_t *);
+void *vmp_get_writable(const vm_page_t *);
+pfn_t vmp_get_pfn(const vm_page_t *);
+vm_page_t *vmp_chain(vm_page_t *, vm_page_t *);
+vm_page_t *vmp_next(const vm_page_t *);
+void vmp_release(vm_page_t *);
 
 #endif /* _VMM_VM_H */

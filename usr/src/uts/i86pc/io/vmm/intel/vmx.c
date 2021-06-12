@@ -59,6 +59,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/smt.h>
 #include <sys/hma.h>
 #include <sys/trap.h>
+#include <sys/archsystm.h>
 
 #include <machine/psl.h>
 #include <machine/cpufunc.h>
@@ -650,7 +651,7 @@ vmx_vminit(struct vm *vm)
 	}
 	vmx->vm = vm;
 
-	vmx->eptp = vmspace_pmtp(vm_get_vmspace(vm));
+	vmx->eptp = vmspace_table_root(vm_get_vmspace(vm));
 
 	/*
 	 * Clean up EPTP-tagged guest physical and combined mappings
@@ -931,7 +932,7 @@ vmx_invvpid(struct vmx *vmx, int vcpu, int running)
 	 * Note also that this will invalidate mappings tagged with 'vpid'
 	 * for "all" EP4TAs.
 	 */
-	if (vmspace_pmtgen(vms) == vmx->eptgen[curcpu]) {
+	if (vmspace_table_gen(vms) == vmx->eptgen[curcpu]) {
 		invvpid_desc._res1 = 0;
 		invvpid_desc._res2 = 0;
 		invvpid_desc.vpid = vmxstate->vpid;
@@ -2538,24 +2539,18 @@ vmx_exit_inst_error(struct vmxctx *vmxctx, int rc, struct vm_exit *vmexit)
  * clear NMI blocking.
  */
 static __inline void
-vmx_exit_handle_nmi(struct vmx *vmx, int vcpuid, struct vm_exit *vmexit)
+vmx_exit_handle_possible_nmi(struct vm_exit *vmexit)
 {
-	uint32_t intr_info;
+	ASSERT(!interrupts_enabled());
 
-	KASSERT((read_rflags() & PSL_I) == 0, ("interrupts enabled"));
+	if (vmexit->u.vmx.exit_reason == EXIT_REASON_EXCEPTION) {
+		uint32_t intr_info = vmcs_read(VMCS_EXIT_INTR_INFO);
+		ASSERT(intr_info & VMCS_INTR_VALID);
 
-	if (vmexit->u.vmx.exit_reason != EXIT_REASON_EXCEPTION)
-		return;
-
-	intr_info = vmcs_read(VMCS_EXIT_INTR_INFO);
-	KASSERT((intr_info & VMCS_INTR_VALID) != 0,
-	    ("VM exit interruption info invalid: %x", intr_info));
-
-	if ((intr_info & VMCS_INTR_T_MASK) == VMCS_INTR_T_NMI) {
-		KASSERT((intr_info & 0xff) == IDT_NMI, ("VM exit due "
-		    "to NMI has invalid vector: %x", intr_info));
-		VCPU_CTR0(vmx->vm, vcpuid, "Vectoring to NMI handler");
-		vmm_call_trap(T_NMIFLT);
+		if ((intr_info & VMCS_INTR_T_MASK) == VMCS_INTR_T_NMI) {
+			ASSERT3U(intr_info & 0xff, ==, IDT_NMI);
+			vmm_call_trap(T_NMIFLT);
+		}
 	}
 }
 
@@ -2638,6 +2633,7 @@ vmx_run(void *arg, int vcpu, uint64_t rip)
 	struct vlapic *vlapic;
 	uint32_t exit_reason;
 	bool tpr_shadow_active;
+	vm_client_t *vmc;
 
 	vmx = arg;
 	vm = vmx->vm;
@@ -2645,6 +2641,7 @@ vmx_run(void *arg, int vcpu, uint64_t rip)
 	vmxctx = &vmx->ctx[vcpu];
 	vlapic = vm_lapic(vm, vcpu);
 	vmexit = vm_exitinfo(vm, vcpu);
+	vmc = vm_get_vmclient(vm, vcpu);
 	launched = 0;
 	tpr_shadow_active = vmx_cap_en(vmx, VMX_CAP_TPR_SHADOW) &&
 	    !vmx_cap_en(vmx, VMX_CAP_APICV) &&
@@ -2671,6 +2668,7 @@ vmx_run(void *arg, int vcpu, uint64_t rip)
 	vmx_set_pcpu_defaults(vmx, vcpu);
 	do {
 		enum event_inject_state inject_state;
+		uint64_t eptgen;
 
 		KASSERT(vmcs_guest_rip() == rip, ("%s: vmcs guest rip mismatch "
 		    "%lx/%lx", __func__, vmcs_guest_rip(), rip));
@@ -2781,25 +2779,31 @@ vmx_run(void *arg, int vcpu, uint64_t rip)
 			vmx_tpr_shadow_enter(vlapic);
 		}
 
-		vmx_run_trace(vmx, vcpu);
-		vcpu_ustate_change(vm, vcpu, VU_RUN);
-		vmx_dr_enter_guest(vmxctx);
-
-		/* check EPT table generation prior to entry */
-		struct vmspace *vms = vm_get_vmspace(vm);
-		if (vmspace_pmtgen(vms) != vmx->eptgen[vcpu]) {
+		/*
+		 * Indicate activation of vmspace (EPT) table just prior to VMX
+		 * entry, checking for the necessity of an invept invalidation.
+		 */
+		eptgen = vmc_table_enter(vmc);
+		if (vmx->eptgen[vcpu] != eptgen) {
 			/*
 			 * VMspace generate does not match what was previously
 			 * used for this CPU so all mappings associated with
 			 * this EPTP must be invalidated.
 			 */
-			invept(1, vmspace_pmtp(vms));
-			vmx->eptgen[vcpu] = vmspace_pmtgen(vms);
+			invept(1, vmx->eptp);
+			vmx->eptgen[vcpu] = eptgen;
 		}
 
+		vmx_run_trace(vmx, vcpu);
+		vcpu_ustate_change(vm, vcpu, VU_RUN);
+		vmx_dr_enter_guest(vmxctx);
+
+		/* Perform VMX entry */
 		rc = vmx_enter_guest(vmxctx, vmx, launched);
+
 		vmx_dr_leave_guest(vmxctx);
 		vcpu_ustate_change(vm, vcpu, VU_EMU_KERN);
+		vmc_table_exit(vmc);
 
 		vmx->vmcs_state[vcpu] |= VS_LAUNCHED;
 		smt_release();
@@ -2813,16 +2817,18 @@ vmx_run(void *arg, int vcpu, uint64_t rip)
 		vmexit->inst_length = vmexit_instruction_length();
 		vmexit->u.vmx.exit_reason = exit_reason = vmcs_exit_reason();
 		vmexit->u.vmx.exit_qualification = vmcs_exit_qualification();
-
 		/* Update 'nextrip' */
 		vmx->state[vcpu].nextrip = rip;
 
 		if (rc == VMX_GUEST_VMEXIT) {
-			vmx_exit_handle_nmi(vmx, vcpu, vmexit);
-			enable_intr();
+			vmx_exit_handle_possible_nmi(vmexit);
+		}
+		enable_intr();
+		vmc_table_exit(vmc);
+
+		if (rc == VMX_GUEST_VMEXIT) {
 			handled = vmx_exit_process(vmx, vcpu, vmexit);
 		} else {
-			enable_intr();
 			vmx_exit_inst_error(vmxctx, rc, vmexit);
 		}
 		DTRACE_PROBE3(vmm__vexit, int, vcpu, uint64_t, rip,

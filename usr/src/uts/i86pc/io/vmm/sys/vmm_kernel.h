@@ -48,6 +48,7 @@
 
 #include <sys/sdt.h>
 #include <x86/segments.h>
+#include <sys/vmm.h>
 
 SDT_PROVIDER_DECLARE(vmm);
 
@@ -61,6 +62,7 @@ struct vhpet;
 struct vioapic;
 struct vlapic;
 struct vmspace;
+struct vm_client;
 struct vm_object;
 struct vm_guest_paging;
 
@@ -255,6 +257,7 @@ void *vcpu_stats(struct vm *vm, int vcpu);
 void vcpu_notify_event(struct vm *vm, int vcpuid);
 void vcpu_notify_event_type(struct vm *vm, int vcpuid, vcpu_notify_t);
 struct vmspace *vm_get_vmspace(struct vm *vm);
+struct vm_client *vm_get_vmclient(struct vm *vm, int vcpuid);
 struct vatpic *vm_atpic(struct vm *vm);
 struct vatpit *vm_atpit(struct vm *vm);
 struct vpmtmr *vm_pmtmr(struct vm *vm);

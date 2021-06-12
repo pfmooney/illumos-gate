@@ -481,7 +481,6 @@ vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
 		lock_type = LOCK_WRITE_HOLD;
 		break;
 
-	case VM_GET_GPA_PMAP:
 	case VM_GET_MEMSEG:
 	case VM_MMAP_GETNEXT:
 	case VM_LAPIC_IRQ:
@@ -502,6 +501,7 @@ vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
 		lock_type = LOCK_READ_HOLD;
 		break;
 
+	case VM_GET_GPA_PMAP:
 	case VM_IOAPIC_PINCOUNT:
 	default:
 		break;
@@ -1156,18 +1156,11 @@ vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
 		break;
 	}
 	case VM_GET_GPA_PMAP: {
-		struct vm_gpa_pte gpapte;
-
-		if (ddi_copyin(datap, &gpapte, sizeof (gpapte), md)) {
-			error = EFAULT;
-			break;
-		}
-#ifdef __FreeBSD__
-		/* XXXJOY: add function? */
-		vmspace_get_mapping(vm_get_vmspace(sc->vmm_vm),
-		    gpapte.gpa, gpapte.pte, &gpapte.ptenum);
-#endif
-		error = 0;
+		/*
+		 * Until there is a necessity to leak EPT/RVI PTE values to
+		 * userspace, this will remain unimplemented
+		 */
+		error = EINVAL;
 		break;
 	}
 	case VM_GET_HPET_CAPABILITIES: {
@@ -2276,10 +2269,7 @@ vmm_segmap(dev_t dev, off_t off, struct as *as, caddr_t *addrp, off_t len,
 {
 	vmm_softc_t *sc;
 	const minor_t minor = getminor(dev);
-	struct vm *vm;
 	int err;
-	vm_object_t vmo = NULL;
-	struct vmspace *vms;
 
 	if (minor == VMM_CTL_MINOR) {
 		return (ENODEV);
@@ -2300,31 +2290,23 @@ vmm_segmap(dev_t dev, off_t off, struct as *as, caddr_t *addrp, off_t len,
 	/* Grab read lock on the VM to prevent any changes to the memory map */
 	vmm_read_lock(sc);
 
-	vm = sc->vmm_vm;
-	vms = vm_get_vmspace(vm);
 	if (off >= VM_DEVMEM_START) {
 		int segid;
-		off_t map_off = 0;
+		off_t segoff;
 
 		/* Mapping a devmem "device" */
-		if (!vmmdev_devmem_segid(sc, off, len, &segid, &map_off)) {
+		if (!vmmdev_devmem_segid(sc, off, len, &segid, &segoff)) {
 			err = ENODEV;
-			goto out;
+		} else {
+			err = vm_segmap_obj(sc->vmm_vm, segid, segoff, len, as,
+			    addrp, prot, maxprot, flags);
 		}
-		err = vm_get_memseg(vm, segid, NULL, NULL, &vmo);
-		if (err != 0) {
-			goto out;
-		}
-		err = vm_segmap_obj(vmo, map_off, len, as, addrp, prot, maxprot,
-		    flags);
 	} else {
 		/* Mapping a part of the guest physical space */
-		err = vm_segmap_space(vms, off, as, addrp, len, prot, maxprot,
-		    flags);
+		err = vm_segmap_space(sc->vmm_vm, off, as, addrp, len, prot,
+		    maxprot, flags);
 	}
 
-
-out:
 	vmm_read_unlock(sc);
 	return (err);
 }

@@ -2756,43 +2756,48 @@ pf_error_code(int usermode, int prot, int rsvd, uint64_t pte)
 }
 
 static void
-ptp_release(void **cookie)
+ptp_release(vm_page_t **vmp)
 {
-	if (*cookie != NULL) {
-		vm_gpa_release(*cookie);
-		*cookie = NULL;
+	if (*vmp != NULL) {
+		vmp_release(*vmp);
+		*vmp = NULL;
 	}
 }
 
 static void *
-ptp_hold(struct vm *vm, int vcpu, vm_paddr_t ptpphys, size_t len, void **cookie)
+ptp_hold(struct vm *vm, int vcpu, uintptr_t gpa, size_t len, vm_page_t **vmp)
 {
-	void *ptr;
+	vm_client_t *vmc = vm_get_vmclient(vm, vcpu);
+	const uintptr_t hold_gpa = gpa & PAGEMASK;
 
-	ptp_release(cookie);
-	ptr = vm_gpa_hold(vm, vcpu, ptpphys, len,  PROT_READ | PROT_WRITE,
-	    cookie);
+	/* Hold must not cross a page boundary */
+	VERIFY3U(gpa + len, <=, hold_gpa + PAGESIZE);
 
-	return (ptr);
+	if (*vmp != NULL) {
+		vmp_release(*vmp);
+	}
+
+	*vmp = vmc_hold(vmc, hold_gpa, PROT_READ | PROT_WRITE);
+	if (*vmp == NULL) {
+		return (NULL);
+	}
+
+	return ((caddr_t)vmp_get_writable(*vmp) + (gpa - hold_gpa));
 }
 
 static int
 _vm_gla2gpa(struct vm *vm, int vcpuid, struct vm_guest_paging *paging,
     uint64_t gla, int prot, uint64_t *gpa, int *guest_fault, bool check_only)
 {
-	int nlevels, pfcode, retval, usermode, writable;
+	int nlevels, pfcode;
 	int ptpshift = 0, ptpindex = 0;
 	uint64_t ptpphys;
 	uint64_t *ptpbase = NULL, pte = 0, pgsize = 0;
-	uint32_t *ptpbase32, pte32;
-	void *cookie;
+	vm_page_t *cookie = NULL;
+	const bool usermode = paging->cpl == 3;
+	const bool writable = (prot & PROT_WRITE) != 0;
 
 	*guest_fault = 0;
-
-	usermode = (paging->cpl == 3 ? 1 : 0);
-	writable = prot & PROT_WRITE;
-	cookie = NULL;
-	retval = 0;
 restart:
 	ptpphys = paging->cr3;		/* root of the page tables */
 	ptp_release(&cookie);
@@ -2804,15 +2809,18 @@ restart:
 		 */
 		if (!check_only)
 			vm_inject_gp(vm, vcpuid);
-		goto fault;
+		*guest_fault = 1;
+		return (0);
 	}
 
 	if (paging->paging_mode == PAGING_MODE_FLAT) {
 		*gpa = gla;
-		goto done;
+		return (0);
 	}
 
 	if (paging->paging_mode == PAGING_MODE_32) {
+		uint32_t *ptpbase32, pte32;
+
 		nlevels = 2;
 		while (--nlevels >= 0) {
 			/* Zero out the lower 12 bits. */
@@ -2821,8 +2829,9 @@ restart:
 			ptpbase32 = ptp_hold(vm, vcpuid, ptpphys, PAGE_SIZE,
 			    &cookie);
 
-			if (ptpbase32 == NULL)
-				goto error;
+			if (ptpbase32 == NULL) {
+				return (EFAULT);
+			}
 
 			ptpshift = PAGE_SHIFT + nlevels * 10;
 			ptpindex = (gla >> ptpshift) & 0x3FF;
@@ -2838,7 +2847,10 @@ restart:
 					    0, pte32);
 					vm_inject_pf(vm, vcpuid, pfcode, gla);
 				}
-				goto fault;
+
+				ptp_release(&cookie);
+				*guest_fault = 1;
+				return (0);
 			}
 
 			/*
@@ -2873,7 +2885,8 @@ restart:
 		/* Zero out the lower 'ptpshift' bits */
 		pte32 >>= ptpshift; pte32 <<= ptpshift;
 		*gpa = pte32 | (gla & (pgsize - 1));
-		goto done;
+		ptp_release(&cookie);
+		return (0);
 	}
 
 	if (paging->paging_mode == PAGING_MODE_PAE) {
@@ -2882,8 +2895,9 @@ restart:
 
 		ptpbase = ptp_hold(vm, vcpuid, ptpphys, sizeof (*ptpbase) * 4,
 		    &cookie);
-		if (ptpbase == NULL)
-			goto error;
+		if (ptpbase == NULL) {
+			return (EFAULT);
+		}
 
 		ptpindex = (gla >> 30) & 0x3;
 
@@ -2894,21 +2908,27 @@ restart:
 				pfcode = pf_error_code(usermode, prot, 0, pte);
 				vm_inject_pf(vm, vcpuid, pfcode, gla);
 			}
-			goto fault;
+
+			ptp_release(&cookie);
+			*guest_fault = 1;
+			return (0);
 		}
 
 		ptpphys = pte;
 
 		nlevels = 2;
-	} else
+	} else {
 		nlevels = 4;
+	}
+
 	while (--nlevels >= 0) {
 		/* Zero out the lower 12 bits and the upper 12 bits */
-		ptpphys >>= 12; ptpphys <<= 24; ptpphys >>= 12;
+		ptpphys &= 0x000ffffffffff000UL;
 
 		ptpbase = ptp_hold(vm, vcpuid, ptpphys, PAGE_SIZE, &cookie);
-		if (ptpbase == NULL)
-			goto error;
+		if (ptpbase == NULL) {
+			return (EFAULT);
+		}
 
 		ptpshift = PAGE_SHIFT + nlevels * 9;
 		ptpindex = (gla >> ptpshift) & 0x1FF;
@@ -2923,7 +2943,10 @@ restart:
 				pfcode = pf_error_code(usermode, prot, 0, pte);
 				vm_inject_pf(vm, vcpuid, pfcode, gla);
 			}
-			goto fault;
+
+			ptp_release(&cookie);
+			*guest_fault = 1;
+			return (0);
 		}
 
 		/* Set the accessed bit in the page table entry */
@@ -2941,7 +2964,10 @@ restart:
 					    1, pte);
 					vm_inject_pf(vm, vcpuid, pfcode, gla);
 				}
-				goto fault;
+
+				ptp_release(&cookie);
+				*guest_fault = 1;
+				return (0);
 			}
 			break;
 		}
@@ -2954,21 +2980,12 @@ restart:
 		if (atomic_cmpset_64(&ptpbase[ptpindex], pte, pte | PG_M) == 0)
 			goto restart;
 	}
+	ptp_release(&cookie);
 
 	/* Zero out the lower 'ptpshift' bits and the upper 12 bits */
 	pte >>= ptpshift; pte <<= (ptpshift + 12); pte >>= 12;
 	*gpa = pte | (gla & (pgsize - 1));
-done:
-	ptp_release(&cookie);
-	KASSERT(retval == 0 || retval == EFAULT, ("%s: unexpected retval %d",
-	    __func__, retval));
-	return (retval);
-error:
-	retval = EFAULT;
-	goto done;
-fault:
-	*guest_fault = 1;
-	goto done;
+	return (0);
 }
 
 int

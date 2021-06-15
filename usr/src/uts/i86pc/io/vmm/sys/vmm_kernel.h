@@ -309,6 +309,7 @@ enum vm_reg_name vm_segment_name(int seg_encoding);
 struct vm_copyinfo {
 	uint64_t	gpa;
 	size_t		len;
+	int		prot;
 	void		*hva;
 	void		*cookie;
 };
@@ -329,9 +330,9 @@ struct vm_copyinfo {
  */
 int vm_copy_setup(struct vm *vm, int vcpuid, struct vm_guest_paging *paging,
     uint64_t gla, size_t len, int prot, struct vm_copyinfo *copyinfo,
-    int num_copyinfo, int *is_fault);
+    uint_t num_copyinfo, int *is_fault);
 void vm_copy_teardown(struct vm *vm, int vcpuid, struct vm_copyinfo *copyinfo,
-    int num_copyinfo);
+    uint_t num_copyinfo);
 void vm_copyin(struct vm *vm, int vcpuid, struct vm_copyinfo *copyinfo,
     void *kaddr, size_t len);
 void vm_copyout(struct vm *vm, int vcpuid, const void *kaddr,

@@ -3397,13 +3397,12 @@ vm_segment_name(int seg)
 
 void
 vm_copy_teardown(struct vm *vm, int vcpuid, struct vm_copyinfo *copyinfo,
-    int num_copyinfo)
+    uint_t num_copyinfo)
 {
-	int idx;
-
-	for (idx = 0; idx < num_copyinfo; idx++) {
-		if (copyinfo[idx].cookie != NULL)
-			vm_gpa_release(copyinfo[idx].cookie);
+	for (uint_t idx = 0; idx < num_copyinfo; idx++) {
+		if (copyinfo[idx].cookie != NULL) {
+			vmp_release((vm_page_t *)copyinfo[idx].cookie);
+		}
 	}
 	bzero(copyinfo, num_copyinfo * sizeof (struct vm_copyinfo));
 }
@@ -3411,24 +3410,26 @@ vm_copy_teardown(struct vm *vm, int vcpuid, struct vm_copyinfo *copyinfo,
 int
 vm_copy_setup(struct vm *vm, int vcpuid, struct vm_guest_paging *paging,
     uint64_t gla, size_t len, int prot, struct vm_copyinfo *copyinfo,
-    int num_copyinfo, int *fault)
+    uint_t num_copyinfo, int *fault)
 {
-	int error, idx, nused;
+	uint_t idx, nused;
 	size_t n, off, remaining;
-	void *hva, *cookie;
-	uint64_t gpa;
+	vm_client_t *vmc = vm_get_vmclient(vm, vcpuid);
 
 	bzero(copyinfo, sizeof (struct vm_copyinfo) * num_copyinfo);
 
 	nused = 0;
 	remaining = len;
 	while (remaining > 0) {
+		uint64_t gpa;
+		int error;
+
 		KASSERT(nused < num_copyinfo, ("insufficient vm_copyinfo"));
 		error = vm_gla2gpa(vm, vcpuid, paging, gla, prot, &gpa, fault);
 		if (error || *fault)
 			return (error);
-		off = gpa & PAGE_MASK;
-		n = min(remaining, PAGE_SIZE - off);
+		off = gpa & PAGEOFFSET;
+		n = min(remaining, PAGESIZE - off);
 		copyinfo[nused].gpa = gpa;
 		copyinfo[nused].len = n;
 		remaining -= n;
@@ -3437,12 +3438,21 @@ vm_copy_setup(struct vm *vm, int vcpuid, struct vm_guest_paging *paging,
 	}
 
 	for (idx = 0; idx < nused; idx++) {
-		hva = vm_gpa_hold(vm, vcpuid, copyinfo[idx].gpa,
-		    copyinfo[idx].len, prot, &cookie);
-		if (hva == NULL)
+		vm_page_t *vmp;
+		caddr_t hva;
+
+		vmp = vmc_hold(vmc, copyinfo[idx].gpa, prot);
+		if (vmp == NULL) {
 			break;
-		copyinfo[idx].hva = hva;
-		copyinfo[idx].cookie = cookie;
+		}
+		if ((prot & PROT_WRITE) != 0) {
+			hva = (caddr_t)vmp_get_writable(vmp);
+		} else {
+			hva = (caddr_t)vmp_get_readable(vmp);
+		}
+		copyinfo[idx].hva = hva + (copyinfo[idx].gpa & PAGEOFFSET);
+		copyinfo[idx].cookie = vmp;
+		copyinfo[idx].prot = prot;
 	}
 
 	if (idx != nused) {
@@ -3464,6 +3474,8 @@ vm_copyin(struct vm *vm, int vcpuid, struct vm_copyinfo *copyinfo, void *kaddr,
 	dst = kaddr;
 	idx = 0;
 	while (len > 0) {
+		ASSERT(copyinfo[idx].prot & PROT_READ);
+
 		bcopy(copyinfo[idx].hva, dst, copyinfo[idx].len);
 		len -= copyinfo[idx].len;
 		dst += copyinfo[idx].len;
@@ -3481,6 +3493,8 @@ vm_copyout(struct vm *vm, int vcpuid, const void *kaddr,
 	src = kaddr;
 	idx = 0;
 	while (len > 0) {
+		ASSERT(copyinfo[idx].prot & PROT_WRITE);
+
 		bcopy(src, copyinfo[idx].hva, copyinfo[idx].len);
 		len -= copyinfo[idx].len;
 		src += copyinfo[idx].len;

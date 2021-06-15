@@ -676,6 +676,7 @@ vmc_hold(vm_client_t *vmc, uintptr_t gpa, int prot)
 	vm_page_t *vmp;
 
 	ASSERT0(gpa & PAGEOFFSET);
+	ASSERT((prot & (PROT_READ | PROT_WRITE)) != PROT_NONE);
 
 	vmp = kmem_alloc(sizeof (vm_page_t), KM_SLEEP);
 	vmc_activate(vmc);

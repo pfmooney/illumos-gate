@@ -89,6 +89,7 @@ uint64_t vmspace_resident_count(struct vmspace *);
 vm_page_t *vmc_hold(vm_client_t *, uintptr_t, int);
 uint64_t vmc_table_enter(vm_client_t *);
 void vmc_table_exit(vm_client_t *);
+int vmc_fault(vm_client_t *, uintptr_t, int);
 
 /* vm_object_t operations */
 vm_object_t *vm_object_mem_allocate(size_t, bool);

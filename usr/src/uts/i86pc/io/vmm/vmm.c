@@ -1430,12 +1430,10 @@ vm_handle_hlt(struct vm *vm, int vcpuid, bool intr_disabled)
 static int
 vm_handle_paging(struct vm *vm, int vcpuid)
 {
+	struct vcpu *vcpu = &vm->vcpu[vcpuid];
+	vm_client_t *vmc = vcpu->vmclient;
+	struct vm_exit *vme = &vcpu->exitinfo;
 	int rv, ftype;
-	struct vcpu *vcpu;
-	struct vm_exit *vme;
-
-	vcpu = &vm->vcpu[vcpuid];
-	vme = &vcpu->exitinfo;
 
 	KASSERT(vme->inst_length == 0, ("%s: invalid inst_length %d",
 	    __func__, vme->inst_length));
@@ -1445,7 +1443,7 @@ vm_handle_paging(struct vm *vm, int vcpuid)
 	    ftype == PROT_WRITE || ftype == PROT_EXEC,
 	    ("vm_handle_paging: invalid fault_type %d", ftype));
 
-	rv = vm_fault(vm->vmspace, vme->u.paging.gpa, ftype);
+	rv = vmc_fault(vmc, vme->u.paging.gpa, ftype);
 
 	VCPU_CTR3(vm, vcpuid, "vm_handle_paging rv = %d, gpa = %lx, "
 	    "ftype = %d", rv, vme->u.paging.gpa, ftype);

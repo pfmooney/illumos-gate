@@ -778,10 +778,6 @@ vmc_fault(vm_client_t *vmc, uintptr_t gpa, int type)
 	map_addr = P2ALIGN((uintptr_t)gpa, LEVEL_SIZE(map_lvl));
 	VERIFY(pfn != PFN_INVALID);
 
-	/*
-	 * If pmap failure is to be handled, the previously acquired page locks
-	 * would need to be released.
-	 */
 	err = vms->vms_pt_ops->vpo_map(vms->vms_pt_data, map_addr, pfn,
 	    map_lvl, prot, vmo->vmo_attr);
 	switch (err) {

@@ -240,6 +240,12 @@ ept_map(void *arg, uint64_t va, pfn_t pfn, uint_t lvl, uint_t prot,
 		if (!EPT_MAPS_PAGE(pte, lvl)) {
 			panic("unexpected PT link @ %08lx in %p", va, pt);
 		} else {
+			if (EPT_PTE_PFN(pte) == pfn &&
+			    EPT_PTE_PROT(pte) == prot) {
+				mutex_exit(EPT_LOCK(emap));
+				return (EEXIST);
+			}
+
 			panic("unexpected page mapped @ %08lx in %p", va, pt);
 		}
 	}

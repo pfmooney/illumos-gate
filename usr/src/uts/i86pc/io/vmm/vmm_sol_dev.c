@@ -100,6 +100,7 @@ struct vmm_hold {
 struct vmm_lease {
 	list_node_t		vml_node;
 	struct vm		*vml_vm;
+	vm_client_t		*vml_vmclient;
 	boolean_t		vml_expired;
 	boolean_t		(*vml_expire_func)(void *);
 	void			*vml_expire_arg;
@@ -1711,6 +1712,7 @@ vmm_drv_lease_sign(vmm_hold_t *hold, boolean_t (*expiref)(void *), void *arg)
 	lease->vml_hold = hold;
 	/* cache the VM pointer for one less pointer chase */
 	lease->vml_vm = sc->vmm_vm;
+	lease->vml_vmclient = vmspace_client_alloc(vm_get_vmspace(sc->vmm_vm));
 
 	mutex_enter(&sc->vmm_lease_lock);
 	while (sc->vmm_lease_blocker != 0) {
@@ -1730,6 +1732,7 @@ vmm_lease_break_locked(vmm_softc_t *sc, vmm_lease_t *lease)
 
 	list_remove(&sc->vmm_lease_list, lease);
 	vmm_read_unlock(sc);
+	vmspace_client_destroy(vm_get_vmspace(sc->vmm_vm), lease->vml_vmclient);
 	kmem_free(lease, sizeof (*lease));
 }
 
@@ -1754,9 +1757,21 @@ vmm_drv_lease_expired(vmm_lease_t *lease)
 void *
 vmm_drv_gpa2kva(vmm_lease_t *lease, uintptr_t gpa, size_t sz)
 {
-	ASSERT(lease != NULL);
+	vm_page_t *vmp;
+	void *res = NULL;
 
-	return (vmspace_find_kva(vm_get_vmspace(lease->vml_vm), gpa, sz));
+	ASSERT(lease != NULL);
+	ASSERT3U(sz, ==, PAGESIZE);
+	ASSERT0(gpa & PAGEOFFSET);
+
+	vmp = vmc_hold(lease->vml_vmclient, gpa, PROT_READ | PROT_WRITE);
+	/* XXX: break the rules for now and just extract the pointer */
+	if (vmp != NULL) {
+		res = vmp_get_writable(vmp);
+		vmp_release(vmp);
+	}
+
+	return (res);
 }
 
 int

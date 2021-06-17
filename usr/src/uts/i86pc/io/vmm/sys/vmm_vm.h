@@ -56,8 +56,6 @@ int vm_segmap_obj(struct vm *, int, off_t, off_t, struct as *, caddr_t *,
 int vm_segmap_space(struct vm *, off_t, struct as *, caddr_t *, off_t, uint_t,
     uint_t, uint_t);
 
-void *vmspace_find_kva(struct vmspace *, uintptr_t, size_t);
-
 struct vmm_pt_ops {
 	int (*vpo_init)();
 	void * (*vpo_alloc)();

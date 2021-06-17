@@ -62,7 +62,7 @@ enum vm_client_state {
 
 struct vmspace {
 	kmutex_t	vms_lock;
-	boolean_t	vms_map_changing;
+	bool		vms_held;
 	uintptr_t	vms_size;	/* fixed after creation */
 
 	/* (nested) page table state */
@@ -115,7 +115,8 @@ struct vm_page {
 
 static vmspace_mapping_t *vm_mapping_find(struct vmspace *, uintptr_t, size_t,
     boolean_t);
-static void vm_mapping_remove(struct vmspace *, vmspace_mapping_t *);
+static void vmc_space_hold(vm_client_t *);
+static void vmc_space_release(vm_client_t *, bool);
 
 
 struct vmspace *
@@ -154,40 +155,6 @@ vmspace_destroy(struct vmspace *vms)
 
 	vms->vms_pt_ops->vpo_free(vms->vms_pt_data);
 	kmem_free(vms, sizeof (*vms));
-}
-
-void *
-vmspace_find_kva(struct vmspace *vms, uintptr_t addr, size_t size)
-{
-	vmspace_mapping_t *vmsm;
-	void *result = NULL;
-
-	/*
-	 * Since vmspace_find_kva is provided so that vmm_drv consumers can do
-	 * GPA2KVA translations, it is expected to be called when there is a
-	 * read lock preventing vmspace alterations.  As such, it can do the
-	 * lockless vm_mapping_find() lookup.
-	 */
-	vmsm = vm_mapping_find(vms, addr, size, B_TRUE);
-	if (vmsm != NULL) {
-		struct vm_object *vmo = vmsm->vmsm_object;
-
-		if (vmo->vmo_type == VMOT_MEM) {
-			result = vmmr_region_mem_at(
-			    (vmmr_region_t *)vmo->vmo_data,
-			    VMSM_OFFSET(vmsm, addr) & PAGEMASK);
-		}
-	}
-
-	return (result);
-}
-
-static int
-vmspace_pmap_isresident(struct vmspace *vms, uintptr_t addr, uint_t *prot)
-{
-	ASSERT(MUTEX_HELD(&vms->vms_lock));
-
-	return (vms->vms_pt_ops->vpo_is_wired(vms->vms_pt_data, addr, prot));
 }
 
 uint64_t
@@ -361,7 +328,7 @@ vm_mapping_find(struct vmspace *vms, uintptr_t addr, size_t size,
 		 * promised by the bhyve logic which calls into the VM shim.
 		 * All the same, it is cheap to be paranoid.
 		 */
-		VERIFY(!vms->vms_map_changing);
+		VERIFY(!vms->vms_held);
 	} else {
 		VERIFY(MUTEX_HELD(&vms->vms_lock));
 	}
@@ -413,67 +380,38 @@ vm_mapping_remove(struct vmspace *vms, vmspace_mapping_t *vmsm)
 	list_t *ml = &vms->vms_maplist;
 
 	ASSERT(MUTEX_HELD(&vms->vms_lock));
-	ASSERT(vms->vms_map_changing);
+	ASSERT(vms->vms_held);
 
 	list_remove(ml, vmsm);
 	vm_object_release(vmsm->vmsm_object);
 	kmem_free(vmsm, sizeof (*vmsm));
 }
 
-int
-vm_fault(struct vmspace *vms, vm_offset_t off, vm_prot_t type)
+static void
+vmspace_hold_enter(vmspace_t *vms)
 {
-	const uintptr_t addr = off;
-	vmspace_mapping_t *vmsm;
-	vm_object_t *vmo;
-	uint_t prot, map_lvl;
-	pfn_t pfn;
-	uintptr_t map_addr;
-
 	mutex_enter(&vms->vms_lock);
-	if (vmspace_pmap_isresident(vms, addr, &prot) == 0) {
-		int err = 0;
+	VERIFY(!vms->vms_held);
 
-		/*
-		 * It is possible that multiple vCPUs will race to fault-in a
-		 * given address.  In such cases, the race loser(s) will
-		 * encounter the already-mapped page, needing to do nothing
-		 * more than consider it a success.
-		 *
-		 * If the fault exceeds protection, it is an obvious error.
-		 */
-		if ((prot & type) != type) {
-			err = FC_PROT;
-		}
-
-		mutex_exit(&vms->vms_lock);
-		return (err);
+	vm_client_t *vmc = list_head(&vms->vms_clients);
+	for (; vmc != NULL; vmc = list_next(&vms->vms_clients, vmc)) {
+		vmc_space_hold(vmc);
 	}
+	vms->vms_held = true;
+}
 
-	/* Try to wire up the address */
-	if ((vmsm = vm_mapping_find(vms, addr, 0, B_FALSE)) == NULL) {
-		mutex_exit(&vms->vms_lock);
-		return (FC_NOMAP);
+static void
+vmspace_hold_exit(vmspace_t *vms, bool kick_on_cpu)
+{
+	ASSERT(MUTEX_HELD(&vms->vms_lock));
+	VERIFY(vms->vms_held);
+
+	vm_client_t *vmc = list_head(&vms->vms_clients);
+	for (; vmc != NULL; vmc = list_next(&vms->vms_clients, vmc)) {
+		vmc_space_release(vmc, kick_on_cpu);
 	}
-	vmo = vmsm->vmsm_object;
-	prot = vmsm->vmsm_prot;
-
-	/* XXXJOY: punt on large pages for now */
-	pfn = vm_object_pfn(vmo, VMSM_OFFSET(vmsm, addr));
-	map_lvl = 0;
-	map_addr = P2ALIGN((uintptr_t)addr, LEVEL_SIZE(map_lvl));
-	VERIFY(pfn != PFN_INVALID);
-
-	/*
-	 * If pmap failure is to be handled, the previously acquired page locks
-	 * would need to be released.
-	 */
-	VERIFY0(vms->vms_pt_ops->vpo_map(vms->vms_pt_data, map_addr, pfn,
-	    map_lvl, prot, vmo->vmo_attr));
-	vms->vms_pt_gen++;
-
+	vms->vms_held = false;
 	mutex_exit(&vms->vms_lock);
-	return (0);
 }
 
 int
@@ -497,8 +435,7 @@ vmspace_map(struct vmspace *vms, vm_object_t *vmo, vm_ooffset_t off,
 
 	vmsm = kmem_alloc(sizeof (*vmsm), KM_SLEEP);
 
-	mutex_enter(&vms->vms_lock);
-	vms->vms_map_changing = B_TRUE;
+	vmspace_hold_enter(vms);
 	if (!vm_mapping_gap(vms, base, size)) {
 		res = ENOMEM;
 		goto out;
@@ -513,8 +450,7 @@ vmspace_map(struct vmspace *vms, vm_object_t *vmo, vm_ooffset_t off,
 		list_insert_tail(&vms->vms_maplist, vmsm);
 	}
 out:
-	vms->vms_map_changing = B_FALSE;
-	mutex_exit(&vms->vms_lock);
+	vmspace_hold_exit(vms, false);
 	if (res != 0) {
 		kmem_free(vmsm, sizeof (*vmsm));
 	}
@@ -530,13 +466,11 @@ vmspace_unmap(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 
 	ASSERT(start < end);
 
-	mutex_enter(&vms->vms_lock);
-	vms->vms_map_changing = B_TRUE;
+	vmspace_hold_enter(vms);
 	/* expect to match existing mapping exactly */
 	if ((vmsm = vm_mapping_find(vms, addr, size, B_FALSE)) == NULL ||
 	    vmsm->vmsm_addr != addr || vmsm->vmsm_len != size) {
-		vms->vms_map_changing = B_FALSE;
-		mutex_exit(&vms->vms_lock);
+		vmspace_hold_exit(vms, false);
 		return (ENOENT);
 	}
 
@@ -544,8 +478,7 @@ vmspace_unmap(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 	vms->vms_pt_gen++;
 
 	vm_mapping_remove(vms, vmsm);
-	vms->vms_map_changing = B_FALSE;
-	mutex_exit(&vms->vms_lock);
+	vmspace_hold_exit(vms, true);
 	return (0);
 }
 
@@ -572,6 +505,7 @@ vmspace_populate(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 		pfn_t pfn;
 		uintptr_t pg_size, map_addr;
 		uint_t map_lvl = 0;
+		int err;
 
 		/* XXXJOY: punt on large pages for now */
 		pfn = vm_object_pfn(vmo, VMSM_OFFSET(vmsm, pos));
@@ -579,15 +513,23 @@ vmspace_populate(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 		map_addr = P2ALIGN(pos, pg_size);
 		VERIFY(pfn != PFN_INVALID);
 
-		VERIFY0(vms->vms_pt_ops->vpo_map(vms->vms_pt_data, map_addr,
-		    pfn, map_lvl, prot, vmo->vmo_attr));
-		vms->vms_pt_gen++;
+		err = vms->vms_pt_ops->vpo_map(vms->vms_pt_data, map_addr,
+		    pfn, map_lvl, prot, vmo->vmo_attr);
+		switch (err) {
+		case 0:
+			vms->vms_pt_gen++;
+			/* FALLTHROUGH */
+		case EEXIST:
+			/* It is possible to race on mapping in a page */
+			break;
+		default:
+			panic("unexpected NPT map error %d", err);
+		}
 
 		pos += pg_size;
 	}
 
 	mutex_exit(&vms->vms_lock);
-
 	return (0);
 }
 
@@ -615,10 +557,14 @@ vmspace_client_alloc(vmspace_t *vms)
 void
 vmspace_client_destroy(vmspace_t *vms, vm_client_t *vmc)
 {
+	mutex_enter(&vms->vms_lock);
+
+	mutex_enter(&vmc->vmc_lock);
 	VERIFY3P(vms, ==, vmc->vmc_space);
 	VERIFY(list_is_empty(&vmc->vmc_held_pages));
+	VERIFY0(vmc->vmc_state & (VCS_ACTIVE | VCS_ON_CPU));
+	mutex_exit(&vmc->vmc_lock);
 
-	mutex_enter(&vms->vms_lock);
 	list_remove(&vms->vms_clients, vmc);
 	mutex_exit(&vms->vms_lock);
 
@@ -667,38 +613,6 @@ vmc_deactivate(vm_client_t *vmc)
 	mutex_exit(&vmc->vmc_lock);
 }
 
-vm_page_t *
-vmc_hold(vm_client_t *vmc, uintptr_t gpa, int prot)
-{
-	vmspace_t *vms = vmc->vmc_space;
-	vmspace_mapping_t *vmsm;
-	vm_object_t *vmo;
-	vm_page_t *vmp;
-
-	ASSERT0(gpa & PAGEOFFSET);
-	ASSERT((prot & (PROT_READ | PROT_WRITE)) != PROT_NONE);
-
-	vmp = kmem_alloc(sizeof (vm_page_t), KM_SLEEP);
-	vmc_activate(vmc);
-
-	if ((vmsm = vm_mapping_find(vms, gpa, PAGESIZE, B_TRUE)) == NULL ||
-	    (prot & ~vmsm->vmsm_prot) != 0) {
-		vmc_deactivate(vmc);
-		kmem_free(vmp, sizeof (vm_page_t));
-		return (NULL);
-	}
-	vmo = vmsm->vmsm_object;
-
-	vmp->vmp_client = vmc;
-	vmp->vmp_gpa = gpa;
-	vmp->vmp_pfn = vm_object_pfn(vmo, VMSM_OFFSET(vmsm, gpa));
-	vmp->vmp_prot = prot;
-	list_insert_tail(&vmc->vmc_held_pages, vmp);
-	vmc_deactivate(vmc);
-
-	return (vmp);
-}
-
 /*
  * Indicate that a CPU will be utilizing the nested page tables through this VM
  * client.  Interrpts (and/or the GIF) are expected to be disabled when calling
@@ -743,6 +657,146 @@ vmc_table_exit(vm_client_t *vmc)
 	}
 
 	mutex_exit(&vmc->vmc_lock);
+}
+
+static void
+vmc_space_hold(vm_client_t *vmc)
+{
+	mutex_enter(&vmc->vmc_lock);
+	VERIFY0(vmc->vmc_state & VCS_HOLD);
+
+	/*
+	 * Because vmc_table_enter() alters vmc_state from a context where
+	 * interrupts are disabled, it cannot pay heed to vmc_lock, so setting
+	 * VMC_HOLD must be done atomically here.
+	 */
+	atomic_or_uint(&vmc->vmc_state, VCS_HOLD);
+
+	/* Wait for client to go inactive */
+	while ((vmc->vmc_state & VCS_ACTIVE) != 0) {
+		cv_wait(&vmc->vmc_cv, &vmc->vmc_lock);
+	}
+	mutex_exit(&vmc->vmc_lock);
+}
+
+static void
+vmc_space_release(vm_client_t *vmc, bool kick_on_cpu)
+{
+	mutex_enter(&vmc->vmc_lock);
+	VERIFY(vmc->vmc_state & VCS_HOLD);
+
+	if (kick_on_cpu && (vmc->vmc_state & VCS_ON_CPU) != 0) {
+		poke_cpu(vmc->vmc_cpu_active);
+
+		while ((vmc->vmc_state & VCS_ON_CPU) != 0) {
+			cv_wait(&vmc->vmc_cv, &vmc->vmc_lock);
+		}
+	}
+
+	/*
+	 * Because vmc_table_enter() alters vmc_state from a context where
+	 * interrupts are disabled, it cannot pay heed to vmc_lock, so clearing
+	 * VMC_HOLD must be done atomically here.
+	 */
+	atomic_and_uint(&vmc->vmc_state, ~VCS_HOLD);
+	mutex_exit(&vmc->vmc_lock);
+}
+
+vm_page_t *
+vmc_hold(vm_client_t *vmc, uintptr_t gpa, int prot)
+{
+	vmspace_t *vms = vmc->vmc_space;
+	vmspace_mapping_t *vmsm;
+	vm_object_t *vmo;
+	vm_page_t *vmp;
+
+	ASSERT0(gpa & PAGEOFFSET);
+	ASSERT((prot & (PROT_READ | PROT_WRITE)) != PROT_NONE);
+
+	vmp = kmem_alloc(sizeof (vm_page_t), KM_SLEEP);
+	vmc_activate(vmc);
+
+	if ((vmsm = vm_mapping_find(vms, gpa, PAGESIZE, B_TRUE)) == NULL ||
+	    (prot & ~vmsm->vmsm_prot) != 0) {
+		vmc_deactivate(vmc);
+		kmem_free(vmp, sizeof (vm_page_t));
+		return (NULL);
+	}
+	vmo = vmsm->vmsm_object;
+
+	vmp->vmp_client = vmc;
+	vmp->vmp_gpa = gpa;
+	vmp->vmp_pfn = vm_object_pfn(vmo, VMSM_OFFSET(vmsm, gpa));
+	vmp->vmp_prot = prot;
+	list_insert_tail(&vmc->vmc_held_pages, vmp);
+	vmc_deactivate(vmc);
+
+	return (vmp);
+}
+
+int
+vmc_fault(vm_client_t *vmc, uintptr_t gpa, int type)
+{
+	vmspace_t *vms = vmc->vmc_space;
+	vmspace_mapping_t *vmsm;
+	vm_object_t *vmo;
+	uint_t prot, map_lvl;
+	pfn_t pfn;
+	uintptr_t map_addr;
+	int err;
+
+	vmc_activate(vmc);
+	if (vms->vms_pt_ops->vpo_is_wired(vms->vms_pt_data, gpa, &prot) == 0) {
+		/*
+		 * It is possible that multiple vCPUs will race to fault-in a
+		 * given address.  In such cases, the race loser(s) will
+		 * encounter the already-mapped page, needing to do nothing
+		 * more than consider it a success.
+		 *
+		 * If the fault exceeds protection, it is an obvious error.
+		 */
+		if ((prot & type) != type) {
+			err = FC_PROT;
+		} else {
+			err = 0;
+		}
+		vmc_deactivate(vmc);
+		return (err);
+	}
+
+	/* Try to wire up the address */
+	if ((vmsm = vm_mapping_find(vms, gpa, 0, B_FALSE)) == NULL) {
+		vmc_deactivate(vmc);
+		return (FC_NOMAP);
+	}
+	vmo = vmsm->vmsm_object;
+	prot = vmsm->vmsm_prot;
+
+	/* XXXJOY: punt on large pages for now */
+	pfn = vm_object_pfn(vmo, VMSM_OFFSET(vmsm, gpa));
+	map_lvl = 0;
+	map_addr = P2ALIGN((uintptr_t)gpa, LEVEL_SIZE(map_lvl));
+	VERIFY(pfn != PFN_INVALID);
+
+	/*
+	 * If pmap failure is to be handled, the previously acquired page locks
+	 * would need to be released.
+	 */
+	err = vms->vms_pt_ops->vpo_map(vms->vms_pt_data, map_addr, pfn,
+	    map_lvl, prot, vmo->vmo_attr);
+	switch (err) {
+	case 0:
+		vms->vms_pt_gen++;
+		/* FALLTHROUGH */
+	case EEXIST:
+		/* It is possible to race on mapping in a page */
+		break;
+	default:
+		panic("unexpected NPT map error %d", err);
+	}
+	vmc_deactivate(vmc);
+
+	return (0);
 }
 
 

@@ -242,6 +242,11 @@ rvi_map(void *arg, uint64_t va, pfn_t pfn, uint_t lvl, uint_t prot,
 		if (!RVI_MAPS_PAGE(pte, lvl)) {
 			panic("unexpected PT link @ %08lx in %p", va, pt);
 		} else {
+			if (RVI_PTE_PFN(pte) == pfn &&
+			    RVI_PTE_PROT(pte) == prot) {
+				mutex_exit(RVI_LOCK(rmap));
+				return (EEXIST);
+			}
 			panic("unexpected page mapped @ %08lx in %p", va, pt);
 		}
 	}

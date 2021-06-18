@@ -1732,7 +1732,7 @@ vmm_lease_break_locked(vmm_softc_t *sc, vmm_lease_t *lease)
 
 	list_remove(&sc->vmm_lease_list, lease);
 	vmm_read_unlock(sc);
-	vmspace_client_destroy(vm_get_vmspace(sc->vmm_vm), lease->vml_vmclient);
+	vmc_destroy(lease->vml_vmclient);
 	kmem_free(lease, sizeof (*lease));
 }
 

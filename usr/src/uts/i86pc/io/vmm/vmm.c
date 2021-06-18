@@ -310,7 +310,7 @@ vcpu_cleanup(struct vm *vm, int i, bool destroy)
 		fpu_save_area_free(vcpu->guestfpu);
 		vie_free(vcpu->vie_ctx);
 		vcpu->vie_ctx = NULL;
-		vmspace_client_destroy(vm->vmspace, vcpu->vmclient);
+		vmc_destroy(vcpu->vmclient);
 		vcpu->vmclient = NULL;
 	}
 }
@@ -992,7 +992,7 @@ vm_iommu_modify(struct vm *vm, bool map)
 			gpa += PAGE_SIZE;
 		}
 	}
-	vmspace_client_destroy(vm->vmspace, vmc);
+	vmc_destroy(vmc);
 
 	/*
 	 * Invalidate the cached translations associated with the domain

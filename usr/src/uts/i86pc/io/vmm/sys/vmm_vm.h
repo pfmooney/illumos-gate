@@ -78,7 +78,6 @@ int vmspace_map(struct vmspace *, vm_object_t *, vm_ooffset_t, vm_offset_t,
 int vmspace_unmap(struct vmspace *, vm_offset_t, vm_offset_t);
 int vmspace_populate(struct vmspace *, vm_offset_t start, vm_offset_t end);
 vm_client_t *vmspace_client_alloc(vmspace_t *);
-void vmspace_client_destroy(vmspace_t *, vm_client_t *);
 uint64_t vmspace_table_root(vmspace_t *);
 uint64_t vmspace_table_gen(vmspace_t *);
 
@@ -90,6 +89,8 @@ vm_page_t *vmc_hold(vm_client_t *, uintptr_t, int);
 uint64_t vmc_table_enter(vm_client_t *);
 void vmc_table_exit(vm_client_t *);
 int vmc_fault(vm_client_t *, uintptr_t, int);
+vm_client_t *vmc_clone(vm_client_t *);
+void vmc_destroy(vm_client_t *);
 
 /* vm_object_t operations */
 vm_object_t *vm_object_mem_allocate(size_t, bool);

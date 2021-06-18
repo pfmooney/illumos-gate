@@ -554,23 +554,6 @@ vmspace_client_alloc(vmspace_t *vms)
 	return (vmc);
 }
 
-void
-vmspace_client_destroy(vmspace_t *vms, vm_client_t *vmc)
-{
-	mutex_enter(&vms->vms_lock);
-
-	mutex_enter(&vmc->vmc_lock);
-	VERIFY3P(vms, ==, vmc->vmc_space);
-	VERIFY(list_is_empty(&vmc->vmc_held_pages));
-	VERIFY0(vmc->vmc_state & (VCS_ACTIVE | VCS_ON_CPU));
-	mutex_exit(&vmc->vmc_lock);
-
-	list_remove(&vms->vms_clients, vmc);
-	mutex_exit(&vms->vms_lock);
-
-	kmem_free(vmc, sizeof (vm_client_t));
-}
-
 uint64_t
 vmspace_table_root(vmspace_t *vms)
 {
@@ -795,6 +778,32 @@ vmc_fault(vm_client_t *vmc, uintptr_t gpa, int type)
 	return (0);
 }
 
+vm_client_t *
+vmc_clone(vm_client_t *vmc)
+{
+	vmspace_t *vms = vmc->vmc_space;
+
+	return (vmspace_client_alloc(vms));
+}
+
+void
+vmc_destroy(vm_client_t *vmc)
+{
+	vmspace_t *vms = vmc->vmc_space;
+
+	mutex_enter(&vms->vms_lock);
+
+	mutex_enter(&vmc->vmc_lock);
+	VERIFY(list_is_empty(&vmc->vmc_held_pages));
+	VERIFY0(vmc->vmc_state & (VCS_ACTIVE | VCS_ON_CPU));
+	mutex_exit(&vmc->vmc_lock);
+
+	list_remove(&vms->vms_clients, vmc);
+	mutex_exit(&vms->vms_lock);
+
+	kmem_free(vmc, sizeof (vm_client_t));
+}
+
 
 static __inline void *
 vmp_ptr(const vm_page_t *vmp)
@@ -884,9 +893,10 @@ vm_segmap_obj(struct vm *vm, int segid, off_t segoff, off_t len,
 	if (err == 0) {
 		segvmm_crargs_t svma;
 
-		svma.obj = vmo;
-		svma.offset = segoff;
 		svma.prot = prot;
+		svma.offset = segoff;
+		svma.vmo = vmo;
+		svma.vmc = NULL;
 
 		err = as_map(as, *addrp, (size_t)len, segvmm_create, &svma);
 	}
@@ -900,12 +910,12 @@ vm_segmap_space(struct vm *vm, off_t off, struct as *as, caddr_t *addrp,
     off_t len, uint_t prot, uint_t maxprot, uint_t flags)
 {
 
-	const uintptr_t addr = (uintptr_t)off;
+	const uintptr_t gpa = (uintptr_t)off;
 	const size_t size = (uintptr_t)len;
 	int err;
 
 	if (off < 0 || len <= 0 ||
-	    (addr & PAGEOFFSET) != 0 || (size & PAGEOFFSET) != 0) {
+	    (gpa & PAGEOFFSET) != 0 || (size & PAGEOFFSET) != 0) {
 		return (EINVAL);
 	}
 
@@ -921,9 +931,10 @@ vm_segmap_space(struct vm *vm, off_t off, struct as *as, caddr_t *addrp,
 	if (err == 0) {
 		segvmm_crargs_t svma;
 
-		/* svma.obj = vmo; */
-		/* svma.offset = mapoff; */
 		svma.prot = prot;
+		svma.offset = gpa;
+		svma.vmo = NULL;
+		svma.vmc = vmspace_client_alloc(vm_get_vmspace(vm));
 
 		err = as_map(as, *addrp, len, segvmm_create, &svma);
 	}

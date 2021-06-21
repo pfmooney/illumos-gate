@@ -81,7 +81,7 @@ CTASSERT(EPT_X == PROT_EXEC);
  * - INVEPT operations (all types)
  * - INVVPID operations (single-context only)
  */
-#define EPT_CAPS_REQUIRED			\
+#define	EPT_CAPS_REQUIRED			\
 	(IA32_VMX_EPT_VPID_PWL4 |		\
 	IA32_VMX_EPT_VPID_TYPE_WB |		\
 	IA32_VMX_EPT_VPID_HW_AD |		\

@@ -184,7 +184,7 @@ vm_object_pager_mmio(vm_object_t *vmo, uintptr_t off)
 
 	ASSERT3U(vmo->vmo_type, ==, VMOT_MMIO);
 	ASSERT3P(vmo->vmo_data, !=, NULL);
-	ASSERT3U(off, < , vmo->vmo_size);
+	ASSERT3U(off, <, vmo->vmo_size);
 
 	pfn = ((uintptr_t)vmo->vmo_data + (off & PAGEMASK)) >> PAGESHIFT;
 
@@ -507,7 +507,7 @@ vmspace_populate(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 		uint_t map_lvl = 0;
 		int err;
 
-		/* XXXJOY: punt on large pages for now */
+		/* TODO: deal with large pages */
 		pfn = vm_object_pfn(vmo, VMSM_OFFSET(vmsm, pos));
 		pg_size = LEVEL_SIZE(map_lvl);
 		map_addr = P2ALIGN(pos, pg_size);
@@ -756,7 +756,7 @@ vmc_fault(vm_client_t *vmc, uintptr_t gpa, int type)
 	vmo = vmsm->vmsm_object;
 	prot = vmsm->vmsm_prot;
 
-	/* XXXJOY: punt on large pages for now */
+	/* TODO: deal with large pages */
 	pfn = vm_object_pfn(vmo, VMSM_OFFSET(vmsm, gpa));
 	map_lvl = 0;
 	map_addr = P2ALIGN((uintptr_t)gpa, LEVEL_SIZE(map_lvl));
@@ -925,12 +925,6 @@ vm_segmap_space(struct vm *vm, off_t off, struct as *as, caddr_t *addrp,
 	if ((prot & PROT_USER) == 0) {
 		return (ENOTSUP);
 	}
-
-	/* TODO: actually wire this up */
-	/* if ((prot & ~(vmsm->vmsm_prot | PROT_USER)) != 0) { */
-	/* 	mutex_exit(&vms->vms_lock); */
-	/* 	return (EACCES); */
-	/* } */
 
 	as_rangelock(as);
 

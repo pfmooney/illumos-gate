@@ -2803,7 +2803,6 @@ vmx_run(void *arg, int vcpu, uint64_t rip)
 
 		vmx_dr_leave_guest(vmxctx);
 		vcpu_ustate_change(vm, vcpu, VU_EMU_KERN);
-		vmc_table_exit(vmc);
 
 		vmx->vmcs_state[vcpu] |= VS_LAUNCHED;
 		smt_release();

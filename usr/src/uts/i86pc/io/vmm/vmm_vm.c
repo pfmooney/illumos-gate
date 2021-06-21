@@ -873,6 +873,9 @@ vm_segmap_obj(struct vm *vm, int segid, off_t segoff, off_t len,
 	    (segoff & PAGEOFFSET) != 0 || (len & PAGEOFFSET) != 0) {
 		return (EINVAL);
 	}
+	if ((prot & PROT_USER) == 0) {
+		return (ENOTSUP);
+	}
 	err = vm_get_memseg(vm, segid, NULL, NULL, &vmo);
 	if (err != 0) {
 		return (err);
@@ -917,6 +920,9 @@ vm_segmap_space(struct vm *vm, off_t off, struct as *as, caddr_t *addrp,
 	if (off < 0 || len <= 0 ||
 	    (gpa & PAGEOFFSET) != 0 || (size & PAGEOFFSET) != 0) {
 		return (EINVAL);
+	}
+	if ((prot & PROT_USER) == 0) {
+		return (ENOTSUP);
 	}
 
 	/* TODO: actually wire this up */

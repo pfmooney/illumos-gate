@@ -118,11 +118,12 @@ segvmm_create(struct seg **segpp, void *argsp)
 
 	VERIFY((cra->vmo == NULL && cra->vmc != NULL) ||
 	    (cra->vmo != NULL && cra->vmc == NULL));
+	VERIFY(cra->prot & PROT_USER);
 
 	data = kmem_zalloc(sizeof (*data), KM_SLEEP);
 	rw_init(&data->svmd_lock, NULL, RW_DEFAULT, NULL);
 	data->svmd_off = cra->offset;
-	data->svmd_prot = cra->prot;
+	data->svmd_prot = cra->prot & ~PROT_USER;
 
 	if (cra->vmo != NULL) {
 		data->svmd_vmo = cra->vmo;
@@ -213,6 +214,7 @@ segvmm_fault_obj(struct hat *hat, struct seg *seg, uintptr_t va, size_t len)
 	segvmm_data_t *svmd = seg->s_data;
 	const uintptr_t end = va + len;
 	const int prot = svmd->svmd_prot;
+	const int uprot = prot | PROT_USER;
 	vm_object_t *vmo = svmd->svmd_vmo;
 
 	ASSERT(vmo != NULL);
@@ -228,7 +230,7 @@ segvmm_fault_obj(struct hat *hat, struct seg *seg, uintptr_t va, size_t len)
 		}
 
 		/* Ignore any large-page possibilities for now */
-		hat_devload(hat, (caddr_t)va, PAGESIZE, pfn, prot, HAT_LOAD);
+		hat_devload(hat, (caddr_t)va, PAGESIZE, pfn, uprot, HAT_LOAD);
 		va += PAGESIZE;
 		off += PAGESIZE;
 	} while (va < end);
@@ -242,6 +244,7 @@ segvmm_fault_space(struct hat *hat, struct seg *seg, uintptr_t va, size_t len)
 	segvmm_data_t *svmd = seg->s_data;
 	const uintptr_t end = va + len;
 	const int prot = svmd->svmd_prot;
+	const int uprot = prot | PROT_USER;
 	vm_client_t *vmc = svmd->svmd_vmc;
 
 	ASSERT(vmc != NULL);
@@ -262,7 +265,7 @@ segvmm_fault_space(struct hat *hat, struct seg *seg, uintptr_t va, size_t len)
 		ASSERT3U(pfn, !=, PFN_INVALID);
 
 		/* Ignore any large-page possibilities for now */
-		hat_devload(hat, (caddr_t)va, PAGESIZE, pfn, prot, HAT_LOAD);
+		hat_devload(hat, (caddr_t)va, PAGESIZE, pfn, uprot, HAT_LOAD);
 		va += PAGESIZE;
 		off += PAGESIZE;
 	} while (va < end);

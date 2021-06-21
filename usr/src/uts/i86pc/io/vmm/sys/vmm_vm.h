@@ -35,11 +35,6 @@
 vm_paddr_t vtophys(void *);
 void invalidate_cache_all(void);
 
-/*
- * Type definitions used in the hypervisor.
- */
-typedef uchar_t vm_prot_t;
-
 struct vmspace;
 struct vm_object;
 struct vm_page;
@@ -73,16 +68,14 @@ extern struct vmm_pt_ops rvi_ops;
 /* vmspace_t operations */
 struct vmspace *vmspace_alloc(size_t, struct vmm_pt_ops *);
 void vmspace_destroy(struct vmspace *);
-int vmspace_map(struct vmspace *, vm_object_t *, vm_ooffset_t, vm_offset_t,
-    vm_size_t, vm_prot_t);
-int vmspace_unmap(struct vmspace *, vm_offset_t, vm_offset_t);
-int vmspace_populate(struct vmspace *, vm_offset_t start, vm_offset_t end);
+int vmspace_map(struct vmspace *, vm_object_t *, uintptr_t, uintptr_t, size_t,
+    uint8_t);
+int vmspace_unmap(struct vmspace *, uintptr_t, uintptr_t);
+int vmspace_populate(struct vmspace *, uintptr_t, uintptr_t);
 vm_client_t *vmspace_client_alloc(vmspace_t *);
 uint64_t vmspace_table_root(vmspace_t *);
 uint64_t vmspace_table_gen(vmspace_t *);
-
 uint64_t vmspace_resident_count(struct vmspace *);
-
 
 /* vm_client_t operations */
 vm_page_t *vmc_hold(vm_client_t *, uintptr_t, int);
@@ -97,8 +90,8 @@ vm_object_t *vm_object_mem_allocate(size_t, bool);
 void vm_object_reference(vm_object_t *);
 void vm_object_release(vm_object_t *);
 pfn_t vm_object_pfn(vm_object_t *, uintptr_t);
-struct vm_object *vmm_mmio_alloc(struct vmspace *, vm_paddr_t gpa, size_t len,
-    vm_paddr_t hpa);
+struct vm_object *vmm_mmio_alloc(struct vmspace *, uintptr_t, size_t,
+    uintptr_t);
 
 /* vm_page_t operations */
 const void *vmp_get_readable(const vm_page_t *);

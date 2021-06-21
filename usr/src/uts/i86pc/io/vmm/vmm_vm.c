@@ -240,8 +240,8 @@ vm_object_mmio_allocate(size_t size, uintptr_t hpa)
 }
 
 vm_object_t *
-vmm_mmio_alloc(struct vmspace *vmspace, vm_paddr_t gpa, size_t len,
-    vm_paddr_t hpa)
+vmm_mmio_alloc(struct vmspace *vmspace, uintptr_t gpa, size_t len,
+    uintptr_t hpa)
 {
 	int error;
 	vm_object_t *obj;
@@ -415,37 +415,34 @@ vmspace_hold_exit(vmspace_t *vms, bool kick_on_cpu)
 }
 
 int
-vmspace_map(struct vmspace *vms, vm_object_t *vmo, vm_ooffset_t off,
-    vm_offset_t addr, vm_size_t len, vm_prot_t prot)
+vmspace_map(struct vmspace *vms, vm_object_t *vmo, uintptr_t obj_off,
+    uintptr_t addr, size_t len, uint8_t prot)
 {
-	const size_t size = (size_t)len;
-	const uintptr_t uoff = (uintptr_t)off;
-	uintptr_t base = addr;
 	vmspace_mapping_t *vmsm;
 	int res = 0;
 
-	if (size == 0 || off < 0 ||
-	    uoff >= (uoff + size) || vmo->vmo_size < (uoff + size)) {
+	if (len == 0 || (addr + len) < addr ||
+	    obj_off >= (obj_off + len) || vmo->vmo_size < (obj_off + len)) {
 		return (EINVAL);
 	}
 
-	if (addr >= vms->vms_size) {
+	if ((addr + len) >= vms->vms_size) {
 		return (ENOMEM);
 	}
 
 	vmsm = kmem_alloc(sizeof (*vmsm), KM_SLEEP);
 
 	vmspace_hold_enter(vms);
-	if (!vm_mapping_gap(vms, base, size)) {
+	if (!vm_mapping_gap(vms, addr, len)) {
 		res = ENOMEM;
 		goto out;
 	}
 
 	if (res == 0) {
 		vmsm->vmsm_object = vmo;
-		vmsm->vmsm_addr = base;
+		vmsm->vmsm_addr = addr;
 		vmsm->vmsm_len = len;
-		vmsm->vmsm_offset = (off_t)uoff;
+		vmsm->vmsm_offset = (off_t)obj_off;
 		vmsm->vmsm_prot = prot;
 		list_insert_tail(&vms->vms_maplist, vmsm);
 	}
@@ -458,9 +455,8 @@ out:
 }
 
 int
-vmspace_unmap(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
+vmspace_unmap(struct vmspace *vms, uintptr_t start, uintptr_t end)
 {
-	const uintptr_t addr = start;
 	const size_t size = (size_t)(end - start);
 	vmspace_mapping_t *vmsm;
 
@@ -468,13 +464,13 @@ vmspace_unmap(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 
 	vmspace_hold_enter(vms);
 	/* expect to match existing mapping exactly */
-	if ((vmsm = vm_mapping_find(vms, addr, size, B_FALSE)) == NULL ||
-	    vmsm->vmsm_addr != addr || vmsm->vmsm_len != size) {
+	if ((vmsm = vm_mapping_find(vms, start, size, B_FALSE)) == NULL ||
+	    vmsm->vmsm_addr != start || vmsm->vmsm_len != size) {
 		vmspace_hold_exit(vms, false);
 		return (ENOENT);
 	}
 
-	(void) vms->vms_pt_ops->vpo_unmap(vms->vms_pt_data, addr, end);
+	(void) vms->vms_pt_ops->vpo_unmap(vms->vms_pt_data, start, end);
 	vms->vms_pt_gen++;
 
 	vm_mapping_remove(vms, vmsm);
@@ -483,9 +479,8 @@ vmspace_unmap(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 }
 
 int
-vmspace_populate(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
+vmspace_populate(struct vmspace *vms, uintptr_t start, uintptr_t end)
 {
-	const uintptr_t addr = start;
 	const size_t size = end - start;
 	vmspace_mapping_t *vmsm;
 	vm_object_t *vmo;
@@ -494,14 +489,14 @@ vmspace_populate(struct vmspace *vms, vm_offset_t start, vm_offset_t end)
 	mutex_enter(&vms->vms_lock);
 
 	/* For the time being, only exact-match mappings are expected */
-	if ((vmsm = vm_mapping_find(vms, addr, size, B_FALSE)) == NULL) {
+	if ((vmsm = vm_mapping_find(vms, start, size, B_FALSE)) == NULL) {
 		mutex_exit(&vms->vms_lock);
 		return (FC_NOMAP);
 	}
 	vmo = vmsm->vmsm_object;
 	prot = vmsm->vmsm_prot;
 
-	for (uintptr_t pos = addr; pos < end; ) {
+	for (uintptr_t pos = start; pos < end; ) {
 		pfn_t pfn;
 		uintptr_t pg_size, map_addr;
 		uint_t map_lvl = 0;

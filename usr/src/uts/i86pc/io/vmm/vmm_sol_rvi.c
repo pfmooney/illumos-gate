@@ -22,6 +22,7 @@
 #include <sys/mach_mmu.h>
 #include <sys/mman.h>
 #include <sys/x86_archext.h>
+#include <vm/hat_pte.h>
 
 #include <sys/gipt.h>
 #include <sys/vmm_vm.h>

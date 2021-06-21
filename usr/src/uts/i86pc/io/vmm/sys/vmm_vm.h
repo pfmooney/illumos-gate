@@ -18,9 +18,7 @@
 #ifndef	_VMM_VM_H
 #define	_VMM_VM_H
 
-#include <sys/list.h>
 #include <sys/types.h>
-#include <vm/hat_pte.h>
 
 struct vmspace;
 struct vm_object;

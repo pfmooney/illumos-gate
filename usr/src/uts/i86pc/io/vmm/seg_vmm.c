@@ -268,6 +268,8 @@ segvmm_fault_space(struct hat *hat, struct seg *seg, uintptr_t va, size_t len)
 		hat_devload(hat, (caddr_t)va, PAGESIZE, pfn, uprot, HAT_LOAD);
 		va += PAGESIZE;
 		off += PAGESIZE;
+
+		vmp_release(vmp);
 	} while (va < end);
 
 	return (0);

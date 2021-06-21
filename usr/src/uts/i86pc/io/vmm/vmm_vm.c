@@ -749,7 +749,7 @@ vmc_fault(vm_client_t *vmc, uintptr_t gpa, int type)
 	}
 
 	/* Try to wire up the address */
-	if ((vmsm = vm_mapping_find(vms, gpa, 0, B_FALSE)) == NULL) {
+	if ((vmsm = vm_mapping_find(vms, gpa, 0, B_TRUE)) == NULL) {
 		vmc_deactivate(vmc);
 		return (FC_NOMAP);
 	}

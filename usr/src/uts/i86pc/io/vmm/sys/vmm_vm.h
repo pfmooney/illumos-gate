@@ -22,19 +22,6 @@
 #include <sys/types.h>
 #include <vm/hat_pte.h>
 
-/*
- * The VM_MAXUSER_ADDRESS determines the upper size limit of a vmspace.
- * This value is sized well below the host userlimit, halving the
- * available space below the VA hole to avoid Intel EPT limits and
- * leave room available in the usable VA range for other mmap tricks.
- */
-#define	VM_MAXUSER_ADDRESS	0x00003ffffffffffful
-
-/* Glue functions */
-
-vm_paddr_t vtophys(void *);
-void invalidate_cache_all(void);
-
 struct vmspace;
 struct vm_object;
 struct vm_page;
@@ -44,12 +31,6 @@ typedef struct vmspace vmspace_t;
 typedef struct vm_client vm_client_t;
 typedef struct vm_page vm_page_t;
 typedef struct vm_object vm_object_t;
-
-struct vm;
-int vm_segmap_obj(struct vm *, int, off_t, off_t, struct as *, caddr_t *,
-    uint_t, uint_t, uint_t);
-int vm_segmap_space(struct vm *, off_t, struct as *, caddr_t *, off_t, uint_t,
-    uint_t, uint_t);
 
 struct vmm_pt_ops {
 	int (*vpo_init)();
@@ -100,5 +81,24 @@ pfn_t vmp_get_pfn(const vm_page_t *);
 vm_page_t *vmp_chain(vm_page_t *, vm_page_t *);
 vm_page_t *vmp_next(const vm_page_t *);
 void vmp_release(vm_page_t *);
+
+/* seg_vmm mapping */
+struct vm;
+int vm_segmap_obj(struct vm *, int, off_t, off_t, struct as *, caddr_t *,
+    uint_t, uint_t, uint_t);
+int vm_segmap_space(struct vm *, off_t, struct as *, caddr_t *, off_t, uint_t,
+    uint_t, uint_t);
+
+/* Glue functions */
+vm_paddr_t vtophys(void *);
+void invalidate_cache_all(void);
+
+/*
+ * The VM_MAXUSER_ADDRESS determines the upper size limit of a vmspace.
+ * This value is sized well below the host userlimit, halving the
+ * available space below the VA hole to avoid Intel EPT limits and
+ * leave room available in the usable VA range for other mmap tricks.
+ */
+#define	VM_MAXUSER_ADDRESS	0x00003ffffffffffful
 
 #endif /* _VMM_VM_H */

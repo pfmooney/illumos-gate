@@ -3439,7 +3439,7 @@ vm_copy_setup(struct vm *vm, int vcpuid, struct vm_guest_paging *paging,
 		vm_page_t *vmp;
 		caddr_t hva;
 
-		vmp = vmc_hold(vmc, copyinfo[idx].gpa, prot);
+		vmp = vmc_hold(vmc, copyinfo[idx].gpa & PAGEMASK, prot);
 		if (vmp == NULL) {
 			break;
 		}

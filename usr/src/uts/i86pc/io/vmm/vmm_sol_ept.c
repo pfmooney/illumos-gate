@@ -77,14 +77,12 @@ CTASSERT(EPT_X == PROT_EXEC);
  * Cover the EPT capabilities used by bhyve at present:
  * - 4-level page walks
  * - write-back memory type
- * - hardware accessed/dirty tracking
  * - INVEPT operations (all types)
  * - INVVPID operations (single-context only)
  */
 #define	EPT_CAPS_REQUIRED			\
 	(IA32_VMX_EPT_VPID_PWL4 |		\
 	IA32_VMX_EPT_VPID_TYPE_WB |		\
-	IA32_VMX_EPT_VPID_HW_AD |		\
 	IA32_VMX_EPT_VPID_INVEPT |		\
 	IA32_VMX_EPT_VPID_INVEPT_SINGLE |	\
 	IA32_VMX_EPT_VPID_INVEPT_ALL |		\
@@ -98,6 +96,11 @@ ept_init()
 	if ((caps & EPT_CAPS_REQUIRED) != EPT_CAPS_REQUIRED) {
 		return (EINVAL);
 	}
+
+	/*
+	 * TODO: Properly handle when IA32_VMX_EPT_VPID_HW_AD is missing and the
+	 * hypervisor intends to utilize dirty page tracking.
+	 */
 
 	return (0);
 }

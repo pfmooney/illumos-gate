@@ -544,6 +544,7 @@ vmspace_client_alloc(vmspace_t *vms)
 	mutex_init(&vmc->vmc_lock, NULL, MUTEX_DRIVER, NULL);
 	cv_init(&vmc->vmc_cv, NULL, CV_DRIVER, NULL);
 	vmc->vmc_state = VCS_IDLE;
+	vmc->vmc_cpu_active = -1;
 	list_create(&vmc->vmc_held_pages, sizeof (vm_page_t),
 	    offsetof(vm_page_t, vmp_node));
 

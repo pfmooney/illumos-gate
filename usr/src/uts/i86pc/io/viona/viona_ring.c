@@ -81,17 +81,100 @@
 	P2ROUNDUP(LEGACY_USED_SZ(qsz), LEGACY_VQ_ALIGN))
 #define	LEGACY_VQ_PAGES(qsz)	(LEGACY_VQ_SIZE(qsz) / PAGESIZE)
 
+struct vq_held_region {
+	struct iovec	*vhr_iov;
+	vmm_page_t	*vhr_head;
+	vmm_page_t	*vhr_tail;
+	uint_t		vhr_niov;
+	uint_t		vhr_idx;
+};
+typedef struct vq_held_region vq_held_region_t;
+
 static boolean_t viona_ring_map(viona_vring_t *);
 static void viona_ring_unmap(viona_vring_t *);
 static kthread_t *viona_create_worker(viona_vring_t *);
 
-static void *
-viona_hold_page(viona_vring_t *ring, uint64_t gpa)
+static vmm_page_t *
+vq_page_hold(viona_vring_t *ring, uint64_t gpa, bool writable)
 {
 	ASSERT3P(ring->vr_lease, !=, NULL);
-	ASSERT3U(gpa & PAGEOFFSET, ==, 0);
 
-	return (vmm_drv_gpa2kva(ring->vr_lease, gpa, PAGESIZE));
+	int prot = PROT_READ;
+	if (writable) {
+		prot |= PROT_WRITE;
+	}
+
+	return (vmm_drv_page_hold(ring->vr_lease, gpa, prot));
+}
+
+static void
+vq_region_discard(vq_held_region_t *region)
+{
+	if (region->vhr_head != NULL) {
+		vmm_drv_page_release_chain(region->vhr_head);
+	}
+	bzero(region, sizeof (*region));
+}
+
+static int
+vq_region_hold(viona_vring_t *ring, uint64_t gpa, uint32_t len,
+    bool writable, vq_held_region_t *region)
+{
+	const uint32_t front_offset = gpa & PAGEOFFSET;
+	const uint32_t front_len = MIN(len, PAGESIZE - front_offset);
+	uint_t pages = 1;
+	vmm_page_t *vmp;
+	caddr_t buf;
+
+	ASSERT3U(region->vhr_idx, <, region->vhr_niov);
+
+	if (front_len < len) {
+		pages += P2ROUNDUP((uint64_t)(len - front_len),
+		    PAGESIZE) / PAGESIZE;
+	}
+	if (pages > (region->vhr_niov - region->vhr_idx)) {
+		return (E2BIG);
+	}
+
+	vmp = vq_page_hold(ring, gpa & PAGEMASK, writable);
+	if (vmp == NULL) {
+		return (EFAULT);
+	}
+	buf = (caddr_t)vmm_drv_page_readable(vmp);
+
+	region->vhr_iov[region->vhr_idx].iov_base = buf + front_offset;
+	region->vhr_iov[region->vhr_idx].iov_len = front_len;
+	region->vhr_idx++;
+	gpa += front_len;
+	len -= front_len;
+	if (region->vhr_head == NULL) {
+		region->vhr_head = vmp;
+		region->vhr_tail = vmp;
+	} else {
+		vmm_drv_page_chain(region->vhr_tail, vmp);
+		region->vhr_tail = vmp;
+	}
+
+	for (uint_t i = 1; i < pages; i++) {
+		ASSERT3U(gpa & PAGEOFFSET, ==, 0);
+
+		vmp = vq_page_hold(ring, gpa, writable);
+		if (vmp == NULL) {
+			return (EFAULT);
+		}
+		buf = (caddr_t)vmm_drv_page_readable(vmp);
+
+		const uint32_t chunk_len = MIN(len, PAGESIZE);
+		region->vhr_iov[region->vhr_idx].iov_base = buf;
+		region->vhr_iov[region->vhr_idx].iov_len = chunk_len;
+		region->vhr_idx++;
+		gpa += chunk_len;
+		len -= chunk_len;
+		vmm_drv_page_chain(region->vhr_tail, vmp);
+		region->vhr_tail = vmp;
+	}
+
+	return (0);
 }
 
 static boolean_t
@@ -308,14 +391,24 @@ viona_ring_map(viona_vring_t *ring)
 	const uint_t npages = LEGACY_VQ_PAGES(qsz);
 	ring->vr_map_pages = kmem_zalloc(npages * sizeof (void *), KM_SLEEP);
 
-	for (uint_t i = 0; i < npages; i++, pa += PAGESIZE) {
-		void *page = viona_hold_page(ring, pa);
+	vmm_page_t *prev = NULL;
 
-		if (page == NULL) {
+	for (uint_t i = 0; i < npages; i++, pa += PAGESIZE) {
+		vmm_page_t *vmp;
+
+		vmp = vq_page_hold(ring, pa, true);
+		if (vmp == NULL) {
 			viona_ring_unmap(ring);
 			return (B_FALSE);
 		}
-		ring->vr_map_pages[i] = page;
+
+		if (prev != NULL) {
+			vmm_drv_page_chain(prev, vmp);
+		} else {
+			ring->vr_map_hold = vmp;
+		}
+		prev = vmp;
+		ring->vr_map_pages[i] = vmm_drv_page_writable(vmp);
 	}
 
 	return (B_TRUE);
@@ -328,17 +421,14 @@ viona_ring_unmap(viona_vring_t *ring)
 
 	void **map = ring->vr_map_pages;
 	if (map != NULL) {
-		/*
-		 * The bhyve page-hold mechanism does not currently require a
-		 * corresponding page-release action, given the simplicity of
-		 * the underlying virtual memory constructs.
-		 *
-		 * If/when those systems become more sophisticated, more than a
-		 * simple free of the page pointers will be required here.
-		 */
 		const uint_t npages = LEGACY_VQ_PAGES(ring->vr_size);
 		kmem_free(map, npages * sizeof (void *));
 		ring->vr_map_pages = NULL;
+
+		vmm_drv_page_release_chain(ring->vr_map_hold);
+		ring->vr_map_hold = NULL;
+	} else {
+		ASSERT(ring->vr_map_hold == NULL);
 	}
 }
 
@@ -518,14 +608,9 @@ vq_read_avail(viona_vring_t *ring, uint16_t idx)
  */
 static int
 vq_map_desc_bufs(viona_vring_t *ring, const struct virtio_desc *desc,
-    struct iovec *iov, uint_t niov, uint16_t *idxp)
+    vq_held_region_t *region)
 {
-	uint64_t gpa = desc->vd_addr;
-	uint32_t len = desc->vd_len;
-	uint16_t lidx = *idxp;
-	caddr_t buf;
-
-	ASSERT3U(lidx, <, niov);
+	int err;
 
 	if (desc->vd_len == 0) {
 		VIONA_PROBE2(desc_bad_len, viona_vring_t *, ring,
@@ -534,55 +619,22 @@ vq_map_desc_bufs(viona_vring_t *ring, const struct virtio_desc *desc,
 		return (EINVAL);
 	}
 
-	const uint32_t front_offset = desc->vd_addr & PAGEOFFSET;
-	const uint32_t front_len = MIN(len, PAGESIZE - front_offset);
-	uint_t pages = 1;
-	if (front_len < len) {
-		pages += P2ROUNDUP((uint64_t)(len - front_len),
-		    PAGESIZE) / PAGESIZE;
-	}
-
-	if (pages > (niov - lidx)) {
+	err = vq_region_hold(ring, desc->vd_addr, desc->vd_len,
+	    (desc->vd_flags & VRING_DESC_F_WRITE) != 0, region);
+	switch (err) {
+	case E2BIG:
 		VIONA_PROBE1(too_many_desc, viona_vring_t *, ring);
 		VIONA_RING_STAT_INCR(ring, too_many_desc);
-		return (E2BIG);
-	}
-
-	buf = viona_hold_page(ring, gpa & PAGEMASK);
-	if (buf == NULL) {
+		break;
+	case EFAULT:
 		VIONA_PROBE_BAD_RING_ADDR(ring, desc->vd_addr);
 		VIONA_RING_STAT_INCR(ring, bad_ring_addr);
-		return (EFAULT);
-	}
-	iov[lidx].iov_base = buf + front_offset;
-	iov[lidx].iov_len = front_len;
-	gpa += front_len;
-	len -= front_len;
-	lidx++;
-
-	for (uint_t i = 1; i < pages; i++) {
-		ASSERT3U(gpa & PAGEOFFSET, ==, 0);
-
-		buf = viona_hold_page(ring, gpa);
-		if (buf == NULL) {
-			VIONA_PROBE_BAD_RING_ADDR(ring, desc->vd_addr);
-			VIONA_RING_STAT_INCR(ring, bad_ring_addr);
-			return (EFAULT);
-		}
-
-		const uint32_t region_len = MIN(len, PAGESIZE);
-		iov[lidx].iov_base = buf;
-		iov[lidx].iov_len = region_len;
-		gpa += region_len;
-		len -= region_len;
-		lidx++;
+		break;
+	default:
+		break;
 	}
 
-	ASSERT3U(len, ==, 0);
-	ASSERT3U(gpa, ==, desc->vd_addr + desc->vd_len);
-
-	*idxp = lidx;
-	return (0);
+	return (err);
 }
 
 /*
@@ -591,7 +643,7 @@ vq_map_desc_bufs(viona_vring_t *ring, const struct virtio_desc *desc,
  */
 static int
 vq_map_indir_desc_bufs(viona_vring_t *ring, const struct virtio_desc *desc,
-    struct iovec *iov, uint_t niov, uint16_t *idxp)
+    vq_held_region_t *region)
 {
 	const uint16_t indir_count = desc->vd_len / sizeof (struct virtio_desc);
 
@@ -605,8 +657,10 @@ vq_map_indir_desc_bufs(viona_vring_t *ring, const struct virtio_desc *desc,
 	}
 
 	uint16_t indir_next = 0;
-	caddr_t buf = NULL;
+	const uint8_t *buf = NULL;
 	uint64_t buf_gpa = UINT64_MAX;
+	vmm_page_t *vmp = NULL;
+	int err = 0;
 
 	for (;;) {
 		uint64_t indir_gpa =
@@ -619,13 +673,18 @@ vq_map_indir_desc_bufs(viona_vring_t *ring, const struct virtio_desc *desc,
 		 * resides in, if has not already been done.
 		 */
 		if (indir_page != buf_gpa) {
-			buf = viona_hold_page(ring, indir_page);
-			if (buf == NULL) {
-				VIONA_PROBE_BAD_RING_ADDR(ring, desc->vd_addr);
+			if (vmp != NULL) {
+				vmm_drv_page_release(vmp);
+			}
+			vmp = vq_page_hold(ring, indir_page, false);
+			if (vmp == NULL) {
+				VIONA_PROBE_BAD_RING_ADDR(ring, indir_page);
 				VIONA_RING_STAT_INCR(ring, bad_ring_addr);
-				return (EFAULT);
+				err = EFAULT;
+				break;
 			}
 			buf_gpa = indir_page;
+			buf = vmm_drv_page_readable(vmp);
 		}
 
 		/*
@@ -639,27 +698,30 @@ vq_map_indir_desc_bufs(viona_vring_t *ring, const struct virtio_desc *desc,
 		if (vp.vd_flags & VRING_DESC_F_INDIRECT) {
 			VIONA_PROBE1(indir_bad_nest, viona_vring_t *, ring);
 			VIONA_RING_STAT_INCR(ring, indir_bad_nest);
-			return (EINVAL);
+			err = EINVAL;
+			break;
 		} else if (vp.vd_len == 0) {
 			VIONA_PROBE2(desc_bad_len, viona_vring_t *, ring,
 			    uint32_t, vp.vd_len);
 			VIONA_RING_STAT_INCR(ring, desc_bad_len);
-			return (EINVAL);
+			err = EINVAL;
+			break;
 		}
 
-		int err = vq_map_desc_bufs(ring, &vp, iov, niov, idxp);
+		err = vq_map_desc_bufs(ring, &vp, region);
 		if (err != 0) {
-			return (err);
+			break;
 		}
 
 		/* Successfully reach the end of the indir chain */
 		if ((vp.vd_flags & VRING_DESC_F_NEXT) == 0) {
-			return (0);
+			break;
 		}
-		if (*idxp >= niov) {
+		if (region->vhr_idx >= region->vhr_niov) {
 			VIONA_PROBE1(too_many_desc, viona_vring_t *, ring);
 			VIONA_RING_STAT_INCR(ring, too_many_desc);
-			return (E2BIG);
+			err = E2BIG;
+			break;
 		}
 
 		indir_next = vp.vd_next;
@@ -667,23 +729,31 @@ vq_map_indir_desc_bufs(viona_vring_t *ring, const struct virtio_desc *desc,
 			VIONA_PROBE3(indir_bad_next, viona_vring_t *, ring,
 			    uint16_t, indir_next, uint16_t, indir_count);
 			VIONA_RING_STAT_INCR(ring, indir_bad_next);
-			return (EINVAL);
+			err = EINVAL;
+			break;
 		}
 	}
 
-	/* NOTREACHED */
-	return (-1);
+	if (vmp != NULL) {
+		vmm_drv_page_release(vmp);
+	}
+	return (err);
 }
 
 int
 vq_popchain(viona_vring_t *ring, struct iovec *iov, uint_t niov,
-    uint16_t *cookie)
+    uint16_t *cookie, vmm_page_t **chain)
 {
-	uint16_t i, ndesc, idx, head, next;
+	uint16_t ndesc, idx, head, next;
 	struct virtio_desc vdir;
+	vq_held_region_t region = {
+		.vhr_niov = niov,
+		.vhr_iov = iov,
+	};
 
 	ASSERT(iov != NULL);
 	ASSERT(niov > 0 && niov < INT_MAX);
+	ASSERT(*chain == NULL);
 
 	mutex_enter(&ring->vr_a_mutex);
 	idx = ring->vr_cur_aidx;
@@ -709,7 +779,7 @@ vq_popchain(viona_vring_t *ring, struct iovec *iov, uint_t niov,
 	head = vq_read_avail(ring, idx & ring->vr_mask);
 	next = head;
 
-	for (i = 0; i < niov; next = vdir.vd_next) {
+	for (; region.vhr_idx < niov; next = vdir.vd_next) {
 		if (next >= ring->vr_size) {
 			VIONA_PROBE2(bad_idx, viona_vring_t *, ring,
 			    uint16_t, next);
@@ -719,7 +789,7 @@ vq_popchain(viona_vring_t *ring, struct iovec *iov, uint_t niov,
 
 		vq_read_desc(ring, next, &vdir);
 		if ((vdir.vd_flags & VRING_DESC_F_INDIRECT) == 0) {
-			if (vq_map_desc_bufs(ring, &vdir, iov, niov, &i) != 0) {
+			if (vq_map_desc_bufs(ring, &vdir, &region) != 0) {
 				break;
 			}
 		} else {
@@ -736,21 +806,23 @@ vq_popchain(viona_vring_t *ring, struct iovec *iov, uint_t niov,
 				break;
 			}
 
-			if (vq_map_indir_desc_bufs(ring, &vdir, iov, niov, &i)
-			    != 0) {
+			if (vq_map_indir_desc_bufs(ring, &vdir, &region) != 0) {
 				break;
 			}
 		}
 
 		if ((vdir.vd_flags & VRING_DESC_F_NEXT) == 0) {
-			*cookie = head;
 			ring->vr_cur_aidx++;
 			mutex_exit(&ring->vr_a_mutex);
-			return (i);
+
+			*cookie = head;
+			*chain = region.vhr_head;
+			return (region.vhr_idx);
 		}
 	}
 
 	mutex_exit(&ring->vr_a_mutex);
+	vq_region_discard(&region);
 	return (-1);
 }
 

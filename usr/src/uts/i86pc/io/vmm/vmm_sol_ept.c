@@ -27,13 +27,6 @@
 #include <sys/vmm_gpt.h>
 #include <sys/vmm_vm.h>
 
-
-typedef struct ept_map ept_map_t;
-struct ept_map {
-	vmm_gpt_t	*em_gpt;
-	kmutex_t	em_lock;
-};
-
 #define	EPT_R		(1 << 0)
 #define	EPT_W		(1 << 1)
 #define	EPT_X		(1 << 2)
@@ -126,7 +119,15 @@ ept_reset_accessed(uint64_t *entry, bool on)
 	    on ? EPT_ACCESSED : 0));
 }
 
-static vmm_pte_ops_t ept_pte_ops = {
+static uint64_t
+ept_get_pmtp(pfn_t root_pfn)
+{
+	/* TODO: enable AD tracking when required */
+	return ((root_pfn << PAGESHIFT |
+	    (EPT_MAX_LEVELS - 1) << 3 | MTRR_TYPE_WB));
+}
+
+vmm_pte_ops_t ept_pte_ops = {
 	.vpeo_map_table		= ept_map_table,
 	.vpeo_map_page		= ept_map_page,
 	.vpeo_pte_pfn		= ept_pte_pfn,
@@ -134,140 +135,5 @@ static vmm_pte_ops_t ept_pte_ops = {
 	.vpeo_pte_prot		= ept_pte_prot,
 	.vpeo_reset_dirty	= ept_reset_dirty,
 	.vpeo_reset_accessed	= ept_reset_accessed,
-};
-
-/*
- * Cover the EPT capabilities used by bhyve at present:
- * - 4-level page walks
- * - write-back memory type
- * - INVEPT operations (all types)
- * - INVVPID operations (single-context only)
- */
-#define	EPT_CAPS_REQUIRED			\
-	(IA32_VMX_EPT_VPID_PWL4 |		\
-	IA32_VMX_EPT_VPID_TYPE_WB |		\
-	IA32_VMX_EPT_VPID_INVEPT |		\
-	IA32_VMX_EPT_VPID_INVEPT_SINGLE |	\
-	IA32_VMX_EPT_VPID_INVEPT_ALL |		\
-	IA32_VMX_EPT_VPID_INVVPID |		\
-	IA32_VMX_EPT_VPID_INVVPID_SINGLE)
-
-static int
-ept_ops_init(void)
-{
-	uint64_t caps = rdmsr(MSR_IA32_VMX_EPT_VPID_CAP);
-	if ((caps & EPT_CAPS_REQUIRED) != EPT_CAPS_REQUIRED) {
-		return (EINVAL);
-	}
-
-	/*
-	 * TODO: Properly handle when IA32_VMX_EPT_VPID_HW_AD is missing and the
-	 * hypervisor intends to utilize dirty page tracking.
-	 */
-
-	return (0);
-}
-
-static void *
-ept_ops_alloc(void)
-{
-	ept_map_t *map;
-
-	map = kmem_zalloc(sizeof (*map), KM_SLEEP);
-	mutex_init(&map->em_lock, NULL, MUTEX_DEFAULT, NULL);
-	map->em_gpt = vmm_gpt_alloc(&ept_pte_ops);
-
-	return (map);
-}
-
-static void
-ept_ops_destroy(void *arg)
-{
-	ept_map_t *map = arg;
-
-	if (map != NULL) {
-		vmm_gpt_free(map->em_gpt);
-		mutex_destroy(&map->em_lock);
-		kmem_free(map, sizeof (*map));
-	}
-}
-
-static uint64_t
-ept_ops_pmtp(void *arg)
-{
-	ept_map_t *emap = arg;
-	uint64_t res;
-
-	/* TODO: enable AD tracking when required */
-	res = vmm_gpt_root_pfn(emap->em_gpt) << PAGESHIFT |
-	    (EPT_MAX_LEVELS - 1) << 3 | MTRR_TYPE_WB;
-
-	return (res);
-}
-
-static uint64_t
-ept_ops_wired_count(void *arg)
-{
-	ept_map_t *map = arg;
-	uint64_t res;
-
-	mutex_enter(&map->em_lock);
-	res = vmm_gpt_mapped_count(map->em_gpt);
-	mutex_exit(&map->em_lock);
-
-	return (res);
-}
-
-static int
-ept_ops_is_wired(void *arg, uint64_t gpa, uint_t *protp)
-{
-	ept_map_t *map = arg;
-	bool mapped;
-
-	mutex_enter(&map->em_lock);
-	mapped = vmm_gpt_is_mapped(map->em_gpt, gpa, protp);
-	mutex_exit(&map->em_lock);
-
-	return (mapped ? 0 : -1);
-}
-
-static int
-ept_ops_map(void *arg, uint64_t gpa, pfn_t pfn, uint_t _lvl, uint_t prot,
-    uint8_t attr)
-{
-	ept_map_t *map = arg;
-
-	ASSERT((prot & EPT_RWX) != 0 && (prot & ~EPT_RWX) == 0);
-
-	mutex_enter(&map->em_lock);
-	vmm_gpt_populate_entry(map->em_gpt, gpa);
-	(void) vmm_gpt_map(map->em_gpt, gpa, pfn, prot, attr);
-	mutex_exit(&map->em_lock);
-
-	return (0);
-}
-
-static uint64_t
-ept_ops_unmap(void *arg, uint64_t start, uint64_t end)
-{
-	ept_map_t *map = arg;
-	size_t unmapped = 0;
-
-	mutex_enter(&map->em_lock);
-	unmapped = vmm_gpt_unmap_region(map->em_gpt, start, end);
-	vmm_gpt_vacate_region(map->em_gpt, start, end);
-	mutex_exit(&map->em_lock);
-
-	return ((uint64_t)unmapped);
-}
-
-struct vmm_pt_ops ept_ops = {
-	.vpo_init	= ept_ops_init,
-	.vpo_alloc	= ept_ops_alloc,
-	.vpo_free	= ept_ops_destroy,
-	.vpo_pmtp	= ept_ops_pmtp,
-	.vpo_wired_cnt	= ept_ops_wired_count,
-	.vpo_is_wired	= ept_ops_is_wired,
-	.vpo_map	= ept_ops_map,
-	.vpo_unmap	= ept_ops_unmap,
+	.vpeo_get_pmtp		= ept_get_pmtp,
 };

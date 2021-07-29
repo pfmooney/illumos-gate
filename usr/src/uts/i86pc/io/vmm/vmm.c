@@ -72,6 +72,7 @@ __FBSDID("$FreeBSD$");
 #include <machine/vmparam.h>
 #include <sys/vmm_instruction_emul.h>
 #include <sys/vmm_vm.h>
+#include <sys/vmm_gpt.h>
 
 #include "vmm_ioport.h"
 #include "vmm_ktr.h"
@@ -224,7 +225,7 @@ static struct vmm_ops vmm_ops_null = {
 };
 
 static struct vmm_ops *ops = &vmm_ops_null;
-static struct vmm_pt_ops *pt_ops = NULL;
+static vmm_pte_ops_t *pte_ops = NULL;
 
 #define	VMM_INIT()			((*ops->init)())
 #define	VMM_CLEANUP()			((*ops->cleanup)())
@@ -396,10 +397,10 @@ vmm_init(void)
 
 	if (vmm_is_intel()) {
 		ops = &vmm_ops_intel;
-		pt_ops = &ept_ops;
+		pte_ops = &ept_pte_ops;
 	} else if (vmm_is_svm()) {
 		ops = &vmm_ops_amd;
-		pt_ops = &rvi_ops;
+		pte_ops = &rvi_pte_ops;
 	} else {
 		return (ENXIO);
 	}
@@ -408,8 +409,6 @@ vmm_init(void)
 	if (res != 0) {
 		return (res);
 	}
-	/* Initialize nested paging bits now the VMM parts are good */
-	res = pt_ops->vpo_init();
 
 	return (res);
 }
@@ -488,6 +487,9 @@ vm_init(struct vm *vm, bool create)
 uint_t cores_per_package = 1;
 uint_t threads_per_core = 1;
 
+/* XXX: Hidden switch to enable dirty page tracking */
+bool gpt_track_dirty = false;
+
 int
 vm_create(const char *name, uint64_t flags, struct vm **retvm)
 {
@@ -504,7 +506,7 @@ vm_create(const char *name, uint64_t flags, struct vm **retvm)
 	/* Name validation has already occurred */
 	VERIFY3U(strnlen(name, VM_MAX_NAMELEN), <, VM_MAX_NAMELEN);
 
-	vmspace = vmspace_alloc(VM_MAXUSER_ADDRESS, pt_ops);
+	vmspace = vmspace_alloc(VM_MAXUSER_ADDRESS, pte_ops, gpt_track_dirty);
 	if (vmspace == NULL)
 		return (ENOMEM);
 

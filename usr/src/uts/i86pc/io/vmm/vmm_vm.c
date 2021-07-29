@@ -37,6 +37,7 @@
 #include <sys/seg_vmm.h>
 #include <sys/vmm_kernel.h>
 #include <sys/vmm_reservoir.h>
+#include <sys/vmm_gpt.h>
 
 
 /*
@@ -151,9 +152,10 @@ struct vmspace {
 	uintptr_t	vms_size;	/* fixed after creation */
 
 	/* (nested) page table state */
-	struct vmm_pt_ops *vms_pt_ops;
-	void		*vms_pt_data;
+	vmm_gpt_t	*vms_gpt;
 	long		vms_pt_gen;
+	uint64_t	vms_pages_mapped;
+	bool		vms_track_dirty;
 
 	list_t		vms_maplist;
 	list_t		vms_clients;
@@ -168,6 +170,7 @@ struct vm_client {
 	enum vm_client_state vmc_state;
 	int		vmc_cpu_active;
 	uint64_t	vmc_cpu_gen;
+	bool		vmc_track_dirty;
 
 	list_t		vmc_held_pages;
 };
@@ -185,7 +188,7 @@ struct vm_object {
 	enum vm_object_type vmo_type;
 	size_t		vmo_size;
 	void		*vmo_data;
-	vm_memattr_t	vmo_attr;
+	uint8_t		vmo_attr;
 };
 
 struct vm_page {
@@ -194,11 +197,13 @@ struct vm_page {
 	vm_page_t	*vmp_chain;
 	uintptr_t	vmp_gpa;
 	pfn_t		vmp_pfn;
+	uint64_t	*vmp_ptep;
 	int		vmp_prot;
 };
 
+#define	VMC_IS_ACTIVE(vmc)	(((vmc)->vmc_state & VCS_ACTIVE) != 0)
 
-static vmspace_mapping_t *vm_mapping_find(vmspace_t *, uintptr_t, size_t, bool);
+static vmspace_mapping_t *vm_mapping_find(vmspace_t *, uintptr_t, size_t);
 static void vmc_space_hold(vm_client_t *);
 static void vmc_space_release(vm_client_t *, bool);
 
@@ -207,7 +212,7 @@ static void vmc_space_release(vm_client_t *, bool);
  * Create a new vmspace with a maximum address of `end`.
  */
 vmspace_t *
-vmspace_alloc(size_t end, struct vmm_pt_ops *ops)
+vmspace_alloc(size_t end, vmm_pte_ops_t *pte_ops, bool track_dirty)
 {
 	vmspace_t *vms;
 	const uintptr_t size = end + 1;
@@ -227,9 +232,9 @@ vmspace_alloc(size_t end, struct vmm_pt_ops *ops)
 	list_create(&vms->vms_clients, sizeof (vm_client_t),
 	    offsetof(vm_client_t, vmc_node));
 
-	vms->vms_pt_ops = ops;
-	vms->vms_pt_data = ops->vpo_alloc();
+	vms->vms_gpt = vmm_gpt_alloc(pte_ops);
 	vms->vms_pt_gen = 1;
+	vms->vms_track_dirty = track_dirty;
 
 	return (vms);
 }
@@ -244,7 +249,7 @@ vmspace_destroy(vmspace_t *vms)
 	VERIFY(list_is_empty(&vms->vms_maplist));
 	VERIFY(list_is_empty(&vms->vms_clients));
 
-	vms->vms_pt_ops->vpo_free(vms->vms_pt_data);
+	vmm_gpt_free(vms->vms_gpt);
 	kmem_free(vms, sizeof (*vms));
 }
 
@@ -254,7 +259,7 @@ vmspace_destroy(vmspace_t *vms)
 uint64_t
 vmspace_resident_count(vmspace_t *vms)
 {
-	return (vms->vms_pt_ops->vpo_wired_cnt(vms->vms_pt_data));
+	return (vms->vms_pages_mapped);
 }
 
 static pfn_t
@@ -425,24 +430,13 @@ vm_object_pfn(vm_object_t *vmo, uintptr_t off)
 }
 
 static vmspace_mapping_t *
-vm_mapping_find(vmspace_t *vms, uintptr_t addr, size_t size, bool no_lock)
+vm_mapping_find(vmspace_t *vms, uintptr_t addr, size_t size)
 {
 	vmspace_mapping_t *vmsm;
 	list_t *ml = &vms->vms_maplist;
 	const uintptr_t range_end = addr + size;
 
 	ASSERT(addr <= range_end);
-
-	if (no_lock) {
-		/*
-		 * This check should be superflous with the protections
-		 * promised by the bhyve logic which calls into the VM shim.
-		 * All the same, it is cheap to be paranoid.
-		 */
-		VERIFY(!vms->vms_held);
-	} else {
-		VERIFY(MUTEX_HELD(&vms->vms_lock));
-	}
 
 	if (addr >= vms->vms_size) {
 		return (NULL);
@@ -585,6 +579,12 @@ vmspace_map(vmspace_t *vms, vm_object_t *vmo, uintptr_t obj_off, uintptr_t addr,
 		vmsm->vmsm_offset = (off_t)obj_off;
 		vmsm->vmsm_prot = prot;
 		list_insert_tail(&vms->vms_maplist, vmsm);
+
+		/*
+		 * Make sure the GPT has tables ready for leaf entries across
+		 * the entire new mapping.
+		 */
+		vmm_gpt_populate_region(vms->vms_gpt, addr, addr + len);
 	}
 out:
 	vmspace_hold_exit(vms, false);
@@ -610,17 +610,80 @@ vmspace_unmap(vmspace_t *vms, uintptr_t start, uintptr_t end)
 
 	vmspace_hold_enter(vms);
 	/* expect to match existing mapping exactly */
-	if ((vmsm = vm_mapping_find(vms, start, size, false)) == NULL ||
+	if ((vmsm = vm_mapping_find(vms, start, size)) == NULL ||
 	    vmsm->vmsm_addr != start || vmsm->vmsm_len != size) {
 		vmspace_hold_exit(vms, false);
 		return (ENOENT);
 	}
 
-	(void) vms->vms_pt_ops->vpo_unmap(vms->vms_pt_data, start, end);
-	vms->vms_pt_gen++;
+	if (vmm_gpt_unmap_region(vms->vms_gpt, start, end) != 0) {
+		vmm_gpt_vacate_region(vms->vms_gpt, start, end);
+		vms->vms_pt_gen++;
+	}
 
 	vm_mapping_remove(vms, vmsm);
 	vmspace_hold_exit(vms, true);
+	return (0);
+}
+
+static int
+vmspace_lookup_map(vmspace_t *vms, uintptr_t gpa, int req_prot, pfn_t *pfnp,
+    uint64_t **ptepp)
+{
+	vmm_gpt_t *gpt = vms->vms_gpt;
+	uint64_t *entries[MAX_GPT_LEVEL], *leaf;
+	pfn_t pfn = PFN_INVALID;
+	uint_t prot;
+
+	ASSERT0(gpa & PAGEOFFSET);
+	ASSERT((req_prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) != PROT_NONE);
+
+	vmm_gpt_walk(gpt, gpa, entries, MAX_GPT_LEVEL);
+	leaf = entries[LEVEL1];
+	if (leaf == NULL) {
+		/*
+		 * Since we populated the intermediate tables for any regions
+		 * mapped in the GPT, an empty leaf entry indicates there is no
+		 * mapping, populated or not, at this GPT.
+		 */
+		return (FC_NOMAP);
+	}
+
+	if (vmm_gpt_is_mapped(gpt, leaf, &pfn, &prot)) {
+		if ((req_prot & prot) != req_prot) {
+			return (FC_PROT);
+		}
+	} else {
+		vmspace_mapping_t *vmsm;
+		vm_object_t *vmo;
+
+		/*
+		 * Because of the prior leaf check, we should be confident that
+		 * _some_ mapping covers this GPA
+		 */
+		vmsm = vm_mapping_find(vms, gpa, PAGESIZE);
+		VERIFY(vmsm != NULL);
+
+		if ((req_prot & vmsm->vmsm_prot) != req_prot) {
+			return (FC_PROT);
+		}
+		vmo = vmsm->vmsm_object;
+		pfn = vm_object_pfn(vmo, VMSM_OFFSET(vmsm, gpa));
+		VERIFY(pfn != PFN_INVALID);
+
+		if (vmm_gpt_map_at(gpt, leaf, pfn, vmsm->vmsm_prot,
+		    vmo->vmo_attr)) {
+			atomic_inc_64(&vms->vms_pages_mapped);
+		}
+	}
+
+	ASSERT(pfn != PFN_INVALID && leaf != NULL);
+	if (pfnp != NULL) {
+		*pfnp = pfn;
+	}
+	if (ptepp != NULL) {
+		*ptepp = leaf;
+	}
 	return (0);
 }
 
@@ -635,46 +698,28 @@ vmspace_populate(vmspace_t *vms, uintptr_t start, uintptr_t end)
 {
 	const size_t size = end - start;
 	vmspace_mapping_t *vmsm;
-	vm_object_t *vmo;
-	uint_t prot;
 
 	mutex_enter(&vms->vms_lock);
 
 	/* For the time being, only exact-match mappings are expected */
-	if ((vmsm = vm_mapping_find(vms, start, size, false)) == NULL) {
+	if ((vmsm = vm_mapping_find(vms, start, size)) == NULL) {
 		mutex_exit(&vms->vms_lock);
 		return (FC_NOMAP);
 	}
-	vmo = vmsm->vmsm_object;
-	prot = vmsm->vmsm_prot;
 
-	for (uintptr_t pos = start; pos < end; ) {
-		pfn_t pfn;
-		uintptr_t pg_size, map_addr;
-		uint_t map_lvl = 0;
-		int err;
-
-		/* TODO: deal with large pages */
-		pfn = vm_object_pfn(vmo, VMSM_OFFSET(vmsm, pos));
-		pg_size = LEVEL_SIZE(map_lvl);
-		map_addr = P2ALIGN(pos, pg_size);
+	vm_object_t *vmo = vmsm->vmsm_object;
+	const int prot = vmsm->vmsm_prot;
+	const uint8_t attr = vmo->vmo_attr;
+	size_t populated = 0;
+	for (uintptr_t gpa = start & PAGEMASK; gpa < end; gpa += PAGESIZE) {
+		const pfn_t pfn = vm_object_pfn(vmo, VMSM_OFFSET(vmsm, gpa));
 		VERIFY(pfn != PFN_INVALID);
 
-		err = vms->vms_pt_ops->vpo_map(vms->vms_pt_data, map_addr,
-		    pfn, map_lvl, prot, vmo->vmo_attr);
-		switch (err) {
-		case 0:
-			vms->vms_pt_gen++;
-			/* FALLTHROUGH */
-		case EEXIST:
-			/* It is possible to race on mapping in a page */
-			break;
-		default:
-			panic("unexpected NPT map error %d", err);
+		if (vmm_gpt_map(vms->vms_gpt, gpa, pfn, prot, attr)) {
+			populated++;
 		}
-
-		pos += pg_size;
 	}
+	atomic_add_64(&vms->vms_pages_mapped, populated);
 
 	mutex_exit(&vms->vms_lock);
 	return (0);
@@ -696,6 +741,7 @@ vmspace_client_alloc(vmspace_t *vms)
 	vmc->vmc_cpu_active = -1;
 	list_create(&vmc->vmc_held_pages, sizeof (vm_page_t),
 	    offsetof(vm_page_t, vmp_node));
+	vmc->vmc_track_dirty = vms->vms_track_dirty;
 
 	mutex_enter(&vms->vms_lock);
 	list_insert_tail(&vms->vms_clients, vmc);
@@ -710,7 +756,7 @@ vmspace_client_alloc(vmspace_t *vms)
 uint64_t
 vmspace_table_root(vmspace_t *vms)
 {
-	return (vms->vms_pt_ops->vpo_pmtp(vms->vms_pt_data));
+	return (vmm_gpt_get_pmtp(vms->vms_gpt));
 }
 
 /*
@@ -850,9 +896,9 @@ vm_page_t *
 vmc_hold(vm_client_t *vmc, uintptr_t gpa, int prot)
 {
 	vmspace_t *vms = vmc->vmc_space;
-	vmspace_mapping_t *vmsm;
-	vm_object_t *vmo;
 	vm_page_t *vmp;
+	pfn_t pfn = PFN_INVALID;
+	uint64_t *ptep = NULL;
 
 	ASSERT0(gpa & PAGEOFFSET);
 	ASSERT((prot & (PROT_READ | PROT_WRITE)) != PROT_NONE);
@@ -860,18 +906,18 @@ vmc_hold(vm_client_t *vmc, uintptr_t gpa, int prot)
 	vmp = kmem_alloc(sizeof (vm_page_t), KM_SLEEP);
 	vmc_activate(vmc);
 
-	if ((vmsm = vm_mapping_find(vms, gpa, PAGESIZE, true)) == NULL ||
-	    (prot & ~vmsm->vmsm_prot) != 0) {
+	if (vmspace_lookup_map(vms, gpa, prot, &pfn, &ptep) != 0) {
 		vmc_deactivate(vmc);
 		kmem_free(vmp, sizeof (vm_page_t));
 		return (NULL);
 	}
-	vmo = vmsm->vmsm_object;
+	ASSERT(pfn != PFN_INVALID && ptep != NULL);
 
 	vmp->vmp_client = vmc;
 	vmp->vmp_gpa = gpa;
-	vmp->vmp_pfn = vm_object_pfn(vmo, VMSM_OFFSET(vmsm, gpa));
 	vmp->vmp_prot = prot;
+	vmp->vmp_pfn = pfn;
+	vmp->vmp_ptep = ptep;
 	vmp->vmp_chain = NULL;
 	list_insert_tail(&vmc->vmc_held_pages, vmp);
 	vmc_deactivate(vmc);
@@ -880,64 +926,16 @@ vmc_hold(vm_client_t *vmc, uintptr_t gpa, int prot)
 }
 
 int
-vmc_fault(vm_client_t *vmc, uintptr_t gpa, int type)
+vmc_fault(vm_client_t *vmc, uintptr_t gpa, int prot)
 {
 	vmspace_t *vms = vmc->vmc_space;
-	vmspace_mapping_t *vmsm;
-	vm_object_t *vmo;
-	uint_t prot, map_lvl;
-	pfn_t pfn;
-	uintptr_t map_addr;
 	int err;
 
 	vmc_activate(vmc);
-	if (vms->vms_pt_ops->vpo_is_wired(vms->vms_pt_data, gpa, &prot) == 0) {
-		/*
-		 * It is possible that multiple vCPUs will race to fault-in a
-		 * given address.  In such cases, the race loser(s) will
-		 * encounter the already-mapped page, needing to do nothing
-		 * more than consider it a success.
-		 *
-		 * If the fault exceeds protection, it is an obvious error.
-		 */
-		if ((prot & type) != type) {
-			err = FC_PROT;
-		} else {
-			err = 0;
-		}
-		vmc_deactivate(vmc);
-		return (err);
-	}
-
-	/* Try to wire up the address */
-	if ((vmsm = vm_mapping_find(vms, gpa, 0, true)) == NULL) {
-		vmc_deactivate(vmc);
-		return (FC_NOMAP);
-	}
-	vmo = vmsm->vmsm_object;
-	prot = vmsm->vmsm_prot;
-
-	/* TODO: deal with large pages */
-	pfn = vm_object_pfn(vmo, VMSM_OFFSET(vmsm, gpa));
-	map_lvl = 0;
-	map_addr = P2ALIGN((uintptr_t)gpa, LEVEL_SIZE(map_lvl));
-	VERIFY(pfn != PFN_INVALID);
-
-	err = vms->vms_pt_ops->vpo_map(vms->vms_pt_data, map_addr, pfn,
-	    map_lvl, prot, vmo->vmo_attr);
-	switch (err) {
-	case 0:
-		vms->vms_pt_gen++;
-		/* FALLTHROUGH */
-	case EEXIST:
-		/* It is possible to race on mapping in a page */
-		break;
-	default:
-		panic("unexpected NPT map error %d", err);
-	}
+	err = vmspace_lookup_map(vms, gpa & PAGEMASK, prot, NULL, NULL);
 	vmc_deactivate(vmc);
 
-	return (0);
+	return (err);
 }
 
 vm_client_t *
@@ -1044,7 +1042,11 @@ vmp_release_inner(vm_page_t *vmp, vm_client_t *vmc)
 	ASSERT(MUTEX_HELD(&vmc->vmc_lock));
 
 	list_remove(&vmc->vmc_held_pages, vmp);
-	/* TODO: re-dirty page if necessary */
+	if ((vmp->vmp_prot & PROT_WRITE) != 0 && vmc->vmc_track_dirty) {
+		vmm_gpt_t *gpt = vmc->vmc_space->vms_gpt;
+
+		vmm_gpt_reset_dirty(gpt, vmp->vmp_ptep, true);
+	}
 	kmem_free(vmp, sizeof (vm_page_t));
 }
 

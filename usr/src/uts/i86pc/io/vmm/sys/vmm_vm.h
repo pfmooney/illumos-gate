@@ -30,24 +30,10 @@ typedef struct vm_client vm_client_t;
 typedef struct vm_page vm_page_t;
 typedef struct vm_object vm_object_t;
 
-typedef struct vmm_pt_ops vmm_pt_ops_t;
-struct vmm_pt_ops {
-	int		(*vpo_init)(void);
-	void *		(*vpo_alloc)(void);
-	void		(*vpo_free)(void *);
-	uint64_t	(*vpo_pmtp)(void *);
-	uint64_t	(*vpo_wired_cnt)(void *);
-	int		(*vpo_is_wired)(void *, uint64_t, uint_t *);
-	int		(*vpo_map)(void *, uint64_t, pfn_t, uint_t, uint_t,
-			    uint8_t);
-	uint64_t	(*vpo_unmap)(void *, uint64_t, uint64_t);
-};
-
-extern struct vmm_pt_ops ept_ops;
-extern struct vmm_pt_ops rvi_ops;
+struct vmm_pte_ops;
 
 /* vmspace_t operations */
-vmspace_t *vmspace_alloc(size_t, struct vmm_pt_ops *);
+vmspace_t *vmspace_alloc(size_t, struct vmm_pte_ops *, bool);
 void vmspace_destroy(vmspace_t *);
 int vmspace_map(vmspace_t *, vm_object_t *, uintptr_t, uintptr_t, size_t,
     uint8_t);

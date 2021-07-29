@@ -143,6 +143,22 @@ __FBSDID("$FreeBSD$");
 	(VM_ENTRY_INTO_SMM			|			\
 	VM_ENTRY_DEACTIVATE_DUAL_MONITOR)
 
+/*
+ * Cover the EPT capabilities used by bhyve at present:
+ * - 4-level page walks
+ * - write-back memory type
+ * - INVEPT operations (all types)
+ * - INVVPID operations (single-context only)
+ */
+#define	EPT_CAPS_REQUIRED			\
+	(IA32_VMX_EPT_VPID_PWL4 |		\
+	IA32_VMX_EPT_VPID_TYPE_WB |		\
+	IA32_VMX_EPT_VPID_INVEPT |		\
+	IA32_VMX_EPT_VPID_INVEPT_SINGLE |	\
+	IA32_VMX_EPT_VPID_INVEPT_ALL |		\
+	IA32_VMX_EPT_VPID_INVVPID |		\
+	IA32_VMX_EPT_VPID_INVVPID_SINGLE)
+
 #define	HANDLED		1
 #define	UNHANDLED	0
 
@@ -494,6 +510,17 @@ vmx_init(void)
 		printf("vmx_init: processor does not support desired "
 		    "entry controls\n");
 		return (error);
+	}
+
+	/*
+	 * Check for necessary EPT capabilities
+	 *
+	 * TODO: Properly handle when IA32_VMX_EPT_VPID_HW_AD is missing and the
+	 * hypervisor intends to utilize dirty page tracking.
+	 */
+	uint64_t ept_caps = rdmsr(MSR_IA32_VMX_EPT_VPID_CAP);
+	if ((ept_caps & EPT_CAPS_REQUIRED) != EPT_CAPS_REQUIRED) {
+		return (EINVAL);
 	}
 
 	/*

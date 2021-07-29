@@ -278,7 +278,7 @@ segvmm_fault_space(struct hat *hat, struct seg *seg, uintptr_t va, size_t len)
 /* ARGSUSED */
 static faultcode_t
 segvmm_fault(struct hat *hat, struct seg *seg, caddr_t addr, size_t len,
-    enum fault_type type, enum seg_rw tw)
+    enum fault_type type, enum seg_rw rw)
 {
 	segvmm_data_t *svmd = seg->s_data;
 	int err = 0;

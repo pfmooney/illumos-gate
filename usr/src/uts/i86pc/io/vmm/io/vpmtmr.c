@@ -166,3 +166,42 @@ vpmtmr_handler(void *arg, bool in, uint16_t port, uint8_t bytes, uint32_t *val)
 
 	return (0);
 }
+
+int
+vpmtmr_data_read(struct vpmtmr *vpmtmr, const vmm_data_req_t *req)
+{
+	ASSERT3U(req->vdr_class, ==, VDC_PM_TIMER);
+
+	if (req->vdr_version != 1) {
+		return (EINVAL);
+	}
+	if (req->vdr_len < sizeof (struct vdi_pm_timer)) {
+		return (ENOSPC);
+	}
+	struct vdi_pm_timer *out = req->vdr_data;
+
+	out->vpt_time_base = sbttohrtime(vpmtmr->baseuptime);
+	out->vpt_val_base = vpmtmr->baseval;
+	out->vpt_ioport = vpmtmr->io_port;
+
+	return (0);
+}
+
+int
+vpmtmr_data_write(struct vpmtmr *vpmtmr, const vmm_data_req_t *req)
+{
+	ASSERT3U(req->vdr_class, ==, VDC_PM_TIMER);
+
+	if (req->vdr_version != 1) {
+		return (EINVAL);
+	}
+	if (req->vdr_len < sizeof (struct vdi_pm_timer)) {
+		return (ENOSPC);
+	}
+	const struct vdi_pm_timer *src = req->vdr_data;
+
+	vpmtmr->baseval = src->vpt_val_base;
+	/* TODO: convert time base */
+
+	return (0);
+}

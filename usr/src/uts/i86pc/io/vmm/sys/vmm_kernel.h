@@ -49,6 +49,7 @@
 #include <sys/sdt.h>
 #include <x86/segments.h>
 #include <sys/vmm.h>
+#include <sys/vmm_data.h>
 
 SDT_PROVIDER_DECLARE(vmm);
 
@@ -65,6 +66,7 @@ struct vmspace;
 struct vm_client;
 struct vm_object;
 struct vm_guest_paging;
+struct vmm_data_req;
 
 typedef int	(*vmm_init_func_t)(void);
 typedef int	(*vmm_cleanup_func_t)(void);
@@ -86,6 +88,10 @@ typedef struct vlapic *(*vmi_vlapic_init)(void *vmi, int vcpu);
 typedef void	(*vmi_vlapic_cleanup)(void *vmi, struct vlapic *vlapic);
 typedef void	(*vmi_savectx)(void *vmi, int vcpu);
 typedef void	(*vmi_restorectx)(void *vmi, int vcpu);
+typedef int	(*vmi_data_read_t)(void *vmi, int vcpu,
+    const struct vmm_data_req *);
+typedef int	(*vmi_data_write_t)(void *vmi, int vcpu,
+    const struct vmm_data_req *);
 
 struct vmm_ops {
 	vmm_init_func_t		init;		/* module wide initialization */
@@ -106,6 +112,9 @@ struct vmm_ops {
 
 	vmi_savectx		vmsavectx;
 	vmi_restorectx		vmrestorectx;
+
+	vmi_data_read_t		vmdata_read;
+	vmi_data_write_t	vmdata_write;
 };
 
 extern struct vmm_ops vmm_ops_intel;
@@ -206,6 +215,7 @@ bool vcpu_entry_bailout_checks(struct vm *vm, int vcpuid, uint64_t rip);
 bool vcpu_run_state_pending(struct vm *vm, int vcpuid);
 int vcpu_arch_reset(struct vm *vm, int vcpuid, bool init_only);
 
+
 /*
  * Return true if device indicated by bus/slot/func is supposed to be a
  * pci passthrough device.
@@ -231,7 +241,7 @@ void vcpu_unblock_run(struct vm *, int);
 
 uint64_t vcpu_tsc_offset(struct vm *vm, int vcpuid, bool phys_adj);
 
-static __inline int
+static __inline bool
 vcpu_is_running(struct vm *vm, int vcpu, int *hostcpu)
 {
 	return (vcpu_get_state(vm, vcpu, hostcpu) == VCPU_RUNNING);
@@ -427,5 +437,17 @@ typedef struct vmm_vcpu_kstats {
 #define	VMM_KSTAT_CLASS	"misc"
 
 int vmm_kstat_update_vcpu(struct kstat *, int);
+
+typedef struct vmm_data_req {
+	uint16_t	vdr_class;
+	uint16_t	vdr_version;
+	uint32_t	vdr_flags;
+	uint32_t	vdr_len;
+	void		*vdr_data;
+} vmm_data_req_t;
+typedef struct vmm_data_req vmm_data_req_t;
+
+int vmm_data_read(struct vm *, int, const vmm_data_req_t *);
+int vmm_data_write(struct vm *, int, const vmm_data_req_t *);
 
 #endif /* _VMM_KERNEL_H_ */

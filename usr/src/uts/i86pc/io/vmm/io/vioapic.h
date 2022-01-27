@@ -49,6 +49,8 @@
 
 struct vioapic *vioapic_init(struct vm *vm);
 void vioapic_cleanup(struct vioapic *vioapic);
+int vioapic_data_write(struct vioapic *, const vmm_data_req_t *);
+int vioapic_data_read(struct vioapic *, const vmm_data_req_t *);
 
 int vioapic_assert_irq(struct vm *vm, int irq);
 int vioapic_deassert_irq(struct vm *vm, int irq);

@@ -349,13 +349,6 @@ vmm_glue_callout_init(struct callout *c, int mpsafe)
 	mutex_exit(&cpu_lock);
 }
 
-static __inline hrtime_t
-sbttohrtime(sbintime_t sbt)
-{
-	return (((sbt >> 32) * NANOSEC) +
-	    (((uint64_t)NANOSEC * (uint32_t)sbt) >> 32));
-}
-
 int
 vmm_glue_callout_reset_sbt(struct callout *c, sbintime_t sbt, sbintime_t pr,
     void (*func)(void *), void *arg, int flags)

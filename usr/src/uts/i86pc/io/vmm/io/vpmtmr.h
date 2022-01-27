@@ -49,6 +49,8 @@ struct vpmtmr;
 
 struct vpmtmr *vpmtmr_init(struct vm *vm);
 void vpmtmr_cleanup(struct vpmtmr *pmtmr);
+int vpmtmr_data_read(struct vpmtmr *, const vmm_data_req_t *);
+int vpmtmr_data_write(struct vpmtmr *, const vmm_data_req_t *);
 
 int vpmtmr_set_location(struct vm *, uint16_t);
 

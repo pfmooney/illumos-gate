@@ -133,4 +133,19 @@ sbinuptime(void)
 	    (nsec * (((uint64_t)1 << 63) / 500000000) >> 32));
 }
 
+/* illumos glue for (s)bintime/hrtime conversions */
+static __inline hrtime_t
+sbttohrtime(sbintime_t sbt)
+{
+	return (((sbt >> 32) * NANOSEC) +
+	    (((uint64_t)NANOSEC * (uint32_t)sbt) >> 32));
+}
+
+static __inline hrtime_t
+bttohrtime(const struct bintime bt)
+{
+	return (sbttohrtime(bttosbt(bt)));
+}
+
+
 #endif	/* _COMPAT_FREEBSD_SYS_TIME_H_ */

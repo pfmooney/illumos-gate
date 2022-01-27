@@ -108,5 +108,7 @@ void vlapic_lvt_write_handler(struct vlapic *vlapic, uint32_t offset);
 void vlapic_self_ipi_handler(struct vlapic *vlapic, uint64_t val);
 
 void vlapic_localize_resources(struct vlapic *vlapic);
+int vlapic_data_write(struct vlapic *, const vmm_data_req_t *);
+int vlapic_data_read(struct vlapic *, const vmm_data_req_t *);
 
 #endif	/* _VLAPIC_H_ */

@@ -57,6 +57,7 @@ __FBSDID("$FreeBSD$");
 
 #include <x86/apicreg.h>
 #include <machine/vmm.h>
+#include <sys/vmm_data.h>
 
 #include "vmm_ktr.h"
 #include "vmm_lapic.h"
@@ -473,4 +474,52 @@ vioapic_pincount(struct vm *vm)
 {
 
 	return (REDIR_ENTRIES);
+}
+
+int
+vioapic_data_read(struct vioapic *vioapic, const vmm_data_req_t *req)
+{
+	ASSERT3U(req->vdr_class, ==, VDC_IOAPIC);
+
+	if (req->vdr_version != 1) {
+		return (EINVAL);
+	}
+	if (req->vdr_len < sizeof (struct vdi_ioapic)) {
+		return (ENOSPC);
+	}
+	struct vdi_ioapic *out = req->vdr_data;
+
+	VIOAPIC_LOCK(vioapic);
+	out->vi_id = vioapic->id;
+	out->vi_reg_sel = vioapic->ioregsel;
+	for (uint_t i = 0; i < REDIR_ENTRIES; i++) {
+		out->vi_pin_reg[i] = vioapic->rtbl[i].reg;
+		out->vi_pin_level[i] = vioapic->rtbl[i].acnt;
+	}
+	VIOAPIC_UNLOCK(vioapic);
+
+	return (0);
+}
+
+int
+vioapic_data_write(struct vioapic *vioapic, const vmm_data_req_t *req)
+{
+	if (req->vdr_version != 1) {
+		return (EINVAL);
+	}
+	if (req->vdr_len < sizeof (struct vdi_ioapic)) {
+		return (ENOSPC);
+	}
+	const struct vdi_ioapic *src = req->vdr_data;
+
+	VIOAPIC_LOCK(vioapic);
+	vioapic->id = src->vi_id;
+	vioapic->ioregsel = src->vi_reg_sel;
+	for (uint_t i = 0; i < REDIR_ENTRIES; i++) {
+		vioapic->rtbl[i].reg = src->vi_pin_reg[i] & ~RTBL_RO_BITS;
+		vioapic->rtbl[i].acnt = src->vi_pin_level[i];
+	}
+	VIOAPIC_UNLOCK(vioapic);
+
+	return (0);
 }

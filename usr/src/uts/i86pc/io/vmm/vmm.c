@@ -73,6 +73,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/vmm_instruction_emul.h>
 #include <sys/vmm_vm.h>
 #include <sys/vmm_gpt.h>
+#include <sys/vmm_data.h>
 
 #include "vmm_ioport.h"
 #include "vmm_ktr.h"
@@ -235,6 +236,8 @@ static struct vmm_ops vmm_ops_null = {
 	.vlapic_cleanup	= (vmi_vlapic_cleanup)nullop_panic,
 	.vmsavectx	= (vmi_savectx)nullop_panic,
 	.vmrestorectx	= (vmi_restorectx)nullop_panic,
+	.vmdata_read	= (vmi_data_read_t)nullop_panic,
+	.vmdata_write	= (vmi_data_write_t)nullop_panic,
 };
 
 static struct vmm_ops *ops = &vmm_ops_null;
@@ -3666,4 +3669,102 @@ vmm_kstat_update_vcpu(struct kstat *ksp, int rw)
 	vvk->vvk_time_sched.value.ui64 = vcpu->ustate_total[VU_SCHED];
 
 	return (0);
+}
+
+static inline bool
+vmm_data_is_cpu_specific(uint16_t data_class)
+{
+	switch (data_class) {
+	case VDC_REGISTER:
+	case VDC_MSR:
+	case VDC_FPU:
+	case VDC_LAPIC:
+	case VDC_VMM_ARCH:
+		return (true);
+	default:
+		return (false);
+	}
+}
+
+int
+vmm_data_read(struct vm *vm, int vcpuid, const vmm_data_req_t *req) {
+	int err = 0;
+
+	if (vmm_data_is_cpu_specific(req->vdr_class)) {
+		if (vcpuid >= VM_MAXCPU) {
+			return (EINVAL);
+		}
+	}
+
+	switch (req->vdr_class) {
+		/* per-cpu data/devices */
+	case VDC_LAPIC:
+		err = vlapic_data_read(vm_lapic(vm, vcpuid), req);
+		break;
+
+		/* system-wide data/devices */
+	case VDC_IOAPIC:
+		err = vioapic_data_read(vm->vioapic, req);
+		break;
+	case VDC_ATPIT:
+		err = vatpit_data_read(vm->vatpit, req);
+		break;
+	case VDC_ATPIC:
+		err = vatpic_data_read(vm->vatpic, req);
+		break;
+	case VDC_HPET:
+		err = vhpet_data_read(vm->vhpet, req);
+		break;
+	case VDC_PM_TIMER:
+		err = vpmtmr_data_read(vm->vpmtmr, req);
+		break;
+	case VDC_RTC:
+		err = vrtc_data_read(vm->vrtc, req);
+		break;
+	default:
+		err = EINVAL;
+		break;
+	}
+	return (err);
+}
+int
+vmm_data_write(struct vm *vm, int vcpuid, const vmm_data_req_t *req) {
+	int err = 0;
+
+	if (vmm_data_is_cpu_specific(req->vdr_class)) {
+		if (vcpuid >= VM_MAXCPU) {
+			return (EINVAL);
+		}
+	}
+
+	switch (req->vdr_class) {
+		/* per-cpu data/devices */
+	case VDC_LAPIC:
+		err = vlapic_data_write(vm_lapic(vm, vcpuid), req);
+		break;
+
+		/* system-wide data/devices */
+	case VDC_IOAPIC:
+		err = vioapic_data_write(vm->vioapic, req);
+		break;
+	case VDC_ATPIT:
+		err = vatpit_data_write(vm->vatpit, req);
+		break;
+	case VDC_ATPIC:
+		err = vatpic_data_write(vm->vatpic, req);
+		break;
+	case VDC_HPET:
+		err = vhpet_data_write(vm->vhpet, req);
+		break;
+	case VDC_PM_TIMER:
+		err = vpmtmr_data_write(vm->vpmtmr, req);
+		break;
+	case VDC_RTC:
+		err = vrtc_data_write(vm->vrtc, req);
+		break;
+	default:
+		err = EINVAL;
+		break;
+	}
+	return (err);
 }

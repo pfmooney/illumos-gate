@@ -1010,3 +1010,53 @@ vrtc_localize_resources(struct vrtc *vrtc)
 {
 	vmm_glue_callout_localize(&vrtc->callout);
 }
+
+int
+vrtc_data_read(struct vrtc *vrtc, const vmm_data_req_t *req)
+{
+	ASSERT3U(req->vdr_class, ==, VDC_RTC);
+
+	if (req->vdr_version != 1) {
+		return (EINVAL);
+	}
+	if (req->vdr_len < sizeof (struct vdi_rtc)) {
+		return (ENOSPC);
+	}
+	struct vdi_rtc *out = req->vdr_data;
+
+	VRTC_LOCK(vrtc);
+
+	out->vr_addr = vrtc->addr;
+	out->vr_time_base = sbttohrtime(vrtc->base_uptime);
+	out->vr_rtc_sec = vrtc->base_rtctime;
+	/* XXX: vrtc does not have sub-1s precision yet */
+	out->vr_rtc_nsec = 0;
+	bcopy(&vrtc->rtcdev, out->vr_content, sizeof (out->vr_content));
+
+	VRTC_UNLOCK(vrtc);
+
+	return (0);
+}
+
+int
+vrtc_data_write(struct vrtc *vrtc, const vmm_data_req_t *req)
+{
+	ASSERT3U(req->vdr_class, ==, VDC_RTC);
+
+	if (req->vdr_version != 1) {
+		return (EINVAL);
+	}
+	if (req->vdr_len < sizeof (struct vdi_rtc)) {
+		return (ENOSPC);
+	}
+	const struct vdi_rtc *src = req->vdr_data;
+
+	VRTC_LOCK(vrtc);
+
+	vrtc->addr = src->vr_addr;
+	bcopy(src->vr_content, &vrtc->rtcdev, sizeof (vrtc->rtcdev));
+	/* TODO: Handle time base and rtc content cleaning */
+
+	VRTC_UNLOCK(vrtc);
+	return (0);
+}

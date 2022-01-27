@@ -2938,6 +2938,44 @@ vmx_vmcleanup(void *arg)
 	free(vmx, M_VMX);
 }
 
+/*
+ * Ensure that the VMCS for this vcpu is loaded.
+ * Returns true if a VMCS load was required.
+ */
+static bool
+vmx_vmcs_access_ensure(struct vmx *vmx, int vcpu)
+{
+	int hostcpu;
+
+	if (vcpu_is_running(vmx->vm, vcpu, &hostcpu)) {
+		if (hostcpu != curcpu) {
+			panic("unexpected vcpu migration %d != %d",
+			    hostcpu, curcpu);
+		}
+		/* Earlier logic already took care of the load */
+		return (false);
+	} else {
+		vmcs_load(vmx->vmcs_pa[vcpu]);
+		return (true);
+	}
+}
+
+static void
+vmx_vmcs_access_done(struct vmx *vmx, int vcpu)
+{
+	int hostcpu;
+
+	if (vcpu_is_running(vmx->vm, vcpu, &hostcpu)) {
+		if (hostcpu != curcpu) {
+			panic("unexpected vcpu migration %d != %d",
+			    hostcpu, curcpu);
+		}
+		/* Later logic will take care of the unload */
+	} else {
+		vmcs_clear(vmx->vmcs_pa[vcpu]);
+	}
+}
+
 static uint64_t *
 vmxctx_regptr(struct vmxctx *vmxctx, int reg)
 {
@@ -2993,13 +3031,8 @@ vmxctx_regptr(struct vmxctx *vmxctx, int reg)
 static int
 vmx_getreg(void *arg, int vcpu, int reg, uint64_t *retval)
 {
-	int running, hostcpu, err;
 	struct vmx *vmx = arg;
 	uint64_t *regp;
-
-	running = vcpu_is_running(vmx->vm, vcpu, &hostcpu);
-	if (running && hostcpu != curcpu)
-		panic("vmx_getreg: %s%d is running", vm_name(vmx->vm), vcpu);
 
 	/* VMCS access not required for ctx reads */
 	if ((regp = vmxctx_regptr(&vmx->ctx[vcpu], reg)) != NULL) {
@@ -3007,11 +3040,9 @@ vmx_getreg(void *arg, int vcpu, int reg, uint64_t *retval)
 		return (0);
 	}
 
-	if (!running) {
-		vmcs_load(vmx->vmcs_pa[vcpu]);
-	}
+	bool vmcs_loaded = vmx_vmcs_access_ensure(vmx, vcpu);
+	int err = 0;
 
-	err = 0;
 	if (reg == VM_REG_GUEST_INTR_SHADOW) {
 		uint64_t gi = vmcs_read(VMCS_GUEST_INTERRUPTIBILITY);
 		*retval = (gi & HWINTR_BLOCKING) ? 1 : 0;
@@ -3039,23 +3070,17 @@ vmx_getreg(void *arg, int vcpu, int reg, uint64_t *retval)
 		}
 	}
 
-	if (!running) {
-		vmcs_clear(vmx->vmcs_pa[vcpu]);
+	if (vmcs_loaded) {
+		vmx_vmcs_access_done(vmx, vcpu);
 	}
-
 	return (err);
 }
 
 static int
 vmx_setreg(void *arg, int vcpu, int reg, uint64_t val)
 {
-	int running, hostcpu, error;
 	struct vmx *vmx = arg;
 	uint64_t *regp;
-
-	running = vcpu_is_running(vmx->vm, vcpu, &hostcpu);
-	if (running && hostcpu != curcpu)
-		panic("vmx_setreg: %s%d is running", vm_name(vmx->vm), vcpu);
 
 	/* VMCS access not required for ctx writes */
 	if ((regp = vmxctx_regptr(&vmx->ctx[vcpu], reg)) != NULL) {
@@ -3063,9 +3088,8 @@ vmx_setreg(void *arg, int vcpu, int reg, uint64_t val)
 		return (0);
 	}
 
-	if (!running) {
-		vmcs_load(vmx->vmcs_pa[vcpu]);
-	}
+	bool vmcs_loaded = vmx_vmcs_access_ensure(vmx, vcpu);
+	int err = 0;
 
 	if (reg == VM_REG_GUEST_INTR_SHADOW) {
 		if (val != 0) {
@@ -3073,19 +3097,19 @@ vmx_setreg(void *arg, int vcpu, int reg, uint64_t val)
 			 * Forcing the vcpu into an interrupt shadow is not
 			 * presently supported.
 			 */
-			error = EINVAL;
+			err = EINVAL;
 		} else {
 			uint64_t gi;
 
 			gi = vmcs_read(VMCS_GUEST_INTERRUPTIBILITY);
 			gi &= ~HWINTR_BLOCKING;
 			vmcs_write(VMCS_GUEST_INTERRUPTIBILITY, gi);
-			error = 0;
+			err = 0;
 		}
 	} else {
 		uint32_t encoding;
 
-		error = 0;
+		err = 0;
 		encoding = vmcs_field_encoding(reg);
 		switch (encoding) {
 		case VMCS_GUEST_IA32_EFER:
@@ -3134,10 +3158,11 @@ vmx_setreg(void *arg, int vcpu, int reg, uint64_t val)
 			 * XXX the processor retains global mappings when %cr3
 			 * is updated but vmx_invvpid() does not.
 			 */
-			vmx_invvpid(vmx, vcpu, running);
+			vmx_invvpid(vmx, vcpu,
+			    vcpu_is_running(vmx->vm, vcpu, NULL));
 			break;
 		case VMCS_INVALID_ENCODING:
-			error = EINVAL;
+			err = EINVAL;
 			break;
 		default:
 			vmcs_write(encoding, val);
@@ -3145,27 +3170,19 @@ vmx_setreg(void *arg, int vcpu, int reg, uint64_t val)
 		}
 	}
 
-	if (!running) {
-		vmcs_clear(vmx->vmcs_pa[vcpu]);
+	if (vmcs_loaded) {
+		vmx_vmcs_access_done(vmx, vcpu);
 	}
-
-	return (error);
+	return (err);
 }
 
 static int
 vmx_getdesc(void *arg, int vcpu, int seg, struct seg_desc *desc)
 {
-	int hostcpu, running;
 	struct vmx *vmx = arg;
 	uint32_t base, limit, access;
 
-	running = vcpu_is_running(vmx->vm, vcpu, &hostcpu);
-	if (running && hostcpu != curcpu)
-		panic("vmx_getdesc: %s%d is running", vm_name(vmx->vm), vcpu);
-
-	if (!running) {
-		vmcs_load(vmx->vmcs_pa[vcpu]);
-	}
+	bool vmcs_loaded = vmx_vmcs_access_ensure(vmx, vcpu);
 
 	vmcs_seg_desc_encoding(seg, &base, &limit, &access);
 	desc->base = vmcs_read(base);
@@ -3176,8 +3193,8 @@ vmx_getdesc(void *arg, int vcpu, int seg, struct seg_desc *desc)
 		desc->access = 0;
 	}
 
-	if (!running) {
-		vmcs_clear(vmx->vmcs_pa[vcpu]);
+	if (vmcs_loaded) {
+		vmx_vmcs_access_done(vmx, vcpu);
 	}
 	return (0);
 }
@@ -3185,17 +3202,10 @@ vmx_getdesc(void *arg, int vcpu, int seg, struct seg_desc *desc)
 static int
 vmx_setdesc(void *arg, int vcpu, int seg, const struct seg_desc *desc)
 {
-	int hostcpu, running;
 	struct vmx *vmx = arg;
 	uint32_t base, limit, access;
 
-	running = vcpu_is_running(vmx->vm, vcpu, &hostcpu);
-	if (running && hostcpu != curcpu)
-		panic("vmx_setdesc: %s%d is running", vm_name(vmx->vm), vcpu);
-
-	if (!running) {
-		vmcs_load(vmx->vmcs_pa[vcpu]);
-	}
+	bool vmcs_loaded = vmx_vmcs_access_ensure(vmx, vcpu);
 
 	vmcs_seg_desc_encoding(seg, &base, &limit, &access);
 	vmcs_write(base, desc->base);
@@ -3204,10 +3214,24 @@ vmx_setdesc(void *arg, int vcpu, int seg, const struct seg_desc *desc)
 		vmcs_write(access, desc->access);
 	}
 
-	if (!running) {
-		vmcs_clear(vmx->vmcs_pa[vcpu]);
+	if (vmcs_loaded) {
+		vmx_vmcs_access_done(vmx, vcpu);
 	}
 	return (0);
+}
+
+static int
+vmx_data_read(void *arg, int vcpu, const vmm_data_req_t *req)
+{
+	/* XXX: punt */
+	return (EINVAL);
+}
+
+static int
+vmx_data_write(void *arg, int vcpu, const vmm_data_req_t *req)
+{
+	/* XXX: punt */
+	return (EINVAL);
 }
 
 static int
@@ -3719,6 +3743,9 @@ struct vmm_ops vmm_ops_intel = {
 
 	.vmsavectx	= vmx_savectx,
 	.vmrestorectx	= vmx_restorectx,
+
+	.vmdata_read	= vmx_data_read,
+	.vmdata_write	= vmx_data_write,
 };
 
 /* Side-effect free HW validation derived from checks in vmx_init. */

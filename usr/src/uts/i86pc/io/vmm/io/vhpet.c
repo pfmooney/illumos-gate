@@ -771,3 +771,44 @@ vhpet_localize_resources(struct vhpet *vhpet)
 		vmm_glue_callout_localize(&vhpet->timer[i].callout);
 	}
 }
+
+int
+vhpet_data_read(struct vhpet *vhpet, const vmm_data_req_t *req)
+{
+	ASSERT3U(req->vdr_class, ==, VDC_HPET);
+
+	if (req->vdr_version != 1) {
+		return (EINVAL);
+	}
+	if (req->vdr_len < sizeof (struct vdi_hpet)) {
+		return (ENOSPC);
+	}
+	struct vdi_hpet *out = req->vdr_data;
+
+	VHPET_LOCK(vhpet);
+	out->vh_config = vhpet->config;
+	out->vh_isr = vhpet->isr;
+	out->vh_count_base = vhpet->countbase;
+	out->vh_time_base = sbttohrtime(vhpet->countbase_sbt);
+	for (uint_t i = 0; i < 8; i++) {
+		struct vdi_hpet_timer *timer_out = &out->vh_timers[i];
+
+		timer_out->vht_config = vhpet->timer[i].cap_config;
+		timer_out->vht_msi = vhpet->timer[i].msireg;
+		timer_out->vht_comp_val = vhpet->timer[i].compval;
+		timer_out->vht_comp_rate = vhpet->timer[i].comprate;
+		timer_out->vht_time_base =
+		    sbttohrtime(vhpet->timer[i].callout_sbt);
+	}
+
+	VHPET_UNLOCK(vhpet);
+
+	return (0);
+}
+
+int
+vhpet_data_write(struct vhpet *vhpet, const vmm_data_req_t *req)
+{
+	/* XXX: skip writes for now */
+	return (EPERM);
+}

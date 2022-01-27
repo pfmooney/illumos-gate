@@ -38,6 +38,8 @@
 
 struct vatpit *vatpit_init(struct vm *vm);
 void vatpit_cleanup(struct vatpit *vatpit);
+int vatpit_data_read(struct vatpit *, const vmm_data_req_t *);
+int vatpit_data_write(struct vatpit *, const vmm_data_req_t *);
 
 int vatpit_handler(void *arg, bool in, uint16_t port, uint8_t bytes,
     uint32_t *eax);

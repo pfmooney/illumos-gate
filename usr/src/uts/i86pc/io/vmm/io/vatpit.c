@@ -498,3 +498,103 @@ vatpit_localize_resources(struct vatpit *vatpit)
 		}
 	}
 }
+
+int
+vatpit_data_read(struct vatpit *vatpit, const vmm_data_req_t *req)
+{
+	ASSERT3U(req->vdr_class, ==, VDC_ATPIT);
+
+	if (req->vdr_version != 1) {
+		return (EINVAL);
+	}
+	if (req->vdr_len < sizeof (struct vdi_atpit)) {
+		return (ENOSPC);
+	}
+	struct vdi_atpit *out = req->vdr_data;
+
+	VATPIT_LOCK(vatpit);
+	for (uint_t i = 0; i < 3; i++) {
+		const struct channel *src = &vatpit->channel[i];
+		struct vdi_atpit_channel *chan = &out->va_channel[i];
+
+		chan->vac_initial = src->initial;
+		chan->vac_reg_cr = (src->reg_cr[0] | (uint16_t)src->reg_cr[1] << 8);
+		chan->vac_reg_ol = (src->reg_ol[0] | (uint16_t)src->reg_ol[1] << 8);
+		chan->vac_reg_status = src->reg_status;
+		chan->vac_mode = src->mode;
+		chan->vac_status =
+		    (src->slatched ? (1 << 0) : 0) |
+		    (src->olatched ? (1 << 1) : 0) |
+		    (src->cr_sel ? (1 << 2) : 0) |
+		    (src->ol_sel ? (1 << 3) : 0) |
+		    (src->fr_sel ? (1 << 4) : 0);
+		chan->vac_time_loaded = bttohrtime(src->load_bt);
+		chan->vac_time_target = bttohrtime(src->callout_bt);
+	}
+	VATPIT_UNLOCK(vatpit);
+
+	return (0);
+}
+
+#define	VALID_STATUS_BITS	(TIMER_STS_OUT | TIMER_STS_NULLCNT)
+
+static bool
+vatpit_data_validate(const vmm_data_req_t *req)
+{
+	ASSERT(req->vdr_version == 1 &&
+	    req->vdr_len >= sizeof (struct vdi_atpit));
+
+	const struct vdi_atpit *src = req->vdr_data;
+	const hrtime_t now = gethrtime();
+	for (uint_t i = 0; i < 3; i++) {
+		const struct vdi_atpit_channel *chan = &src->va_channel[i];
+
+		if ((chan->vac_status & ~VALID_STATUS_BITS) != 0) {
+			return (false);
+		}
+		if (chan->vac_time_loaded > now) {
+			return (false);
+		}
+	}
+	return (true);
+}
+
+int
+vatpit_data_write(struct vatpit *vatpit, const vmm_data_req_t *req)
+{
+	ASSERT3U(req->vdr_class, ==, VDC_ATPIT);
+
+	if (req->vdr_version != 1) {
+		return (EINVAL);
+	}
+	if (req->vdr_len < sizeof (struct vdi_atpit)) {
+		return (ENOSPC);
+	}
+	const struct vdi_atpit *src = req->vdr_data;
+	if (!vatpit_data_validate(req)) {
+		return (EINVAL);
+	}
+
+	VATPIT_LOCK(vatpit);
+	for (uint_t i = 0; i < 3; i++) {
+		const struct vdi_atpit_channel *chan = &src->va_channel[i];
+		struct channel *out = &vatpit->channel[i];
+
+		out->initial = chan->vac_initial;
+		out->reg_cr[0] = chan->vac_reg_cr;
+		out->reg_cr[1] = chan->vac_reg_cr >> 8;
+		out->reg_ol[0] = chan->vac_reg_ol;
+		out->reg_ol[1] = chan->vac_reg_ol >> 8;
+		out->reg_status = chan->vac_reg_status;
+		out->mode = chan->vac_mode;
+		out->slatched = (chan->vac_status & (1 << 0)) != 0;
+		out->olatched = (chan->vac_status & (1 << 1)) != 0;
+		out->cr_sel = (chan->vac_status & (1 << 2)) != 0;
+		out->ol_sel = (chan->vac_status & (1 << 3)) != 0;
+		out->fr_sel = (chan->vac_status & (1 << 4)) != 0;
+		/* TODO: load timers */
+	}
+	VATPIT_UNLOCK(vatpit);
+
+	return (0);
+}

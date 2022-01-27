@@ -38,6 +38,8 @@
 
 struct vatpic *vatpic_init(struct vm *vm);
 void vatpic_cleanup(struct vatpic *vatpic);
+int vatpic_data_read(struct vatpic *, const vmm_data_req_t *);
+int vatpic_data_write(struct vatpic *, const vmm_data_req_t *);
 
 int vatpic_master_handler(void *arg, bool in, uint16_t port, uint8_t bytes,
     uint32_t *eax);

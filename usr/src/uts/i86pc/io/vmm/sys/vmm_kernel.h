@@ -233,7 +233,7 @@ void vcpu_unblock_run(struct vm *, int);
 
 uint64_t vcpu_tsc_offset(struct vm *vm, int vcpuid, bool phys_adj);
 
-static __inline int
+static __inline bool
 vcpu_is_running(struct vm *vm, int vcpu, int *hostcpu)
 {
 	return (vcpu_get_state(vm, vcpu, hostcpu) == VCPU_RUNNING);

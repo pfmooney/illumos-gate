@@ -3807,6 +3807,16 @@ vmm_data_process(struct vm *vm, int vcpuid, vmm_data_req_t *req, bool is_write)
 			}
 		}
 		switch (cls) {
+		case VDC_LAPIC: {
+			struct vlapic *vlapic = vm_lapic(vm, vcpuid);
+			if (is_write) {
+				vlapic_data_write(vlapic, req);
+			} else {
+				vlapic_data_read(vlapic, req);
+			}
+			break;
+			}
+		}
 		cls++;
 	}
 	/* XXX: finish */

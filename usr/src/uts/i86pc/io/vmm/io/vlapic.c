@@ -60,6 +60,7 @@ __FBSDID("$FreeBSD$");
 #include <machine/clock.h>
 
 #include <machine/vmm.h>
+#include <sys/vmm_kernel.h>
 
 #include "vmm_lapic.h"
 #include "vmm_ktr.h"
@@ -98,14 +99,32 @@ __FBSDID("$FreeBSD$");
  */
 #define	VLAPIC_BUS_FREQ		(128 * 1024 * 1024)
 
+
+#define	APIC_VALID_MASK_ESR	(APIC_ESR_SEND_CS_ERROR | \
+		APIC_ESR_RECEIVE_CS_ERROR | APIC_ESR_SEND_ACCEPT | \
+		APIC_ESR_RECEIVE_ACCEPT | APIC_ESR_SEND_ILLEGAL_VECTOR | \
+		APIC_ESR_RECEIVE_ILLEGAL_VECTOR | APIC_ESR_ILLEGAL_REGISTER)
+
+
 static void vlapic_set_error(struct vlapic *, uint32_t, bool);
 static void vlapic_callout_handler(void *arg);
 
-#ifdef __ISRVEC_DEBUG
-static void vlapic_isrstk_accept(struct vlapic *, int);
-static void vlapic_isrstk_eoi(struct vlapic *, int);
-static void vlapic_isrstk_verify(const struct vlapic *);
-#endif /* __ISRVEC_DEBUG */
+/*
+ * Convert from a lapic page bitfield offset (say IRR3) to the appropriate index
+ * in the LAPIC struct (&lapic->irr0[idx = 3 * 4] == &lapic->irr3)
+ */
+static __inline int
+vlapic_off2idx(uint64_t base, uint64_t off)
+{
+	ASSERT(base == APIC_OFFSET_ISR0 || base == APIC_OFFSET_TMR0 ||
+	    base == APIC_OFFSET_IRR0);
+	ASSERT0(off & 0xf);
+
+	const uint64_t rel = off - base;
+	ASSERT(rel <= 0x70);
+
+	return (rel >> 2);
+}
 
 static __inline uint32_t
 vlapic_get_id(struct vlapic *vlapic)
@@ -565,13 +584,6 @@ vlapic_raise_ppr(struct vlapic *vlapic, int vec)
 
 	ppr = PRIO(vec);
 
-#ifdef __ISRVEC_DEBUG
-	KASSERT(vec >= 16 && vec < 256, ("invalid vector %d", vec));
-	KASSERT(ppr > lapic->tpr, ("ppr %x <= tpr %x", ppr, lapic->tpr));
-	KASSERT(ppr > lapic->ppr, ("ppr %x <= old ppr %x", ppr, lapic->ppr));
-	KASSERT(vec == (int)vlapic_active_isr(vlapic), ("ISR missing for ppr"));
-#endif /* __ISRVEC_DEBUG */
-
 	lapic->ppr = ppr;
 	VLAPIC_CTR1(vlapic, "vlapic_update_ppr 0x%02x", ppr);
 }
@@ -605,9 +617,6 @@ vlapic_process_eoi(struct vlapic *vlapic)
 			VCPU_CTR1(vlapic->vm, vlapic->vcpuid, "EOI vector %d",
 			    vector);
 			VLAPIC_CTR_ISR(vlapic, "vlapic_process_eoi");
-#ifdef __ISRVEC_DEBUG
-			vlapic_isrstk_eoi(vlapic, vector);
-#endif
 			vlapic_update_ppr(vlapic);
 			if ((tmrptr[idx] & (1 << bitpos)) != 0) {
 				vioapic_process_eoi(vlapic->vm, vlapic->vcpuid,
@@ -943,14 +952,6 @@ vlapic_set_tpr(struct vlapic *vlapic, uint8_t val)
 	}
 }
 
-static uint8_t
-vlapic_get_tpr(struct vlapic *vlapic)
-{
-	struct LAPIC *lapic = vlapic->apic_page;
-
-	return (lapic->tpr);
-}
-
 void
 vlapic_set_cr8(struct vlapic *vlapic, uint64_t val)
 {
@@ -968,9 +969,9 @@ vlapic_set_cr8(struct vlapic *vlapic, uint64_t val)
 uint64_t
 vlapic_get_cr8(struct vlapic *vlapic)
 {
-	uint8_t tpr;
+	struct LAPIC *lapic = vlapic->apic_page;
+	uint8_t tpr = lapic->tpr;
 
-	tpr = vlapic_get_tpr(vlapic);
 	return (tpr >> 4);
 }
 
@@ -1145,10 +1146,6 @@ vlapic_intr_accepted(struct vlapic *vlapic, int vector)
 	 * in-service, the PPR must be raised.
 	 */
 	vlapic_raise_ppr(vlapic, vector);
-
-#ifdef __ISRVEC_DEBUG
-	vlapic_isrstk_accept(vlapic, vector);
-#endif
 }
 
 void
@@ -1187,13 +1184,94 @@ vlapic_svr_write_handler(struct vlapic *vlapic)
 	}
 }
 
+/*
+ * Translate LAPIC register offsets to fields in the struct.
+ */
+static __inline uint32_t *
+vlapic_off2field(struct LAPIC *lapic, uint64_t off)
+{
+	ASSERT0(off & 0xf);
+
+	uint32_t *idxp = NULL;
+	switch (off) {
+		case APIC_OFFSET_ID:
+			return (&lapic->id);
+		case APIC_OFFSET_VER:
+			return (&lapic->version);
+		case APIC_OFFSET_TPR:
+			return (&lapic->tpr);
+		case APIC_OFFSET_APR:
+			return (&lapic->apr);
+		case APIC_OFFSET_PPR:
+			return (&lapic->ppr);
+		case APIC_OFFSET_LDR:
+			return (&lapic->ldr);
+		case APIC_OFFSET_DFR:
+			return (&lapic->dfr);
+		case APIC_OFFSET_SVR:
+			return (&lapic->svr);
+		case APIC_OFFSET_ISR0 ... APIC_OFFSET_ISR7:
+			idxp = &lapic->isr0;
+			return (&idxp[vlapic_off2idx(APIC_OFFSET_ISR0, off)]);
+		case APIC_OFFSET_TMR0 ... APIC_OFFSET_TMR7:
+			idxp = &lapic->tmr0;
+			return (&idxp[vlapic_off2idx(APIC_OFFSET_TMR0, off)]);
+		case APIC_OFFSET_IRR0 ... APIC_OFFSET_IRR7:
+			idxp = &lapic->irr0;
+			return (&idxp[vlapic_off2idx(APIC_OFFSET_IRR0, off)]);
+
+		/* The to-be-latch ESR value remains in vlapic`esr_pending */
+		case APIC_OFFSET_ESR:
+			return (&lapic->esr);
+
+		case APIC_OFFSET_ICR_LOW:
+			return (&lapic->icr_lo);
+		case APIC_OFFSET_ICR_HI:
+			return (&lapic->icr_hi);
+		case APIC_OFFSET_TIMER_ICR:
+			return (&lapic->icr_timer);
+		case APIC_OFFSET_TIMER_DCR:
+			return (&lapic->dcr_timer);
+
+		/*
+		 * The LVT entries are copied in vlapic`lvt_last, but the
+		 * in-page values should not differ.
+		 */
+		case APIC_OFFSET_CMCI_LVT:
+			return (&lapic->lvt_cmci);
+		case APIC_OFFSET_TIMER_LVT:
+			return (&lapic->lvt_timer);
+		case APIC_OFFSET_THERM_LVT:
+			return (&lapic->lvt_thermal);
+		case APIC_OFFSET_PERF_LVT:
+			return (&lapic->lvt_pcint);
+		case APIC_OFFSET_LINT0_LVT:
+			return (&lapic->lvt_lint0);
+		case APIC_OFFSET_LINT1_LVT:
+			return (&lapic->lvt_lint1);
+		case APIC_OFFSET_ERROR_LVT:
+			return (&lapic->lvt_error);
+
+		/*
+		 * The LAPIC page should not be consulted for CCR, since the
+		 * value is calculated on demand for reads.
+		 */
+		case APIC_OFFSET_TIMER_CCR:
+
+		/* EOI register is write-only */
+		case APIC_OFFSET_EOI:
+
+		default:
+			return (NULL);
+	}
+}
+
 int
 vlapic_read(struct vlapic *vlapic, int mmio_access, uint64_t offset,
     uint64_t *data)
 {
 	struct LAPIC	*lapic = vlapic->apic_page;
 	uint32_t	*reg;
-	int		 i;
 
 	/* Ignore MMIO accesses in x2APIC mode */
 	if (x2apic(vlapic) && mmio_access) {
@@ -1221,57 +1299,29 @@ vlapic_read(struct vlapic *vlapic, int mmio_access, uint64_t offset,
 	offset &= ~3;
 	switch (offset) {
 		case APIC_OFFSET_ID:
-			*data = lapic->id;
-			break;
 		case APIC_OFFSET_VER:
-			*data = lapic->version;
-			break;
 		case APIC_OFFSET_TPR:
-			*data = vlapic_get_tpr(vlapic);
-			break;
 		case APIC_OFFSET_APR:
-			*data = lapic->apr;
-			break;
 		case APIC_OFFSET_PPR:
-			*data = lapic->ppr;
-			break;
-		case APIC_OFFSET_EOI:
-			*data = lapic->eoi;
-			break;
 		case APIC_OFFSET_LDR:
-			*data = lapic->ldr;
-			break;
 		case APIC_OFFSET_DFR:
-			*data = lapic->dfr;
-			break;
 		case APIC_OFFSET_SVR:
-			*data = lapic->svr;
-			break;
 		case APIC_OFFSET_ISR0 ... APIC_OFFSET_ISR7:
-			i = (offset - APIC_OFFSET_ISR0) >> 2;
-			reg = &lapic->isr0;
-			*data = *(reg + i);
-			break;
 		case APIC_OFFSET_TMR0 ... APIC_OFFSET_TMR7:
-			i = (offset - APIC_OFFSET_TMR0) >> 2;
-			reg = &lapic->tmr0;
-			*data = *(reg + i);
-			break;
 		case APIC_OFFSET_IRR0 ... APIC_OFFSET_IRR7:
-			i = (offset - APIC_OFFSET_IRR0) >> 2;
-			reg = &lapic->irr0;
-			*data = atomic_load_acq_int(reg + i);
-			break;
 		case APIC_OFFSET_ESR:
-			*data = lapic->esr;
+		case APIC_OFFSET_TIMER_ICR:
+		case APIC_OFFSET_TIMER_DCR:
+		case APIC_OFFSET_ICR_HI:
+			reg = vlapic_off2field(lapic, offset);
+			ASSERT(reg != NULL);
+			*data = *reg;
 			break;
+
 		case APIC_OFFSET_ICR_LOW:
 			*data = lapic->icr_lo;
 			if (x2apic(vlapic))
 				*data |= (uint64_t)lapic->icr_hi << 32;
-			break;
-		case APIC_OFFSET_ICR_HI:
-			*data = lapic->icr_hi;
 			break;
 		case APIC_OFFSET_CMCI_LVT:
 		case APIC_OFFSET_TIMER_LVT ... APIC_OFFSET_ERROR_LVT:
@@ -1282,19 +1332,17 @@ vlapic_read(struct vlapic *vlapic, int mmio_access, uint64_t offset,
 			    "offset %#lx: %#lx/%#x", offset, *data, *reg));
 #endif
 			break;
-		case APIC_OFFSET_TIMER_ICR:
-			*data = lapic->icr_timer;
-			break;
 		case APIC_OFFSET_TIMER_CCR:
 			*data = vlapic_get_ccr(vlapic);
-			break;
-		case APIC_OFFSET_TIMER_DCR:
-			*data = lapic->dcr_timer;
 			break;
 		case APIC_OFFSET_SELF_IPI:
 			/*
 			 * XXX generate a GP fault if vlapic is in x2apic mode
 			 */
+			*data = 0;
+			break;
+		case APIC_OFFSET_EOI:
+			/* EOI is write-only */
 			*data = 0;
 			break;
 		case APIC_OFFSET_RRR:
@@ -1399,9 +1447,12 @@ vlapic_write(struct vlapic *vlapic, int mmio_access, uint64_t offset,
 			break;
 
 		case APIC_OFFSET_VER:
+			/* Verify that max LVT is within limit */
+
 		case APIC_OFFSET_APR:
-		case APIC_OFFSET_PPR:
 		case APIC_OFFSET_RRR:
+
+		case APIC_OFFSET_PPR:
 		case APIC_OFFSET_ISR0 ... APIC_OFFSET_ISR7:
 		case APIC_OFFSET_TMR0 ... APIC_OFFSET_TMR7:
 		case APIC_OFFSET_IRR0 ... APIC_OFFSET_IRR7:
@@ -1446,11 +1497,6 @@ vlapic_reset(struct vlapic *vlapic)
 	lapic->tpr = 0;
 	lapic->apr = 0;
 	lapic->ppr = 0;
-
-#ifdef __ISRVEC_DEBUG
-	/* With the PPR cleared, the isrvec tracking should be reset too */
-	vlapic->isrvec_stk_top = 0;
-#endif
 
 	lapic->eoi = 0;
 	lapic->ldr = 0;
@@ -1642,93 +1688,184 @@ vlapic_localize_resources(struct vlapic *vlapic)
 	vmm_glue_callout_localize(&vlapic->callout);
 }
 
-#ifdef __ISRVEC_DEBUG
-static void
-vlapic_isrstk_eoi(struct vlapic *vlapic, int vector)
+void
+vlapic_data_read(struct vlapic *vlapic, vmm_data_req_t *req)
 {
-	if (vlapic->isrvec_stk_top <= 0) {
-		panic("invalid vlapic isrvec_stk_top %d",
-		    vlapic->isrvec_stk_top);
+	struct LAPIC *lapic = vlapic->apic_page;
+	const vmm_data_item_t *item = NULL;
+
+	VLAPIC_TIMER_LOCK(vlapic);
+	while ((item = vmm_data_next(req, item, NULL)) != NULL) {
+		if (item->vdi_class != VDC_LAPIC) {
+			continue;
+		}
+		uint32_t ident = item->vdi_ident;
+		if (ident >= APIC_OFFSET_SELF_IPI || (ident & 0xf) != 0) {
+			continue;
+		}
+
+		const uint32_t *field = vlapic_off2field(lapic, ident);
+		if (field != NULL) {
+			vmm_data_set_value(req, item, (uint64_t)*field);
+			continue;
+		}
+		/* TODO: handle generated registers and extra data */
 	}
-	vlapic->isrvec_stk_top--;
-	vlapic_isrstk_verify(vlapic);
+	VLAPIC_TIMER_UNLOCK(vlapic);
 }
 
-static void
-vlapic_isrstk_accept(struct vlapic *vlapic, int vector)
+/*
+ * Describes the various subcomponents of the LAPIC which, when updated, require
+ * additional processing to ensure that internal state is properly maintained
+ * for correct operation.
+ */
+enum vlapic_data_update {
+	VDU_SVR,
+	VDU_VECTORS,
+	VDU_LVT,
+	VDU_PPR,
+	VDU_LDR,
+	VDU_DFR,
+	VDU_TIMER_DCR,
+	VDU_TIMER_ICR,
+	VDU_OTHER,
+	VDU_MAX,
+};
+
+void
+vlapic_data_write(struct vlapic *vlapic, vmm_data_req_t *req)
 {
-	int stk_top;
+	struct LAPIC *lapic = vlapic->apic_page;
+	const vmm_data_item_t *item = NULL;
+	uint64_t val;
+	ulong_t updates = 0;
 
-	vlapic->isrvec_stk_top++;
+	VLAPIC_TIMER_LOCK(vlapic);
+	while ((item = vmm_data_next(req, item, &val)) != NULL) {
+		if (item->vdi_class != VDC_LAPIC) {
+			continue;
+		}
+		uint32_t ident = item->vdi_ident;
+		if (ident >= APIC_OFFSET_SELF_IPI || (ident & 0xf) != 0) {
+			continue;
+		}
 
-	stk_top = vlapic->isrvec_stk_top;
-	if (stk_top >= ISRVEC_STK_SIZE)
-		panic("isrvec_stk_top overflow %d", stk_top);
+		uint32_t *field = vlapic_off2field(lapic, ident);
+		switch (ident) {
+		case APIC_OFFSET_TPR:
+			lapic->tpr = val & 0xff;
+			BT_SET(&updates, VDU_PPR);
+			break;
+		case APIC_OFFSET_LDR:
+			lapic->ldr = val;
+			BT_SET(&updates, VDU_LDR);
+			break;
+		case APIC_OFFSET_DFR:
+			lapic->dfr = val;
+			BT_SET(&updates, VDU_DFR);
+			break;
+		case APIC_OFFSET_SVR:
+			lapic->svr = val;
+			BT_SET(&updates, VDU_SVR);
+			break;
 
-	vlapic->isrvec_stk[stk_top] = vector;
-	vlapic_isrstk_verify(vlapic);
-}
+		case APIC_OFFSET_ICR_LOW:
+		case APIC_OFFSET_ICR_HI:
+			*field = val;
+			BT_SET(&updates, VDU_OTHER);
+			break;
 
-static void
-vlapic_isrstk_dump(const struct vlapic *vlapic)
-{
+		case APIC_OFFSET_ESR:
+			*field = val & APIC_VALID_MASK_ESR;
+			BT_SET(&updates, VDU_OTHER);
+			break;
+
+		case APIC_OFFSET_CMCI_LVT:
+		case APIC_OFFSET_TIMER_LVT ... APIC_OFFSET_ERROR_LVT:
+			*field = val;
+			BT_SET(&updates, VDU_LVT);
+			break;
+
+		case APIC_OFFSET_TIMER_ICR:
+			lapic->icr_timer = val;
+			BT_SET(&updates, VDU_TIMER_ICR);
+			break;
+
+		case APIC_OFFSET_TIMER_DCR:
+			lapic->dcr_timer = val;
+			BT_SET(&updates, VDU_TIMER_DCR);
+			break;
+
+		case APIC_OFFSET_ISR0 ... APIC_OFFSET_ISR7:
+		case APIC_OFFSET_TMR0 ... APIC_OFFSET_TMR7:
+		case APIC_OFFSET_IRR0 ... APIC_OFFSET_IRR7:
+			*field = val;
+			BT_SET(&updates, VDU_VECTORS);
+			BT_SET(&updates, VDU_PPR);
+			break;
+
+		case APIC_OFFSET_PPR:
+		case APIC_OFFSET_TIMER_CCR:
+			/* Entirely derived */
+			vmm_data_set_error(req, item);
+			break;
+
+		case APIC_OFFSET_ID:
+		case APIC_OFFSET_VER:
+		case APIC_OFFSET_APR:
+		case APIC_OFFSET_RRR:
+			/* Read-only */
+			vmm_data_set_error(req, item);
+			break;
+
+		default:
+			break;
+		}
+		/* TODO: handle generated registers and extra data */
+	}
+
 	int i;
-	uint32_t *isrptr;
+	while ((i = bt_getlowbit(&updates, 0, VDU_MAX - 1)) != -1) {
+		switch (i) {
+		case VDU_SVR:
+			vlapic_svr_write_handler(vlapic);
+			break;
+		case VDU_VECTORS:
+			/* TODO: verify vector bits are valid */
+			break;
+		case VDU_LVT:
+			break;
+		case VDU_PPR:
+			break;
+		case VDU_LDR:
+			break;
+		case VDU_DFR:
+			break;
+		case VDU_TIMER_DCR:
+			break;
+		case VDU_TIMER_ICR:
+			break;
+		case VDU_OTHER:
+			break;
+		}
+		BT_CLEAR(&updates, i);
+	}
 
-	isrptr = &vlapic->apic_page->isr0;
-	for (i = 0; i < 8; i++)
-		printf("ISR%d 0x%08x\n", i, isrptr[i * 4]);
+	if (vlapic->ops.sync_state) {
+		(*vlapic->ops.sync_state)(vlapic);
+	}
 
-	for (i = 0; i <= vlapic->isrvec_stk_top; i++)
-		printf("isrvec_stk[%d] = %d\n", i, vlapic->isrvec_stk[i]);
+	VLAPIC_TIMER_UNLOCK(vlapic);
 }
 
-static void
-vlapic_isrstk_verify(const struct vlapic *vlapic)
+/*
+ * Validate that the current state of the vLAPIC fulfills the invariants
+ * expected by the architectural definition and emulation logic.
+ */
+/*
+static int
+vlapic_validate(struct vlapic *vlapic)
 {
-	int i, lastprio, curprio, vector, idx;
-	uint32_t *isrptr;
-
-	/*
-	 * Note: The value at index 0 in isrvec_stk is always 0.
-	 *
-	 * It is a placeholder for the value of ISR vector when no bits are set
-	 * in the ISRx registers.
-	 */
-	if (vlapic->isrvec_stk_top == 0 && vlapic->isrvec_stk[0] != 0) {
-		panic("isrvec_stk is corrupted: %d", vlapic->isrvec_stk[0]);
-	}
-
-	/*
-	 * Make sure that the priority of the nested interrupts is
-	 * always increasing.
-	 */
-	lastprio = -1;
-	for (i = 1; i <= vlapic->isrvec_stk_top; i++) {
-		curprio = PRIO(vlapic->isrvec_stk[i]);
-		if (curprio <= lastprio) {
-			vlapic_isrstk_dump(vlapic);
-			panic("isrvec_stk does not satisfy invariant");
-		}
-		lastprio = curprio;
-	}
-
-	/*
-	 * Make sure that each bit set in the ISRx registers has a
-	 * corresponding entry on the isrvec stack.
-	 */
-	i = 1;
-	isrptr = &vlapic->apic_page->isr0;
-	for (vector = 0; vector < 256; vector++) {
-		idx = (vector / 32) * 4;
-		if (isrptr[idx] & (1 << (vector % 32))) {
-			if (i > vlapic->isrvec_stk_top ||
-			    vlapic->isrvec_stk[i] != vector) {
-				vlapic_isrstk_dump(vlapic);
-				panic("ISR and isrvec_stk out of sync");
-			}
-			i++;
-		}
-	}
+	return (0);
 }
-#endif
+*/

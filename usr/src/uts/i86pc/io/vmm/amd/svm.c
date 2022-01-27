@@ -2374,6 +2374,67 @@ svm_getdesc(void *arg, int vcpu, int reg, struct seg_desc *desc)
 	return (0);
 }
 
+static void
+svm_data_read(void *arg, int vcpu, vmm_data_req_t *req)
+{
+	struct svm_softc *sc = arg;
+	struct vmcb *vmcb = svm_get_vmcb(sc, vcpu);
+	const vmm_data_item_t *item;
+
+	while ((item = vmm_data_next(req, item, NULL)) != NULL) {
+		if (item->vdi_class == VDC_MSR) {
+			const uint64_t *msrp;
+
+			msrp = vmcb_msr_ptr(vmcb, item->vdi_ident, NULL);
+			if (msrp != NULL) {
+				vmm_data_set_value(req, item, *msrp)
+			}
+		}
+	}
+}
+
+static void
+svm_data_write(void *arg, int vcpu, vmm_data_req_t *req)
+{
+	struct svm_softc *sc = arg;
+	struct vmcb *vmcb = svm_get_vmcb(sc, vcpu);
+	const vmm_data_item_t *item;
+	uint64_t val;
+
+	while ((item = vmm_data_next(req, item, &val)) != NULL) {
+		if (item->vdi_class == VDC_MSR) {
+			uint64_t *msrp;
+			uint32_t dirty = 0;
+
+			msrp = vmcb_msr_ptr(vmcb, item->vdi_ident, &dirty);
+			if (msrp == NULL) {
+				continue;
+			}
+
+			switch (item->vdi_ident) {
+			case MSR_EFER:
+				/*
+				 * For now, just clone the logic from
+				 * svm_setreg():
+				 *
+				 * EFER_SVM must always be set when the guest is
+				 * executing
+				 */
+				*msrp = val | EFER_SVM;
+				break;
+			default:
+				*msrp = val;
+				break;
+			}
+			if (dirty != 0) {
+				svm_set_dirty(sc, vcpu, dirty);
+			}
+			vmm_data_set_processed(req, item);
+			continue;
+		}
+	}
+}
+
 static int
 svm_setcap(void *arg, int vcpu, int type, int val)
 {

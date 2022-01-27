@@ -73,6 +73,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/vmm_instruction_emul.h>
 #include <sys/vmm_vm.h>
 #include <sys/vmm_gpt.h>
+#include <sys/vmm_data.h>
 
 #include "vmm_ioport.h"
 #include "vmm_ktr.h"
@@ -3664,6 +3665,151 @@ vmm_kstat_update_vcpu(struct kstat *ksp, int rw)
 	vvk->vvk_time_emu_kern.value.ui64 = vcpu->ustate_total[VU_EMU_KERN];
 	vvk->vvk_time_emu_user.value.ui64 = vcpu->ustate_total[VU_EMU_USER];
 	vvk->vvk_time_sched.value.ui64 = vcpu->ustate_total[VU_SCHED];
+
+	return (0);
+}
+
+/* Arbitrary to limit size for static progress bitfields */
+#define VMM_DATA_REQ_LIMIT	512
+
+struct vmm_data_req {
+	vmm_data_item_t	*vdr_items;
+	uint64_t	*vdr_data;
+	ulong_t		vdr_pending[BT_BITOUL(VMM_DATA_REQ_LIMIT)];
+	ulong_t		vdr_error[BT_BITOUL(VMM_DATA_REQ_LIMIT)];
+	ulong_t		vdr_classes[BT_BITOUL(VDC_MAX)];
+	uint_t		vdr_count;
+	bool		vdr_is_write;
+};
+
+
+vmm_data_req_t *
+vmm_data_init(uint_t count, const vmm_data_item_t *items, uint64_t *data)
+{
+	vmm_data_req_t *req;
+	ASSERT(count != 0);
+
+	if (count == 0 || count > VMM_DATA_REQ_LIMIT) {
+		return (NULL);
+	}
+
+	req = kmem_zalloc(sizeof (*req), KM_SLEEP);
+
+	req->vdr_count = count;
+	/*
+	 * It is OK to cast aside the const restriction for `items` here, since
+	 * the rest of the vmm_data infrastructure will not expose the
+	 * underlying data to mutation.
+	 */
+	req->vdr_items = (vmm_data_item_t *)items;
+	req->vdr_data = data;
+
+	for (uint_t i = 0; i < count; i++) {
+		if (items[i].vdi_class >= VDC_MAX) {
+			BT_SET(req->vdr_error, i);
+		} else {
+			BT_SET(req->vdr_classes, items[i].vdi_class);
+			BT_SET(req->vdr_pending, i);
+		}
+	}
+
+	return (req);
+}
+
+static inline uint_t
+vmm_data_item_idx(vmm_data_req_t *req, const vmm_data_item_t *item)
+{
+	VERIFY3P(item, >=, req->vdr_items);
+	VERIFY3P(item, <, req->vdr_items + req->vdr_count);
+
+	return (((uintptr_t)item - (uintptr_t)req->vdr_items) / sizeof (*item));
+}
+
+const vmm_data_item_t *
+vmm_data_next(vmm_data_req_t *req, const vmm_data_item_t *prev, uint64_t *valp)
+{
+	uint_t idx = 0;
+	if (prev != NULL) {
+		idx = vmm_data_item_idx(req, prev) + 1;
+	}
+	int next = bt_getlowbit(req->vdr_pending, idx, req->vdr_count - 1);
+	if (next < 0) {
+		return (NULL);
+	} else {
+		ASSERT3U((uint_t)next, <, req->vdr_count);
+		if (valp != NULL) {
+			*valp = req->vdr_data[next];
+		}
+		return (&req->vdr_items[next]);
+	}
+}
+
+void
+vmm_data_set_error(vmm_data_req_t *req, const vmm_data_item_t *item)
+{
+	const uint_t idx = vmm_data_item_idx(req, item);
+	BT_SET(req->vdr_error, idx);
+	BT_CLEAR(req->vdr_pending, idx);
+}
+
+void
+vmm_data_set_value(vmm_data_req_t *req, const vmm_data_item_t *item,
+    uint64_t val)
+{
+	ASSERT(!req->vdr_is_write);
+
+	const uint_t idx = vmm_data_item_idx(req, item);
+	req->vdr_data[idx] = val;
+	BT_CLEAR(req->vdr_pending, idx);
+}
+
+void
+vmm_data_set_processed(vmm_data_req_t *req, const vmm_data_item_t *item)
+{
+	ASSERT(req->vdr_is_write);
+
+	const uint_t idx = vmm_data_item_idx(req, item);
+	BT_CLEAR(req->vdr_pending, idx);
+}
+
+void
+vmm_data_fini(vmm_data_req_t *req)
+{
+	kmem_free(req, sizeof (*req));
+}
+
+static inline bool
+vmm_data_is_cpu_specific(uint16_t data_class)
+{
+	switch (data_class) {
+	case VDC_REGISTER:
+	case VDC_MSR:
+	case VDC_FPU:
+	case VDC_LAPIC:
+	case VDC_VMM_ARCH:
+		return (true);
+	default:
+		return (false);
+	}
+}
+
+static int
+vmm_data_process(struct vm *vm, int vcpuid, vmm_data_req_t *req, bool is_write)
+{
+	req->vdr_is_write = is_write;
+
+	int cls = 0;
+	while ((cls = bt_getlowbit(req->vdr_classes, cls, VDC_MAX)) != -1) {
+		if (vmm_data_is_cpu_specific(cls)) {
+			if (vcpuid >= VM_MAXCPU) {
+				cls++;
+				continue;
+			}
+		}
+		switch (cls) {
+		cls++;
+	}
+	/* XXX: finish */
 
 	return (0);
 }

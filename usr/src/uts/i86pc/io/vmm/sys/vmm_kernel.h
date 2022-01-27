@@ -49,6 +49,7 @@
 #include <sys/sdt.h>
 #include <x86/segments.h>
 #include <sys/vmm.h>
+#include <sys/vmm_data.h>
 
 SDT_PROVIDER_DECLARE(vmm);
 
@@ -205,6 +206,7 @@ cpuset_t vm_suspended_cpus(struct vm *vm);
 bool vcpu_entry_bailout_checks(struct vm *vm, int vcpuid, uint64_t rip);
 bool vcpu_run_state_pending(struct vm *vm, int vcpuid);
 int vcpu_arch_reset(struct vm *vm, int vcpuid, bool init_only);
+
 
 /*
  * Return true if device indicated by bus/slot/func is supposed to be a
@@ -427,5 +429,16 @@ typedef struct vmm_vcpu_kstats {
 #define	VMM_KSTAT_CLASS	"misc"
 
 int vmm_kstat_update_vcpu(struct kstat *, int);
+
+
+typedef struct vmm_data_req vmm_data_req_t;
+
+vmm_data_req_t *vmm_data_init(uint_t, const vmm_data_item_t *, uint64_t *);
+const vmm_data_item_t *vmm_data_next(vmm_data_req_t *, const vmm_data_item_t *,
+    uint64_t *);
+void vmm_data_set_error(vmm_data_req_t *, const vmm_data_item_t *);
+void vmm_data_set_value(vmm_data_req_t *, const vmm_data_item_t *, uint64_t);
+void vmm_data_set_processed(vmm_data_req_t *, const vmm_data_item_t *);
+void vmm_data_fini(vmm_data_req_t *);
 
 #endif /* _VMM_KERNEL_H_ */

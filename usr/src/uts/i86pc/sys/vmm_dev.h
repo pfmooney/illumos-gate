@@ -350,6 +350,17 @@ struct vmm_dirty_tracker {
 	void		*vdt_pfns;	/* bit vector of dirty bits */
 };
 
+/* Current (arbitrary) max count for vm_data_xfer */
+#define VM_DATA_XFER_LIMIT	512
+
+struct vm_data_xfer {
+	int vcpuid;
+	uint32_t count;
+	vmm_data_item_t *items;
+	uint64_t *values;
+};
+
+
 #define	VMMCTL_IOC_BASE		(('V' << 16) | ('M' << 8))
 #define	VMM_IOC_BASE		(('v' << 16) | ('m' << 8))
 #define	VMM_LOCK_IOC_BASE	(('v' << 16) | ('l' << 8))
@@ -450,6 +461,9 @@ struct vmm_dirty_tracker {
 /* Note: forces a barrier on a flush operation before returning. */
 #define	VM_TRACK_DIRTY_PAGES		(VMM_IOC_BASE | 0x20)
 #define	VM_DESC_FPU_AREA		(VMM_IOC_BASE | 0x21)
+
+#define	VM_DATA_READ			(VMM_IOC_BASE | 0x21)
+#define	VM_DATA_WRITE			(VMM_IOC_BASE | 0x22)
 
 #define	VM_DEVMEM_GETOFFSET		(VMM_IOC_BASE | 0xff)
 

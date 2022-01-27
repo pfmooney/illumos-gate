@@ -375,6 +375,42 @@ vmm_write_unlock(vmm_softc_t *sc)
 	}
 }
 
+
+static int
+vmm_data_xfer_init(const struct vm_data_xfer *xfr, int md, bool is_read)
+{
+	const size_t item_sz = sizeof (vmm_data_item_t) * vdx->count;
+	const size_t data_sz = sizeof (uint64_t) * vdx->count;
+	vmm_data_item_t *items;
+	uint64_t *data;
+	vmm_data_req_t *req = NULL;
+	int err = 0;
+
+	if (vdx->count == 0) {
+		return (EINVAL);
+	} else if (vdx.count > VM_DATA_XFER_LIMIT) {
+		return (E2BIG);
+	}
+	items = kmem_alloc(item_sz, KM_SLEEP);
+	data = kmem_alloc(data_sz, KM_SLEEP);
+
+	if (ddi_copyin(vdx->items, items, item_sz, md) != 0) {
+		err = EFAULT;
+	}
+	if (is_read) {
+		bzero(data, data_sz);
+	} else if (ddi_copyin(vdx->values, data, data_sz, md) != 0) {
+		err = EFAULT;
+	}
+
+	if (err == 0) {
+		req = vmm_data_init(vdx->count, items, data);
+		if (req == NULL) {
+			err = EINVAL;
+		}
+	}
+}
+
 static int
 vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
     cred_t *credp, int *rvalp)
@@ -466,6 +502,24 @@ vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
 	case VM_TRACK_DIRTY_PAGES:
 		vmm_read_lock(sc);
 		lock_type = LOCK_READ_HOLD;
+		break;
+
+	case VM_DATA_READ:
+	case VM_DATA_WRITE:
+		if (ddi_copyin(datap, &vcpu, sizeof (vcpu), md)) {
+			return (EFAULT);
+		}
+		if (vcpu == -1) {
+			/* Access data for VM-wide devices */
+			vmm_write_lock(sc);
+			lock_type = LOCK_WRITE_HOLD;
+		} else if (vcpu >= 0 && vcpu < vm_get_maxcpus(sc->vmm_vm)) {
+			/* Access data associated with a specific vCPU */
+			vcpu_lock_one(sc, vcpu);
+			lock_type = LOCK_VCPU;
+		} else {
+			return (EINVAL);
+		}
 		break;
 
 	case VM_GET_GPA_PMAP:
@@ -1508,6 +1562,44 @@ vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
 		 */
 		break;
 	}
+	case VM_DATA_READ: {
+		struct vm_data_xfer vdx;
+		vmm_data_item_t *items;
+		uint64_t *data;
+		vmm_data_req_t *req;
+
+		if (ddi_copyin(datap, &vdx, sizeof (vdx), md) != 0) {
+			error = EFAULT;
+			break;
+		}
+		vdx.vcpuid = vcpu;
+		if (vdx.count == 0) {
+			error = EINVAL;
+			break;
+		} else if (vdx.count > VM_DATA_XFER_LIMIT) {
+			error = E2BIG;
+			break;
+		}
+		const size_t item_sz = sizeof (vmm_data_item_t) * vdx.count;
+		const size_t data_sz = sizeof (uint64_t) * vdx.count;
+		items = kmem_alloc(item_sz, KM_SLEEP);
+		data = kmem_alloc(data_sz, KM_SLEEP);
+		if (ddi_copyin(vdx.items, items, sizeof (vdx), md) != 0) {
+			error = EFAULT;
+			break;
+		}
+
+		req = vmm_data_init(vdx.count, items, data);
+		if (req != NULL) {
+		} else {
+			error = EINVAL;
+		}
+		if (error == 0) {
+		}
+
+		break;
+	}
+	case VM_DATA_WRITE:
 
 	default:
 		error = ENOTTY;

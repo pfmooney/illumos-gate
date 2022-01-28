@@ -60,8 +60,8 @@ __FBSDID("$FreeBSD$");
 #include <sys/sched.h>
 #include <sys/systm.h>
 #include <sys/sunddi.h>
+#include <sys/hma.h>
 
-#include <machine/pcb.h>
 #include <machine/md_var.h>
 #include <x86/psl.h>
 #include <x86/apicreg.h>
@@ -132,7 +132,7 @@ struct vcpu {
 	int	exc_errcode_valid;
 	uint32_t exc_errcode;
 	uint8_t		sipi_vector;	/* (i) SIPI vector */
-	struct savefpu	*guestfpu;	/* (a,i) guest fpu state */
+	hma_fpu_t	*guestfpu;	/* (a,i) guest fpu state */
 	uint64_t	guest_xcr0;	/* (i) guest %xcr0 register */
 	void		*stats;		/* (a,i) statistics */
 	struct vm_exit	exitinfo;	/* (x) exit reason and collateral */
@@ -318,7 +318,8 @@ vcpu_cleanup(struct vm *vm, int i, bool destroy)
 	VLAPIC_CLEANUP(vm->cookie, vcpu->vlapic);
 	if (destroy) {
 		vmm_stat_free(vcpu->stats);
-		fpu_save_area_free(vcpu->guestfpu);
+		hma_fpu_free(vcpu->guestfpu);
+		vcpu->guestfpu = NULL;
 		vie_free(vcpu->vie_ctx);
 		vcpu->vie_ctx = NULL;
 		vmc_destroy(vcpu->vmclient);
@@ -342,7 +343,7 @@ vcpu_init(struct vm *vm, int vcpu_id, bool create)
 		vcpu->state = VCPU_IDLE;
 		vcpu->hostcpu = NOCPU;
 		vcpu->lastloccpu = NOCPU;
-		vcpu->guestfpu = fpu_save_area_alloc();
+		vcpu->guestfpu = hma_fpu_alloc(KM_SLEEP);
 		vcpu->stats = vmm_stat_alloc();
 		vcpu->vie_ctx = vie_alloc();
 
@@ -369,7 +370,7 @@ vcpu_init(struct vm *vm, int vcpu_id, bool create)
 	vcpu->extint_pending = 0;
 	vcpu->exception_pending = 0;
 	vcpu->guest_xcr0 = XFEATURE_ENABLED_X87;
-	fpu_save_area_reset(vcpu->guestfpu);
+	hma_fpu_init(vcpu->guestfpu);
 	vmm_stat_init(vcpu->stats);
 	vcpu->tsc_offset = 0;
 }
@@ -1220,13 +1221,9 @@ vm_track_dirty_pages(struct vm *vm, uint64_t gpa, size_t len, uint8_t *bitmap)
 static void
 restore_guest_fpustate(struct vcpu *vcpu)
 {
-
-	/* flush host state to the pcb */
-	fpuexit(curthread);
-
-	/* restore guest FPU state */
+	/* Save host FPU and restore guest FPU */
 	fpu_stop_emulating();
-	fpurestore(vcpu->guestfpu);
+	hma_fpu_start_guest(vcpu->guestfpu);
 
 	/* restore guest XCR0 if XSAVE is enabled in the host */
 	if (rcr4() & CR4_XSAVE)
@@ -1252,9 +1249,9 @@ save_guest_fpustate(struct vcpu *vcpu)
 		load_xcr(0, vmm_get_host_xcr0());
 	}
 
-	/* save guest FPU state */
+	/* save guest FPU and restore host FPU */
 	fpu_stop_emulating();
-	fpusave(vcpu->guestfpu);
+	hma_fpu_stop_guest(vcpu->guestfpu);
 	/*
 	 * When the host state has been restored, we should not re-enable
 	 * CR0.TS on illumos for eager FPU.
@@ -2912,7 +2909,7 @@ vcpu_arch_reset(struct vm *vm, int vcpuid, bool init_only)
 	 */
 	if (!init_only) {
 		vcpu->guest_xcr0 = XFEATURE_ENABLED_X87;
-		fpu_save_area_reset(vcpu->guestfpu);
+		hma_fpu_init(vcpu->guestfpu);
 
 		/* XXX: clear MSRs and other pieces */
 	}

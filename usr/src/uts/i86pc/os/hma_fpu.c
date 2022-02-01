@@ -11,6 +11,7 @@
 
 /*
  * Copyright (c) 2018, Joyent, Inc.
+ * Copyright 2022 Oxide Computer Company
  */
 
 /*
@@ -28,12 +29,27 @@
 #include <sys/hma.h>
 #include <sys/x86_archext.h>
 #include <sys/archsystm.h>
+#include <sys/controlregs.h>
+#include <sys/sysmacros.h>
+#include <sys/stdbool.h>
+#include <sys/ontrap.h>
+#include <sys/cpuvar.h>
+#include <sys/disp.h>
 
 struct hma_fpu {
 	fpu_ctx_t	hf_guest_fpu;
 	kthread_t	*hf_curthread;
 	boolean_t	hf_inguest;
 };
+
+struct xsave_header {
+	uint64_t	xsh_xstate_bv;
+	uint64_t	xsh_xcomp_bv;
+	uint64_t	xsh_reserved[6];
+};
+
+#define	XSAVE_MIN_SIZE	(sizeof (struct fxsave_state) + \
+		sizeof (struct xsave_header))
 
 int
 hma_fpu_init(hma_fpu_t *fpu)
@@ -140,6 +156,28 @@ hma_fpu_start_guest(hma_fpu_t *fpu)
 	fpu->hf_guest_fpu.fpu_flags &= ~FPU_VALID;
 }
 
+/*
+ * Since fp_save() asserts that the target fpu_ctx be part of the thread PCB, it
+ * cannot be used for saving to other FPU contexts.  We work around that by
+ * calling the save mechanism directly.
+ */
+static void
+do_fp_save(fpu_ctx_t *fpu)
+{
+	switch (fp_save_mech) {
+	case FP_FXSAVE:
+		fpxsave(fpu->fpu_regs.kfpu_u.kfpu_fx);
+		break;
+	case FP_XSAVE:
+		xsavep(fpu->fpu_regs.kfpu_u.kfpu_xs, fpu->fpu_xsave_mask);
+		break;
+	default:
+		panic("Invalid fp_save_mech");
+	}
+	fpu->fpu_flags |= FPU_VALID;
+}
+
+
 void
 hma_fpu_stop_guest(hma_fpu_t *fpu)
 {
@@ -148,29 +186,220 @@ hma_fpu_stop_guest(hma_fpu_t *fpu)
 	ASSERT3U(fpu->hf_guest_fpu.fpu_flags & FPU_EN, !=, 0);
 	ASSERT3U(fpu->hf_guest_fpu.fpu_flags & FPU_VALID, ==, 0);
 
-	/*
-	 * Note, we can't use fp_save because it assumes that we're saving to
-	 * the thread's PCB and not somewhere else. Because this is a different
-	 * FPU context, we instead have to do this ourselves.
-	 */
-	switch (fp_save_mech) {
-	case FP_FXSAVE:
-		fpxsave(fpu->hf_guest_fpu.fpu_regs.kfpu_u.kfpu_fx);
-		break;
-	case FP_XSAVE:
-		xsavep(fpu->hf_guest_fpu.fpu_regs.kfpu_u.kfpu_xs,
-		    fpu->hf_guest_fpu.fpu_xsave_mask);
-		break;
-	default:
-		panic("Invalid fp_save_mech");
-		/*NOTREACHED*/
-	}
-	fpu->hf_guest_fpu.fpu_flags |= FPU_VALID;
+	/* Use the non-thread-PCB-safe fp_save */
+	do_fp_save(&fpu->hf_guest_fpu);
 
 	fp_restore(&curthread->t_lwp->lwp_pcb.pcb_fpu);
 
 	fpu->hf_inguest = B_FALSE;
 	fpu->hf_curthread = NULL;
+}
+
+/*
+ * Will output up to `ndesc` records into `descp`.  The required size for an
+ * XSAVE area containing all of the data fields supported by the host will be
+ * placed in `req_sizep` (if non-NULL).  Returns the number of feature bits
+ * supported by the host.
+ */
+uint_t
+hma_fpu_describe_xsave_state(hma_xsave_state_desc_t *descp, uint_t ndesc,
+    size_t *req_sizep)
+{
+	uint64_t features;
+
+	switch (fp_save_mech) {
+	case FP_FXSAVE:
+		/*
+		 * Even without xsave support, the FPU will have legacy x87
+		 * float and SSE state contained within.
+		 */
+		features = XFEATURE_LEGACY_FP | XFEATURE_SSE;
+		break;
+	case FP_XSAVE:
+		features = get_xcr(XFEATURE_ENABLED_MASK);
+		break;
+	default:
+		panic("Invalid fp_save_mech");
+	}
+
+	uint_t count, pos;
+	uint_t max_size = XSAVE_MIN_SIZE;
+	for (count = 0, pos = 0; features != 0; pos++) {
+		const uint64_t bit = (1 << pos);
+		uint32_t size, off;
+
+		if ((features & bit) == 0) {
+			continue;
+		}
+
+		if (bit == XFEATURE_LEGACY_FP || bit == XFEATURE_SSE) {
+			size = sizeof (struct fxsave_state);
+			off = 0;
+		} else {
+			/*
+			 * Size and position of data types within the XSAVE area
+			 * is described in leaf 0xD in the subfunction
+			 * corresponding to the bit position (for pos > 1).
+			 */
+			struct cpuid_regs regs = {
+				.cp_eax = 0xD,
+				.cp_ecx = pos,
+			};
+
+			ASSERT3U(pos, >, 1);
+
+			(void) __cpuid_insn(&regs);
+			size = regs.cp_eax;
+			off = regs.cp_ebx;
+		}
+		max_size = MAX(max_size, off + size);
+
+		if (count < ndesc) {
+			hma_xsave_state_desc_t *desc = &descp[count];
+
+			desc->hxsd_bit = bit;
+			desc->hxsd_size = size;
+			desc->hxsd_off = off;
+		}
+
+		count++;
+		features ^= bit;
+	}
+	if (req_sizep != NULL) {
+		*req_sizep = max_size;
+	}
+	return (count);
+}
+
+int
+hma_fpu_get_xsave_state(const hma_fpu_t *fpu, void *buf, size_t len)
+{
+	ASSERT(!fpu->hf_inguest);
+
+	size_t valid_len;
+	switch (fp_save_mech) {
+	case FP_FXSAVE: {
+		if (len < XSAVE_MIN_SIZE) {
+			return (ENOSPC);
+		}
+		bcopy(fpu->hf_guest_fpu.fpu_regs.kfpu_u.kfpu_generic, buf,
+		    sizeof (struct fxsave_state));
+
+		struct xsave_header hdr = {
+			.xsh_xstate_bv = XFEATURE_LEGACY_FP | XFEATURE_SSE,
+		};
+		bcopy(&hdr, buf + sizeof (struct fxsave_state), sizeof (hdr));
+
+		break;
+	}
+	case FP_XSAVE:
+		(void) hma_fpu_describe_xsave_state(NULL,  0, &valid_len);
+		if (len < valid_len) {
+			return (ENOSPC);
+		}
+		bcopy(fpu->hf_guest_fpu.fpu_regs.kfpu_u.kfpu_generic, buf,
+		    valid_len);
+		break;
+	default:
+		panic("Invalid fp_save_mech");
+	}
+
+	return (0);
+}
+
+int
+hma_fpu_set_xsave_state(hma_fpu_t *fpu, void *buf, size_t len)
+{
+	int err = 0;
+
+	ASSERT(!fpu->hf_inguest);
+
+	if (len < XSAVE_MIN_SIZE) {
+		return (EINVAL);
+	}
+	/* 64-byte alignment is demanded of the FPU-related operations */
+	if (((uintptr_t)buf & 63) != 0) {
+		return (EINVAL);
+	}
+
+	struct xsave_header *hdr = buf + sizeof(struct fxsave_state);
+	if (hdr->xsh_xcomp_bv != 0) {
+		/* XSAVEC formatting not supported at this time */
+		return (EINVAL);
+	}
+	uint64_t allowed_bits = 0;
+	switch (fp_save_mech) {
+	case FP_FXSAVE:
+		allowed_bits = XFEATURE_LEGACY_FP | XFEATURE_SSE;
+		break;
+	case FP_XSAVE:
+		allowed_bits = get_xcr(XFEATURE_ENABLED_MASK);
+		break;
+	default:
+		panic("Invalid fp_save_mech");
+	}
+	if ((hdr->xsh_xstate_bv & ~(allowed_bits)) != 0) {
+		return (EINVAL);
+	}
+
+	/*
+	 * For paranoia, allocate a temporary FPU context to save existing state
+	 * into, rather than using one associated with the thread PCB.
+	 */
+	fpu_ctx_t temp_ctx = { 0 };
+	temp_ctx.fpu_regs.kfpu_u.kfpu_generic =
+	    kmem_cache_alloc(fpsave_cachep, KM_SLEEP);
+
+	kpreempt_disable();
+	bool disable_when_done = (getcr0() & CR0_TS) != 0;
+	do_fp_save(&temp_ctx);
+
+	/*
+	 * If the provided data is invalid, it will case a #GP when we attempt
+	 * to load it into the FPU, so protect against that with on_trap().
+	 * Should the data load successfully, we can then be confident that its
+	 * later use in via hma_fpu_start_guest() will be safe.
+	 */
+	on_trap_data_t otd;
+	if (on_trap(&otd, OT_DATA_EC) != 0) {
+		err = EINVAL;
+		goto done;
+	}
+
+	switch (fp_save_mech) {
+	case FP_FXSAVE:
+		if (hdr->xsh_xstate_bv == 0) {
+			/*
+			 * An empty xstate_bv means we can simply load the
+			 * legacy FP/SSE area with their initial state.
+			 */
+			bcopy(&sse_initial,
+			    fpu->hf_guest_fpu.fpu_regs.kfpu_u.kfpu_fx,
+			    sizeof (sse_initial));
+		} else {
+			fpxrestore(buf);
+			fpxsave(fpu->hf_guest_fpu.fpu_regs.kfpu_u.kfpu_fx);
+		}
+		break;
+	case FP_XSAVE:
+		xrestore(buf, XFEATURE_FP_ALL);
+		xsavep(fpu->hf_guest_fpu.fpu_regs.kfpu_u.kfpu_xs,
+		    fpu->hf_guest_fpu.fpu_xsave_mask);
+		break;
+	default:
+		panic("Invalid fp_save_mech");
+	}
+
+done:
+	no_trap();
+	fp_restore(&temp_ctx);
+	if (disable_when_done) {
+		fpdisable();
+	}
+	kpreempt_enable();
+	kmem_cache_free(fpsave_cachep, temp_ctx.fpu_regs.kfpu_u.kfpu_generic);
+
+	return (err);
 }
 
 void
@@ -218,7 +447,6 @@ hma_fpu_set_fxsave_state(hma_fpu_t *fpu, const struct fxsave_state *fx)
 		break;
 	default:
 		panic("Invalid fp_save_mech");
-		/* NOTREACHED */
 	}
 
 	return (0);

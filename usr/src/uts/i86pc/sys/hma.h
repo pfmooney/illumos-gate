@@ -118,6 +118,31 @@ extern void hma_fpu_start_guest(hma_fpu_t *);
 extern void hma_fpu_stop_guest(hma_fpu_t *);
 
 /*
+ * Get and set the contents of the FPU save area, formatted as XSAVE-style
+ * information.  If XSAVE is not supported by the host, the input and output
+ * values will be translated to and from the FXSAVE format.  Attempts to set
+ * XSAVE values not supported by the host will result in an error.
+ *
+ * These functions cannot be called while the FPU is in use by the guest. It is
+ * up to callers to guarantee this fact.
+ */
+extern int hma_fpu_get_xsave_state(const hma_fpu_t *, void *, size_t);
+extern int hma_fpu_set_xsave_state(hma_fpu_t *, void *, size_t);
+
+typedef struct hma_xsave_state_desc {
+	uint64_t	hxsd_bit;
+	uint32_t	hxsd_size;
+	uint32_t	hxsd_off;
+} hma_xsave_state_desc_t;
+
+/*
+ * Get a description of the data fields supported by the host via the XSAVE APIs
+ * for getting/setting guest FPU data.
+ */
+extern uint_t hma_fpu_describe_xsave_state(hma_xsave_state_desc_t *, uint_t,
+    size_t *);
+
+/*
  * Get and set the contents of the FPU save area. This sets the fxsave style
  * information. In all cases when this is in use, if an XSAVE state is actually
  * used by the host, then this will end up zeroing all of the non-fxsave state

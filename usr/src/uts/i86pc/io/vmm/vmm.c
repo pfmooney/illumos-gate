@@ -1170,6 +1170,28 @@ vm_set_seg_desc(struct vm *vm, int vcpu, int reg, const struct seg_desc *desc)
 }
 
 int
+vm_get_fpu(struct vm *vm, int vcpuid, void *buf, size_t len)
+{
+	if (vcpuid < 0 || vcpuid >= vm->maxcpus)
+		return (EINVAL);
+
+	struct vcpu *vcpu = &vm->vcpu[vcpuid];
+
+	return (hma_fpu_get_xsave_state(vcpu->guestfpu, buf, len));
+}
+
+int
+vm_set_fpu(struct vm *vm, int vcpuid, void *buf, size_t len)
+{
+	if (vcpuid < 0 || vcpuid >= vm->maxcpus)
+		return (EINVAL);
+
+	struct vcpu *vcpu = &vm->vcpu[vcpuid];
+
+	return (hma_fpu_set_xsave_state(vcpu->guestfpu, buf, len));
+}
+
+int
 vm_get_run_state(struct vm *vm, int vcpuid, uint32_t *state, uint8_t *sipi_vec)
 {
 	struct vcpu *vcpu;

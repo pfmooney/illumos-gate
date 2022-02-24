@@ -2379,7 +2379,7 @@ svm_data_read(void *arg, int vcpu, vmm_data_req_t *req)
 {
 	struct svm_softc *sc = arg;
 	struct vmcb *vmcb = svm_get_vmcb(sc, vcpu);
-	const vmm_data_item_t *item;
+	const vmm_data_item_t *item = NULL;
 
 	while ((item = vmm_data_next(req, item, NULL)) != NULL) {
 		if (item->vdi_class == VDC_MSR) {
@@ -2387,7 +2387,7 @@ svm_data_read(void *arg, int vcpu, vmm_data_req_t *req)
 
 			msrp = vmcb_msr_ptr(vmcb, item->vdi_ident, NULL);
 			if (msrp != NULL) {
-				vmm_data_set_value(req, item, *msrp)
+				vmm_data_set_value(req, item, *msrp);
 			}
 		}
 	}
@@ -2398,7 +2398,7 @@ svm_data_write(void *arg, int vcpu, vmm_data_req_t *req)
 {
 	struct svm_softc *sc = arg;
 	struct vmcb *vmcb = svm_get_vmcb(sc, vcpu);
-	const vmm_data_item_t *item;
+	const vmm_data_item_t *item = NULL;
 	uint64_t val;
 
 	while ((item = vmm_data_next(req, item, &val)) != NULL) {
@@ -2548,4 +2548,7 @@ struct vmm_ops vmm_ops_amd = {
 
 	.vmsavectx	= svm_savectx,
 	.vmrestorectx	= svm_restorectx,
+
+	.vmdata_read	= svm_data_read,
+	.vmdata_write	= svm_data_write,
 };

@@ -66,6 +66,7 @@ struct vmspace;
 struct vm_client;
 struct vm_object;
 struct vm_guest_paging;
+struct vmm_data_req;
 
 typedef int	(*vmm_init_func_t)(void);
 typedef int	(*vmm_cleanup_func_t)(void);
@@ -87,6 +88,8 @@ typedef struct vlapic *(*vmi_vlapic_init)(void *vmi, int vcpu);
 typedef void	(*vmi_vlapic_cleanup)(void *vmi, struct vlapic *vlapic);
 typedef void	(*vmi_savectx)(void *vmi, int vcpu);
 typedef void	(*vmi_restorectx)(void *vmi, int vcpu);
+typedef void	(*vmi_data_read_t)(void *vmi, int vcpu, struct vmm_data_req *);
+typedef void	(*vmi_data_write_t)(void *vmi, int vcpu, struct vmm_data_req *);
 
 struct vmm_ops {
 	vmm_init_func_t		init;		/* module wide initialization */
@@ -107,6 +110,9 @@ struct vmm_ops {
 
 	vmi_savectx		vmsavectx;
 	vmi_restorectx		vmrestorectx;
+
+	vmi_data_read_t		vmdata_read;
+	vmi_data_write_t	vmdata_write;
 };
 
 extern struct vmm_ops vmm_ops_intel;

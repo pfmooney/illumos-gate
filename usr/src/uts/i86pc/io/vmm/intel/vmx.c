@@ -3220,6 +3220,16 @@ vmx_setdesc(void *arg, int vcpu, int seg, const struct seg_desc *desc)
 	return (0);
 }
 
+static void
+vmx_data_read(void *arg, int vcpu, vmm_data_req_t *req)
+{
+}
+
+static void
+vmx_data_write(void *arg, int vcpu, vmm_data_req_t *req)
+{
+}
+
 static int
 vmx_getcap(void *arg, int vcpu, int type, int *retval)
 {
@@ -3729,6 +3739,9 @@ struct vmm_ops vmm_ops_intel = {
 
 	.vmsavectx	= vmx_savectx,
 	.vmrestorectx	= vmx_restorectx,
+
+	.vmdata_read	= vmx_data_read,
+	.vmdata_write	= vmx_data_write,
 };
 
 /* Side-effect free HW validation derived from checks in vmx_init. */

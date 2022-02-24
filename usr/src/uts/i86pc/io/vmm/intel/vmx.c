@@ -2945,6 +2945,8 @@ vmx_vmcleanup(void *arg)
 static bool
 vmx_vmcs_access_ensure(struct vmx *vmx, int vcpu)
 {
+	int hostcpu;
+
 	if (vcpu_is_running(vmx->vm, vcpu, &hostcpu)) {
 		if (hostcpu != curcpu) {
 			panic("unexpected vcpu migration %d != %d",
@@ -2961,6 +2963,8 @@ vmx_vmcs_access_ensure(struct vmx *vmx, int vcpu)
 static void
 vmx_vmcs_access_done(struct vmx *vmx, int vcpu)
 {
+	int hostcpu;
+
 	if (vcpu_is_running(vmx->vm, vcpu, &hostcpu)) {
 		if (hostcpu != curcpu) {
 			panic("unexpected vcpu migration %d != %d",
@@ -3154,7 +3158,8 @@ vmx_setreg(void *arg, int vcpu, int reg, uint64_t val)
 			 * XXX the processor retains global mappings when %cr3
 			 * is updated but vmx_invvpid() does not.
 			 */
-			vmx_invvpid(vmx, vcpu, running);
+			vmx_invvpid(vmx, vcpu,
+			    vcpu_is_running(vmx->vm, vcpu, NULL));
 			break;
 		case VMCS_INVALID_ENCODING:
 			err = EINVAL;

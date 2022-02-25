@@ -42,6 +42,8 @@ struct vrtc;
 struct vrtc *vrtc_init(struct vm *vm);
 void vrtc_cleanup(struct vrtc *vrtc);
 void vrtc_reset(struct vrtc *vrtc);
+void vrtc_data_read(struct vrtc *, vmm_data_req_t *);
+void vrtc_data_write(struct vrtc *, vmm_data_req_t *);
 
 time_t vrtc_get_time(struct vm *vm);
 int vrtc_set_time(struct vm *vm, time_t secs);

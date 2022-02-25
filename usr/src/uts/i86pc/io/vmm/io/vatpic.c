@@ -823,3 +823,79 @@ vatpic_cleanup(struct vatpic *vatpic)
 {
 	free(vatpic, M_VATPIC);
 }
+
+void
+vatpic_data_read(struct vatpic *vatpic, vmm_data_req_t *req)
+{
+	const vmm_data_item_t *item = NULL;
+
+	VATPIC_LOCK(vatpic);
+	while ((item = vmm_data_next(req, item, NULL)) != NULL) {
+		if (item->vdi_class != VDC_ATPIC) {
+			continue;
+		}
+		const uint32_t ident = item->vdi_ident;
+		if (ident > VDI_ATPIC_REG(1, VDI_ATPIC_LEVEL(7))) {
+			/* Identifier outside possible range */
+			continue;
+		}
+
+		const uint_t chip_num = BITX(ident, 4, 4);
+		const uint_t reg = BITX(ident, 3, 0);
+		ASSERT3U(chip_num, <=, 1);
+		const struct atpic *atpic = &vatpic->atpic[chip_num];
+
+		if (reg >= VDI_ATPIC_LEVEL(0) && reg <= VDI_ATPIC_LEVEL(7)) {
+			const uint_t pin = (reg & 0x7);
+			vmm_data_set_value(req, item, atpic->acnt[pin]);
+			continue;
+		}
+
+		switch (reg) {
+		case VDI_ATPIC_STATE:
+			vmm_data_set_value(req, item, atpic->icw_state);
+			break;
+		case VDI_ATPIC_STATUS: {
+			uint8_t status = 0;
+			status |= (atpic->ready ? (1 << 0) : 0);
+			status |= (atpic->auto_eoi ? (1 << 1) : 0);
+			status |= (atpic->poll ? (1 << 2) : 0);
+			status |= (atpic->rotate ? (1 << 3) : 0);
+			status |= (atpic->special_full_nested ? (1 << 4) : 0);
+			status |= (atpic->read_isr_next ? (1 << 5) : 0);
+			status |= (atpic->intr_raised ? (1 << 6) : 0);
+			status |= (atpic->special_mask_mode ? (1 << 7) : 0);
+			vmm_data_set_value(req, item, status);
+			break;
+			}
+		case VDI_ATPIC_IRR:
+			vmm_data_set_value(req, item, atpic->reg_irr);
+			break;
+		case VDI_ATPIC_ISR:
+			vmm_data_set_value(req, item, atpic->reg_isr);
+			break;
+		case VDI_ATPIC_IMR:
+			vmm_data_set_value(req, item, atpic->reg_imr);
+			break;
+		case VDI_ATPIC_IRQ_BASE:
+			vmm_data_set_value(req, item, atpic->irq_base);
+			break;
+		case VDI_ATPIC_LOW_PRIO:
+			vmm_data_set_value(req, item, atpic->lowprio);
+			break;
+		case VDI_ATPIC_ELC:
+			vmm_data_set_value(req, item, atpic->elc);
+			break;
+		default:
+			break;
+		}
+	}
+	VATPIC_UNLOCK(vatpic);
+}
+
+void
+vatpic_data_write(struct vatpic *vatpic, vmm_data_req_t *req)
+{
+	/* XXX: skip writes for now */
+	return;
+}

@@ -41,6 +41,8 @@
 
 struct vhpet *vhpet_init(struct vm *vm);
 void vhpet_cleanup(struct vhpet *vhpet);
+void vhpet_data_read(struct vhpet *, vmm_data_req_t *);
+void vhpet_data_write(struct vhpet *, vmm_data_req_t *);
 int vhpet_mmio_write(struct vm *vm, int vcpuid, uint64_t gpa, uint64_t val,
     int size);
 int vhpet_mmio_read(struct vm *vm, int vcpuid, uint64_t gpa, uint64_t *val,

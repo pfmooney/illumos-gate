@@ -376,40 +376,99 @@ vmm_write_unlock(vmm_softc_t *sc)
 }
 
 
+/*
+ * Helpers for VM_DATA_READ/VM_DATA_WRITE ioctls
+ */
+typedef struct vm_data_xfer_state {
+	void		*vdxs_item_buf;
+	void		*vdxs_data_buf;
+	vmm_data_req_t	*vdxs_req;
+} vm_data_xfer_state_t;
+
 static int
-vmm_data_xfer_init(const struct vm_data_xfer *xfr, int md, bool is_read)
+vmm_data_xfer_init(vm_data_xfer_state_t *state, const struct vm_data_xfer *vdx,
+    int md, bool is_write)
 {
 	const size_t item_sz = sizeof (vmm_data_item_t) * vdx->count;
 	const size_t data_sz = sizeof (uint64_t) * vdx->count;
-	vmm_data_item_t *items;
-	uint64_t *data;
+	vmm_data_item_t *items = NULL;
+	uint64_t *data = NULL;
 	vmm_data_req_t *req = NULL;
 	int err = 0;
 
 	if (vdx->count == 0) {
 		return (EINVAL);
-	} else if (vdx.count > VM_DATA_XFER_LIMIT) {
+	} else if (vdx->count > VM_DATA_XFER_LIMIT) {
 		return (E2BIG);
 	}
+
 	items = kmem_alloc(item_sz, KM_SLEEP);
 	data = kmem_alloc(data_sz, KM_SLEEP);
 
 	if (ddi_copyin(vdx->items, items, item_sz, md) != 0) {
 		err = EFAULT;
+		goto bail;
 	}
-	if (is_read) {
+	if (!is_write) {
 		bzero(data, data_sz);
 	} else if (ddi_copyin(vdx->values, data, data_sz, md) != 0) {
 		err = EFAULT;
+		goto bail;
 	}
 
-	if (err == 0) {
-		req = vmm_data_init(vdx->count, items, data);
-		if (req == NULL) {
-			err = EINVAL;
-		}
+	req = vmm_data_init(vdx->count, items, data);
+	if (req == NULL) {
+		err = EINVAL;
+		goto bail;
 	}
+
+	state->vdxs_item_buf = items;
+	state->vdxs_data_buf = data;
+	state->vdxs_req = req;
+	return (0);
+
+bail:
+	VERIFY3P(items, !=, NULL);
+	VERIFY3P(data, !=, NULL);
+	VERIFY3S(err, !=, 0);
+
+	kmem_free(items, item_sz);
+	kmem_free(data, data_sz);
+	return (err);
 }
+
+static int
+vmm_data_xfer_copyout(vm_data_xfer_state_t *state,
+    const struct vm_data_xfer *vdx, int md, bool is_write)
+{
+	const size_t data_sz = sizeof (uint64_t) * vdx->count;
+	int err = 0;
+
+	if (!is_write) {
+		void *data = state->vdxs_data_buf;
+
+		if (ddi_copyout(data, vdx->values, data_sz, md) != 0) {
+			err = EFAULT;
+		}
+	} else {
+		/*
+		 * while we are not emitting detailed errors, there is no data
+		 * to copyout for write operations
+		 */
+	}
+	return (err);
+}
+
+static void
+vmm_data_xfer_fini(vm_data_xfer_state_t *state, const struct vm_data_xfer *vdx)
+{
+	const size_t item_sz = sizeof (vmm_data_item_t) * vdx->count;
+	const size_t data_sz = sizeof (uint64_t) * vdx->count;
+
+	kmem_free(state->vdxs_item_buf, item_sz);
+	kmem_free(state->vdxs_item_buf, data_sz);
+}
+
 
 static int
 vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
@@ -1564,42 +1623,46 @@ vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
 	}
 	case VM_DATA_READ: {
 		struct vm_data_xfer vdx;
-		vmm_data_item_t *items;
-		uint64_t *data;
-		vmm_data_req_t *req;
+		vm_data_xfer_state_t state;
 
 		if (ddi_copyin(datap, &vdx, sizeof (vdx), md) != 0) {
 			error = EFAULT;
 			break;
 		}
 		vdx.vcpuid = vcpu;
-		if (vdx.count == 0) {
-			error = EINVAL;
-			break;
-		} else if (vdx.count > VM_DATA_XFER_LIMIT) {
-			error = E2BIG;
-			break;
+
+		error = vmm_data_xfer_init(&state, &vdx, md, false);
+		if (error == 0) {
+			error = vmm_data_process(sc->vmm_vm, vdx.vcpuid,
+			    state.vdxs_req, false);
 		}
-		const size_t item_sz = sizeof (vmm_data_item_t) * vdx.count;
-		const size_t data_sz = sizeof (uint64_t) * vdx.count;
-		items = kmem_alloc(item_sz, KM_SLEEP);
-		data = kmem_alloc(data_sz, KM_SLEEP);
-		if (ddi_copyin(vdx.items, items, sizeof (vdx), md) != 0) {
+		if (error == 0) {
+			error = vmm_data_xfer_copyout(&state, &vdx, md, false);
+		}
+		vmm_data_xfer_fini(&state, &vdx);
+		break;
+	}
+	case VM_DATA_WRITE: {
+		struct vm_data_xfer vdx;
+		vm_data_xfer_state_t state;
+
+		if (ddi_copyin(datap, &vdx, sizeof (vdx), md) != 0) {
 			error = EFAULT;
 			break;
 		}
+		vdx.vcpuid = vcpu;
 
-		req = vmm_data_init(vdx.count, items, data);
-		if (req != NULL) {
-		} else {
-			error = EINVAL;
+		error = vmm_data_xfer_init(&state, &vdx, md, true);
+		if (error == 0) {
+			/* XXX: punt for now */
+			error = ENOTSUP;
 		}
 		if (error == 0) {
+			error = vmm_data_xfer_copyout(&state, &vdx, md, true);
 		}
-
+		vmm_data_xfer_fini(&state, &vdx);
 		break;
 	}
-	case VM_DATA_WRITE:
 
 	default:
 		error = ENOTTY;

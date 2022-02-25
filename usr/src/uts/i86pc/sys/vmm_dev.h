@@ -462,8 +462,8 @@ struct vm_data_xfer {
 #define	VM_TRACK_DIRTY_PAGES		(VMM_IOC_BASE | 0x20)
 #define	VM_DESC_FPU_AREA		(VMM_IOC_BASE | 0x21)
 
-#define	VM_DATA_READ			(VMM_IOC_BASE | 0x21)
-#define	VM_DATA_WRITE			(VMM_IOC_BASE | 0x22)
+#define	VM_DATA_READ			(VMM_IOC_BASE | 0x23)
+#define	VM_DATA_WRITE			(VMM_IOC_BASE | 0x24)
 
 #define	VM_DEVMEM_GETOFFSET		(VMM_IOC_BASE | 0xff)
 

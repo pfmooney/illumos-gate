@@ -771,3 +771,75 @@ vhpet_localize_resources(struct vhpet *vhpet)
 		vmm_glue_callout_localize(&vhpet->timer[i].callout);
 	}
 }
+
+void
+vhpet_data_read(struct vhpet *vhpet, vmm_data_req_t *req)
+{
+	const vmm_data_item_t *item = NULL;
+
+	VHPET_LOCK(vhpet);
+	while ((item = vmm_data_next(req, item, NULL)) != NULL) {
+		if (item->vdi_class != VDC_HPET) {
+			continue;
+		}
+		const uint32_t ident = item->vdi_ident;
+		if (ident <= VDI_HPET_TMR_REG(VHPET_NUM_TIMERS - 1,
+		    VDI_HPET_TMR_TIME_BASE)) {
+			const uint_t tmr_num = BITX(ident, 7, 4);
+			const uint_t reg = BITX(ident, 3, 0);
+			ASSERT3U(tmr_num, <, VHPET_NUM_TIMERS);
+			switch (reg) {
+			case VDI_HPET_TMR_CFG:
+				vmm_data_set_value(req, item,
+				    vhpet->timer[tmr_num].cap_config);
+				break;
+			case VDI_HPET_TMR_MSI:
+				vmm_data_set_value(req, item,
+				    vhpet->timer[tmr_num].msireg);
+				break;
+			case VDI_HPET_TMR_COMPVAL:
+				vmm_data_set_value(req, item,
+				    vhpet->timer[tmr_num].compval);
+				break;
+			case VDI_HPET_TMR_COMPRATE:
+				vmm_data_set_value(req, item,
+				    vhpet->timer[tmr_num].comprate);
+				break;
+			case VDI_HPET_TMR_TIME_BASE:
+				vmm_data_set_value(req, item, sbttohrtime(
+				    vhpet->timer[tmr_num].callout_sbt));
+				break;
+			default:
+				break;
+			}
+
+			continue;
+		}
+
+		switch (ident) {
+		case VDI_HPET_DEV_CFG:
+			vmm_data_set_value(req, item, vhpet->config);
+			break;
+		case VDI_HPET_ISR:
+			vmm_data_set_value(req, item, vhpet->isr);
+			break;
+		case VDI_HPET_COUNTER_BASE:
+			vmm_data_set_value(req, item, vhpet->countbase);
+			break;
+		case VDI_HPET_TIME_BASE:
+			vmm_data_set_value(req, item,
+			    sbttohrtime(vhpet->countbase_sbt));
+			break;
+		default:
+			break;
+		}
+	}
+	VHPET_UNLOCK(vhpet);
+}
+
+void
+vhpet_data_write(struct vhpet *vhpet, vmm_data_req_t *req)
+{
+	/* XXX: skip writes for now */
+	return;
+}

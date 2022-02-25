@@ -166,3 +166,39 @@ vpmtmr_handler(void *arg, bool in, uint16_t port, uint8_t bytes, uint32_t *val)
 
 	return (0);
 }
+
+void
+vpmtmr_data_read(struct vpmtmr *vpmtmr, vmm_data_req_t *req)
+{
+	const vmm_data_item_t *item = NULL;
+
+	while ((item = vmm_data_next(req, item, NULL)) != NULL) {
+		if (item->vdi_class != VDC_PM_TIMER) {
+			continue;
+		}
+		const uint32_t ident = item->vdi_ident;
+
+		switch (ident) {
+		case VDI_PM_TIMER_TIME_BASE:
+			vmm_data_set_value(req, item,
+			    sbttohrtime(vpmtmr->baseuptime));
+			break;
+		case VDI_PM_TIMER_VAL_BASE:
+			vmm_data_set_value(req, item,
+			    sbttohrtime(vpmtmr->baseval));
+			break;
+		case VDI_PM_TIMER_IOPORT:
+			vmm_data_set_value(req, item, vpmtmr->io_port);
+			break;
+		default:
+			break;
+		}
+	}
+}
+
+void
+vpmtmr_data_write(struct vpmtmr *vpmtmr, vmm_data_req_t *req)
+{
+	/* XXX: skip writes for now */
+	return;
+}

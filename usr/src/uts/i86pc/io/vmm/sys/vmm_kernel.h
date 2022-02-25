@@ -447,4 +447,7 @@ void vmm_data_set_value(vmm_data_req_t *, const vmm_data_item_t *, uint64_t);
 void vmm_data_set_processed(vmm_data_req_t *, const vmm_data_item_t *);
 void vmm_data_fini(vmm_data_req_t *);
 
+int vmm_data_process(struct vm *, int, vmm_data_req_t *, bool);
+void vmm_data_get_status(const vmm_data_req_t *, uint_t *, uint_t *);
+
 #endif /* _VMM_KERNEL_H_ */

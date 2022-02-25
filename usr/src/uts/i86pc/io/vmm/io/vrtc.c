@@ -1010,3 +1010,56 @@ vrtc_localize_resources(struct vrtc *vrtc)
 {
 	vmm_glue_callout_localize(&vrtc->callout);
 }
+
+void
+vrtc_data_read(struct vrtc *vrtc, vmm_data_req_t *req)
+{
+	const vmm_data_item_t *item = NULL;
+
+	VRTC_LOCK(vrtc);
+	while ((item = vmm_data_next(req, item, NULL)) != NULL) {
+		if (item->vdi_class != VDC_RTC) {
+			continue;
+		}
+		const uint32_t ident = item->vdi_ident;
+
+		if (ident <= VDI_RTC_BYTE_WISE(sizeof (struct rtcdev) - 1)) {
+			const uint8_t *datap = (const void *)&vrtc->rtcdev;
+			const uint_t reg = ident & 0x7f;
+
+			vmm_data_set_value(req, item, datap[reg]);
+			continue;
+		}
+		if (ident >= VDI_RTC_QWORD_WISE(0) &&
+		    ident <= VDI_RTC_QWORD_WISE(sizeof (struct rtcdev) - 1)) {
+			const uint64_t *datap = (const void *)&vrtc->rtcdev;
+			const uint_t reg = (ident & 0x7f) >> 3;
+
+			vmm_data_set_value(req, item, datap[reg]);
+			continue;
+		}
+
+		switch (ident) {
+		case VDI_RTC_REG_ADDRESS:
+			vmm_data_set_value(req, item, vrtc->addr);
+			break;
+		case VDI_RTC_TIME_BASE:
+			vmm_data_set_value(req, item,
+			    sbttohrtime(vrtc->base_uptime));
+			break;
+		case VDI_RTC_TIME_RTC:
+			vmm_data_set_value(req, item, vrtc->base_rtctime);
+			break;
+		default:
+			break;
+		}
+	}
+	VRTC_UNLOCK(vrtc);
+}
+
+void
+vrtc_data_write(struct vrtc *vrtc, vmm_data_req_t *req)
+{
+	/* XXX: skip writes for now */
+	return;
+}

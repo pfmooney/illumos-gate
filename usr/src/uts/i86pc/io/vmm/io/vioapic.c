@@ -57,6 +57,7 @@ __FBSDID("$FreeBSD$");
 
 #include <x86/apicreg.h>
 #include <machine/vmm.h>
+#include <sys/vmm_data.h>
 
 #include "vmm_ktr.h"
 #include "vmm_lapic.h"
@@ -473,4 +474,48 @@ vioapic_pincount(struct vm *vm)
 {
 
 	return (REDIR_ENTRIES);
+}
+
+void
+vioapic_data_read(struct vioapic *vioapic, vmm_data_req_t *req)
+{
+	const vmm_data_item_t *item = NULL;
+	while ((item = vmm_data_next(req, item, NULL)) != NULL) {
+		if (item->vdi_class != VDC_IOAPIC) {
+			continue;
+		}
+		const uint32_t ident = item->vdi_ident;
+
+		/* per-pin data fields */
+		const uint_t pin = ident & 0xff;
+		if (ident <= VDI_IOAPIC_REG(REDIR_ENTRIES - 1)) {
+			ASSERT3U(pin, <, REDIR_ENTRIES);
+			vmm_data_set_value(req, item, vioapic->rtbl[pin].reg);
+			continue;
+		} else if (ident >= VDI_IOAPIC_LEVEL(0) &&
+		    ident <= VDI_IOAPIC_LEVEL(REDIR_ENTRIES - 1)) {
+			ASSERT3U(pin, <, REDIR_ENTRIES);
+			vmm_data_set_value(req, item, vioapic->rtbl[pin].acnt);
+			continue;
+		}
+
+		switch (ident) {
+			case VDI_IOAPIC_ID:
+				vmm_data_set_value(req, item, vioapic->id);
+				break;
+			case VDI_IOAPIC_IOREGSEL:
+				vmm_data_set_value(req, item,
+				    vioapic->ioregsel);
+				break;
+			default:
+				break;
+		}
+	}
+}
+
+void
+vioapic_data_write(struct vioapic *vioapic, vmm_data_req_t *req)
+{
+	/* XXX: skip writes for now */
+	return;
 }

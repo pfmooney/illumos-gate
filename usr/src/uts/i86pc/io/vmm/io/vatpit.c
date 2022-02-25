@@ -498,3 +498,73 @@ vatpit_localize_resources(struct vatpit *vatpit)
 		}
 	}
 }
+
+void
+vatpit_data_read(struct vatpit *vatpit, vmm_data_req_t *req)
+{
+	const vmm_data_item_t *item = NULL;
+
+	VATPIT_LOCK(vatpit);
+	while ((item = vmm_data_next(req, item, NULL)) != NULL) {
+		if (item->vdi_class != VDC_ATPIT) {
+			continue;
+		}
+		const uint32_t ident = item->vdi_ident;
+		if (ident > VDI_ATPIT_REG(2, VDI_ATPIT_TIME_TARGET)) {
+			/* Identifier outside possible range */
+			continue;
+		}
+
+		const uint_t chan_num = BITX(ident, 5, 4);
+		const uint_t reg = BITX(ident, 3, 0);
+		ASSERT3U(chan_num, <=, 2);
+		const struct channel *chan = &vatpit->channel[chan_num];
+		switch (reg) {
+		case VDI_ATPIT_COUNTER:
+			vmm_data_set_value(req, item, chan->initial);
+			break;
+		case VDI_ATPIT_REG_CR:
+			vmm_data_set_value(req, item,
+			    chan->reg_cr[0] | (uint16_t)chan->reg_cr[1] << 8);
+			break;
+		case VDI_ATPIT_REG_OL:
+			vmm_data_set_value(req, item,
+			    chan->reg_ol[0] | (uint16_t)chan->reg_ol[1] << 8);
+			break;
+		case VDI_ATPIT_REG_STATUS:
+			vmm_data_set_value(req, item, chan->reg_status);
+			break;
+		case VDI_ATPIT_MODE:
+			vmm_data_set_value(req, item, chan->mode);
+			break;
+		case VDI_ATPIT_STATUS: {
+			uint8_t status = 0;
+			status |= (chan->slatched ? (1 << 0) : 0);
+			status |= (chan->olatched ? (1 << 1) : 0);
+			status |= (chan->cr_sel ? (1 << 2) : 0);
+			status |= (chan->ol_sel ? (1 << 3) : 0);
+			status |= (chan->fr_sel ? (1 << 4) : 0);
+			vmm_data_set_value(req, item, status);
+			break;
+			}
+		case VDI_ATPIT_TIME_LOADED:
+			vmm_data_set_value(req, item,
+			    bttohrtime(chan->load_bt));
+			break;
+		case VDI_ATPIT_TIME_TARGET:
+			vmm_data_set_value(req, item,
+			    bttohrtime(chan->callout_bt));
+			break;
+		default:
+			break;
+		}
+	}
+	VATPIT_UNLOCK(vatpit);
+}
+
+void
+vatpit_data_write(struct vatpit *vatpit, vmm_data_req_t *req)
+{
+	/* XXX: skip writes for now */
+	return;
+}

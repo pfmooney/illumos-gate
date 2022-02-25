@@ -3678,7 +3678,9 @@ struct vmm_data_req {
 	ulong_t		vdr_pending[BT_BITOUL(VMM_DATA_REQ_LIMIT)];
 	ulong_t		vdr_error[BT_BITOUL(VMM_DATA_REQ_LIMIT)];
 	ulong_t		vdr_classes[BT_BITOUL(VDC_MAX)];
-	uint_t		vdr_count;
+	uint_t		vdr_cnt_total;
+	uint_t		vdr_cnt_done;
+	uint_t		vdr_cnt_err;
 	bool		vdr_is_write;
 };
 
@@ -3695,7 +3697,7 @@ vmm_data_init(uint_t count, const vmm_data_item_t *items, uint64_t *data)
 
 	req = kmem_zalloc(sizeof (*req), KM_SLEEP);
 
-	req->vdr_count = count;
+	req->vdr_cnt_total = count;
 	/*
 	 * It is OK to cast aside the const restriction for `items` here, since
 	 * the rest of the vmm_data infrastructure will not expose the
@@ -3720,7 +3722,7 @@ static inline uint_t
 vmm_data_item_idx(vmm_data_req_t *req, const vmm_data_item_t *item)
 {
 	VERIFY3P(item, >=, req->vdr_items);
-	VERIFY3P(item, <, req->vdr_items + req->vdr_count);
+	VERIFY3P(item, <, req->vdr_items + req->vdr_cnt_total);
 
 	return (((uintptr_t)item - (uintptr_t)req->vdr_items) / sizeof (*item));
 }
@@ -3732,11 +3734,11 @@ vmm_data_next(vmm_data_req_t *req, const vmm_data_item_t *prev, uint64_t *valp)
 	if (prev != NULL) {
 		idx = vmm_data_item_idx(req, prev) + 1;
 	}
-	int next = bt_getlowbit(req->vdr_pending, idx, req->vdr_count - 1);
+	int next = bt_getlowbit(req->vdr_pending, idx, req->vdr_cnt_total - 1);
 	if (next < 0) {
 		return (NULL);
 	} else {
-		ASSERT3U((uint_t)next, <, req->vdr_count);
+		ASSERT3U((uint_t)next, <, req->vdr_cnt_total);
 		if (valp != NULL) {
 			*valp = req->vdr_data[next];
 		}
@@ -3748,8 +3750,11 @@ void
 vmm_data_set_error(vmm_data_req_t *req, const vmm_data_item_t *item)
 {
 	const uint_t idx = vmm_data_item_idx(req, item);
-	BT_SET(req->vdr_error, idx);
-	BT_CLEAR(req->vdr_pending, idx);
+	if (!BT_TEST(req->vdr_error, idx)) {
+		BT_SET(req->vdr_error, idx);
+		BT_CLEAR(req->vdr_pending, idx);
+		req->vdr_cnt_err++;
+	}
 }
 
 void
@@ -3760,7 +3765,10 @@ vmm_data_set_value(vmm_data_req_t *req, const vmm_data_item_t *item,
 
 	const uint_t idx = vmm_data_item_idx(req, item);
 	req->vdr_data[idx] = val;
-	BT_CLEAR(req->vdr_pending, idx);
+	if (BT_TEST(req->vdr_pending, idx)) {
+		BT_CLEAR(req->vdr_pending, idx);
+		req->vdr_cnt_done++;
+	}
 }
 
 void
@@ -3769,7 +3777,21 @@ vmm_data_set_processed(vmm_data_req_t *req, const vmm_data_item_t *item)
 	ASSERT(req->vdr_is_write);
 
 	const uint_t idx = vmm_data_item_idx(req, item);
-	BT_CLEAR(req->vdr_pending, idx);
+	if (BT_TEST(req->vdr_pending, idx)) {
+		BT_CLEAR(req->vdr_pending, idx);
+		req->vdr_cnt_done++;
+	}
+}
+
+void
+vmm_data_get_status(const vmm_data_req_t *req, uint_t *donep, uint_t *errp)
+{
+	if (donep != NULL) {
+		*donep = req->vdr_cnt_done;
+	}
+	if (errp != NULL) {
+		*errp = req->vdr_cnt_err;
+	}
 }
 
 void
@@ -3793,7 +3815,7 @@ vmm_data_is_cpu_specific(uint16_t data_class)
 	}
 }
 
-static int
+int
 vmm_data_process(struct vm *vm, int vcpuid, vmm_data_req_t *req, bool is_write)
 {
 	req->vdr_is_write = is_write;
@@ -3807,6 +3829,7 @@ vmm_data_process(struct vm *vm, int vcpuid, vmm_data_req_t *req, bool is_write)
 			}
 		}
 		switch (cls) {
+			/* per-cpu data/devices */
 		case VDC_LAPIC: {
 			struct vlapic *vlapic = vm_lapic(vm, vcpuid);
 			if (is_write) {
@@ -3816,7 +3839,64 @@ vmm_data_process(struct vm *vm, int vcpuid, vmm_data_req_t *req, bool is_write)
 			}
 			break;
 			}
+
+			/* system-wide data/devices */
+		case VDC_IOAPIC: {
+			struct vioapic *vioapic = vm->vioapic;
+			if (is_write) {
+				vioapic_data_write(vioapic, req);
+			} else {
+				vioapic_data_read(vioapic, req);
+			}
+			break;
+			}
+		case VDC_ATPIT: {
+			struct vatpit *vatpit = vm->vatpit;
+			if (is_write) {
+				vatpit_data_write(vatpit, req);
+			} else {
+				vatpit_data_read(vatpit, req);
+			}
+			break;
+			}
+		case VDC_ATPIC: {
+			struct vatpic *vatpic = vm->vatpic;
+			if (is_write) {
+				vatpic_data_write(vatpic, req);
+			} else {
+				vatpic_data_read(vatpic, req);
+			}
+			break;
+			}
+		case VDC_HPET: {
+			struct vhpet *vhpet = vm->vhpet;
+			if (is_write) {
+				vhpet_data_write(vhpet, req);
+			} else {
+				vhpet_data_read(vhpet, req);
+			}
+			break;
+			}
+		case VDC_PM_TIMER: {
+			struct vpmtmr *vpmtmr = vm->vpmtmr;
+			if (is_write) {
+				vpmtmr_data_write(vpmtmr, req);
+			} else {
+				vpmtmr_data_read(vpmtmr, req);
+			}
+			break;
+			}
+		case VDC_RTC: {
+			struct vrtc *vrtc = vm->vrtc;
+			if (is_write) {
+				vrtc_data_write(vrtc, req);
+			} else {
+				vrtc_data_read(vrtc, req);
+			}
+			break;
+			}
 		}
+
 		cls++;
 	}
 	/* XXX: finish */

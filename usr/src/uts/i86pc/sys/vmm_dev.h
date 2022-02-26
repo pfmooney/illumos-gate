@@ -49,6 +49,7 @@
 
 #include <sys/param.h>
 #include <sys/cpuset.h>
+#include <sys/vmm_data.h>
 
 struct vm_create_req {
 	char		name[VM_MAX_NAMELEN];

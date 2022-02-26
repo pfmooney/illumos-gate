@@ -3899,7 +3899,5 @@ vmm_data_process(struct vm *vm, int vcpuid, vmm_data_req_t *req, bool is_write)
 
 		cls++;
 	}
-	/* XXX: finish */
-
 	return (0);
 }

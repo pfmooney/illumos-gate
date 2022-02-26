@@ -81,6 +81,9 @@ static list_t		vmm_destroy_list;
 static id_space_t	*vmm_minors;
 static void		*vmm_statep;
 
+/* temporary safety switch */
+int		vmm_allow_state_writes;
+
 static const char *vmmdev_hvm_name = "bhyve";
 
 /* For sdev plugin (/dev) */
@@ -1654,8 +1657,13 @@ vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
 
 		error = vmm_data_xfer_init(&state, &vdx, md, true);
 		if (error == 0) {
-			/* XXX: punt for now */
-			error = ENOTSUP;
+			if (vmm_allow_state_writes == 0) {
+				/* disallow access without explicit opt-in */
+				error = ENOTSUP;
+			} else {
+				error = vmm_data_process(sc->vmm_vm, vdx.vcpuid,
+				    state.vdxs_req, true);
+			}
 		}
 		if (error == 0) {
 			error = vmm_data_xfer_copyout(&state, &vdx, md, true);

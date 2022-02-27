@@ -785,7 +785,7 @@ vhpet_data_read(struct vhpet *vhpet, vmm_data_req_t *req)
 		const uint32_t ident = item->vdi_ident;
 		if (ident <= VDI_HPET_TMR_REG(VHPET_NUM_TIMERS - 1,
 		    VDI_HPET_TMR_TIME_BASE)) {
-			const uint_t tmr_num = BITX(ident, 7, 4);
+			const uint_t tmr_num = BITX(ident, 8, 4);
 			const uint_t reg = BITX(ident, 3, 0);
 			ASSERT3U(tmr_num, <, VHPET_NUM_TIMERS);
 			switch (reg) {

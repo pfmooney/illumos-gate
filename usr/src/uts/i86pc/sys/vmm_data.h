@@ -174,22 +174,22 @@ typedef struct vmm_data_item {
  *
  * Ident = (timer << 4) + register
  *
- * - 0x100: Device configuration register
- * - 0x101: ISR
- * - 0x102: counter base
- * - 0x103: Timer base (hrtime)
+ * - 0x1000: Device configuration register
+ * - 0x1001: ISR
+ * - 0x1002: counter base
+ * - 0x1003: Timer base (hrtime)
  */
-#define	VDI_HPET_TMR_REG(tmr, reg)	((((tmr) & 0xf) << 4) + ((reg) & 0x7))
+#define	VDI_HPET_TMR_REG(tmr, reg)	((((tmr) & 0x1f) << 4) + ((reg) & 0x7))
 #define	VDI_HPET_TMR_CFG		0x0
 #define	VDI_HPET_TMR_MSI		0x1
 #define	VDI_HPET_TMR_COMPVAL		0x2
 #define	VDI_HPET_TMR_COMPRATE		0x3
 #define	VDI_HPET_TMR_TIME_BASE		0x4
 
-#define	VDI_HPET_DEV_CFG		0x100
-#define	VDI_HPET_ISR			0x101
-#define	VDI_HPET_COUNTER_BASE		0x102
-#define	VDI_HPET_TIME_BASE		0x103
+#define	VDI_HPET_DEV_CFG		0x1000
+#define	VDI_HPET_ISR			0x1001
+#define	VDI_HPET_COUNTER_BASE		0x1002
+#define	VDI_HPET_TIME_BASE		0x1003
 
 /*
  * VDC_PM_TIMER:

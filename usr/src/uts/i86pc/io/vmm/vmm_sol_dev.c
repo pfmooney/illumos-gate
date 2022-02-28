@@ -469,7 +469,7 @@ vmm_data_xfer_fini(vm_data_xfer_state_t *state, const struct vm_data_xfer *vdx)
 	const size_t data_sz = sizeof (uint64_t) * vdx->count;
 
 	kmem_free(state->vdxs_item_buf, item_sz);
-	kmem_free(state->vdxs_item_buf, data_sz);
+	kmem_free(state->vdxs_data_buf, data_sz);
 }
 
 

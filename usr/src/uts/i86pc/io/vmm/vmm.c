@@ -236,6 +236,8 @@ static struct vmm_ops vmm_ops_null = {
 	.vlapic_cleanup	= (vmi_vlapic_cleanup)nullop_panic,
 	.vmsavectx	= (vmi_savectx)nullop_panic,
 	.vmrestorectx	= (vmi_restorectx)nullop_panic,
+	.vmdata_read	= (vmi_data_read_t)nullop_panic,
+	.vmdata_write	= (vmi_data_write_t)nullop_panic,
 };
 
 static struct vmm_ops *ops = &vmm_ops_null;

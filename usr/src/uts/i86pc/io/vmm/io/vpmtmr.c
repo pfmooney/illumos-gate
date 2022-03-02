@@ -64,9 +64,8 @@ struct vpmtmr {
 	struct vm	*vm;
 	void		*io_cookie;
 	uint16_t	io_port;
-	sbintime_t	freq_sbt;
-	sbintime_t	baseuptime;
-	uint32_t	baseval;
+	hrtime_t	base_time;
+	uint32_t	base_val;
 };
 
 static MALLOC_DEFINE(M_VPMTMR, "vpmtmr", "bhyve virtual acpi timer");
@@ -75,15 +74,11 @@ struct vpmtmr *
 vpmtmr_init(struct vm *vm)
 {
 	struct vpmtmr *vpmtmr;
-	struct bintime bt;
 
 	vpmtmr = malloc(sizeof (struct vpmtmr), M_VPMTMR, M_WAITOK | M_ZERO);
 	vpmtmr->vm = vm;
-	vpmtmr->baseuptime = sbinuptime();
-	vpmtmr->baseval = 0;
-
-	FREQ2BT(PMTMR_FREQ, &bt);
-	vpmtmr->freq_sbt = bttosbt(bt);
+	vpmtmr->base_time = gethrtime();
+	vpmtmr->base_val = 0;
 
 	return (vpmtmr);
 }
@@ -149,20 +144,18 @@ int
 vpmtmr_handler(void *arg, bool in, uint16_t port, uint8_t bytes, uint32_t *val)
 {
 	struct vpmtmr *vpmtmr = arg;
-	sbintime_t now, delta;
 
 	if (!in || bytes != 4)
 		return (-1);
 
 	/*
-	 * No locking needed because 'baseuptime' and 'baseval' are
+	 * No locking needed because 'base_time' and 'base_val' are
 	 * written only during initialization.
 	 */
-	now = sbinuptime();
-	delta = now - vpmtmr->baseuptime;
-	KASSERT(delta >= 0, ("vpmtmr_handler: uptime went backwards: "
-	    "%lx to %lx", vpmtmr->baseuptime, now));
-	*val = vpmtmr->baseval + delta / vpmtmr->freq_sbt;
+	const hrtime_t delta = gethrtime() - vpmtmr->base_time;
+	ASSERT3S(delta, >=, 0);
+
+	*val = hrt_freq_count(delta, PMTMR_FREQ);
 
 	return (0);
 }

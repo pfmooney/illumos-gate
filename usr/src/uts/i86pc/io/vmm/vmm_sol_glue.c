@@ -349,13 +349,6 @@ vmm_glue_callout_init(struct callout *c, int mpsafe)
 	mutex_exit(&cpu_lock);
 }
 
-static __inline hrtime_t
-sbttohrtime(sbintime_t sbt)
-{
-	return (((sbt >> 32) * NANOSEC) +
-	    (((uint64_t)NANOSEC * (uint32_t)sbt) >> 32));
-}
-
 void
 callout_reset_hrtime(struct callout *c, hrtime_t target, void (*func)(void *),
     void *arg, int flags)
@@ -370,14 +363,6 @@ callout_reset_hrtime(struct callout *c, hrtime_t target, void (*func)(void *),
 	c->c_arg = arg;
 	c->c_target = target;
 	cyclic_reprogram(c->c_cyc_id, target);
-}
-
-int
-vmm_glue_callout_reset_sbt(struct callout *c, sbintime_t sbt, sbintime_t pr,
-    void (*func)(void *), void *arg, int flags)
-{
-	callout_reset_hrtime(c, sbttohrtime(sbt), func, arg, flags);
-	return (0);
 }
 
 int

@@ -45,8 +45,6 @@ struct callout {
 #define	callout_pending(c)	((c)->c_target > (c)->c_fired)
 
 void	vmm_glue_callout_init(struct callout *c, int mpsafe);
-int	vmm_glue_callout_reset_sbt(struct callout *c, sbintime_t sbt,
-    sbintime_t pr, void (*func)(void *), void *arg, int flags);
 int	vmm_glue_callout_stop(struct callout *c);
 int	vmm_glue_callout_drain(struct callout *c);
 
@@ -69,13 +67,6 @@ static __inline int
 callout_drain(struct callout *c)
 {
 	return (vmm_glue_callout_drain(c));
-}
-
-static __inline int
-callout_reset_sbt(struct callout *c, sbintime_t sbt, sbintime_t pr,
-    void (*func)(void *), void *arg, int flags)
-{
-	return (vmm_glue_callout_reset_sbt(c, sbt, pr, func, arg, flags));
 }
 
 void callout_reset_hrtime(struct callout *c, hrtime_t target,

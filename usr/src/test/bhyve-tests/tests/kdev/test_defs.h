@@ -13,12 +13,12 @@
  * Copyright 2022 Oxide Computer Company
  */
 
-#include "payload_common.h"
-#include "payload_utils.h"
+#ifndef _TEST_DEFS_H_
+#define	_TEST_DEFS_H_
 
-void
-start(void)
-{
-	/* just emit success */
-	outw(IOP_TEST_RESULT, 0);
-}
+#define	IOP_PMTMR	0x408
+
+#define	PMTMR_FREQ		3579545
+#define PMTMR_TARGET_TICKS	(PMTMR_FREQ/10)
+
+#endif /* _TEST_DEFS_H_ */

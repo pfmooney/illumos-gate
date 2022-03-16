@@ -35,3 +35,21 @@ ENTRY(outl)
 	outl    (%dx)
 	ret
 SET_SIZE(outl)
+
+ENTRY(inb)
+	movw    %di, %dx
+	inb    (%dx)
+	ret
+SET_SIZE(inb)
+
+ENTRY(inw)
+	movw    %di, %dx
+	inw    (%dx)
+	ret
+SET_SIZE(inb)
+
+ENTRY(inl)
+	movw    %di, %dx
+	inl    (%dx)
+	ret
+SET_SIZE(inl)

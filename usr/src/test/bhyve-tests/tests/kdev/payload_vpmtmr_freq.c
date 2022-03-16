@@ -13,16 +13,24 @@
  * Copyright 2022 Oxide Computer Company
  */
 
-#ifndef _PAYLOAD_UTILS_H_
-#define	_PAYLOAD_UTILS_H_
+#include "payload_common.h"
+#include "payload_utils.h"
+#include "test_defs.h"
 
-#include <sys/types.h>
+void
+start(void)
+{
+	/* loop for as long as the host wants */
+	for (;;) {
+		uint32_t start, end;
 
-void outb(uint16_t, uint8_t);
-void outw(uint16_t, uint16_t);
-void outl(uint16_t, uint32_t);
-uint8_t inb(uint16_t);
-uint16_t inw(uint16_t);
-uint32_t inl(uint16_t);
+		start = inl(IOP_PMTMR);
+		outl(IOP_TEST_VALUE, start);
 
-#endif /* _PAYLOAD_UTILS_H_ */
+		do {
+			end = inl(IOP_PMTMR);
+			/* wait for enough ticks to pass */
+		} while (end < (start + PMTMR_TARGET_TICKS));
+		outl(IOP_TEST_VALUE, end);
+	}
+}

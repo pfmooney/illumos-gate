@@ -15,7 +15,8 @@ include $(SRC)/cmd/Makefile.cmd
 include $(SRC)/cmd/Makefile.cmd.64
 include $(SRC)/test/Makefile.com
 
-PROG = vpmtmr_freq
+PROG =	vpmtmr_freq \
+	vhpet_freq
 
 PAYLOADS = $(PROG)
 include ../Makefile.in_guest

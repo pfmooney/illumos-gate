@@ -18,11 +18,15 @@
 
 #define	IOP_PMTMR	0x408
 #define	MMIO_HPET_BASE	0xfed00000UL
+#define	MMIO_LAPIC_BASE	0xfee00000UL
 
 #define	PMTMR_FREQ		3579545
 #define PMTMR_TARGET_TICKS	(PMTMR_FREQ / 10)
 
 #define	HPET_FREQ		(1 << 24)
 #define	HPET_TARGET_TICKS	(HPET_FREQ / 10)
+
+#define	LAPIC_FREQ		(128 * 1024 * 1024)
+#define	LAPIC_TARGET_TICKS	(LAPIC_FREQ / 50)
 
 #endif /* _TEST_DEFS_H_ */

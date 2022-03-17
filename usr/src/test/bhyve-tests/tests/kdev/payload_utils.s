@@ -46,7 +46,7 @@ ENTRY(inw)
 	movw    %di, %dx
 	inw    (%dx)
 	ret
-SET_SIZE(inb)
+SET_SIZE(inw)
 
 ENTRY(inl)
 	movw    %di, %dx

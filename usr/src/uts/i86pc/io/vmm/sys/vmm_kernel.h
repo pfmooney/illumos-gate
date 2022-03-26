@@ -373,6 +373,14 @@ enum event_inject_state {
 	EIS_REQ_EXIT	= (1 << 15),
 };
 
+/* Possible result codes for MSR access emulation */
+typedef enum vm_msr_result {
+	VMR_OK		= 0, /* succesfully emulated */
+	VMR_GP		= 1, /* #GP should be injected */
+	VMR_ERROR	= 2, /* internal error during emulation */
+	VMR_UNHANLDED	= 3, /* handle in userspace, kernel cannot emulate */
+} vm_msr_result_t;
+
 void vmm_sol_glue_init(void);
 void vmm_sol_glue_cleanup(void);
 

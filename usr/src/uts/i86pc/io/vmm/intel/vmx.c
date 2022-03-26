@@ -69,6 +69,7 @@ __FBSDID("$FreeBSD$");
 #include <machine/specialreg.h>
 #include <machine/vmparam.h>
 #include <sys/vmm_vm.h>
+#include <sys/vmm_kernel.h>
 
 #include <machine/vmm.h>
 #include <machine/vmm_dev.h>
@@ -2063,35 +2064,54 @@ vmx_task_switch_reason(uint64_t qual)
 }
 
 static int
-emulate_wrmsr(struct vmx *vmx, int vcpuid, uint_t num, uint64_t val)
+vmx_handle_msr(struct vmx *vmx, int vcpuid, struct vm_exit *vmexit,
+    bool is_wrmsr)
 {
-	int error;
+	struct vmxctx *vmxctx = &vmx->ctx[vcpuid];
+	const uint32_t ecx = vmxctx->guest_rcx;
+	vm_msr_result_t res;
+	uint64_t val = 0;
 
-	if (lapic_msr(num))
-		error = lapic_wrmsr(vmx->vm, vcpuid, num, val);
-	else
-		error = vmx_wrmsr(vmx, vcpuid, num, val);
+	if (is_wrmsr) {
+		if (vlapic_owned_msr(ecx)) {
+			struct vlapic *vlapic = vm_lapic(vmx->vm, vcpuid);
 
-	return (error);
-}
+			res = vlapic_wrmsr(vlapic, ecx, val);
+		} else {
+			res = vmx_wrmsr(vmx, vcpuid, ecx, val);
+		}
+	} else {
+		if (vlapic_owned_msr(ecx)) {
+			struct vlapic *vlapic = vm_lapic(vmx->vm, vcpuid);
 
-static int
-emulate_rdmsr(struct vmx *vmx, int vcpuid, uint_t num)
-{
-	uint64_t result;
-	int error;
-
-	if (lapic_msr(num))
-		error = lapic_rdmsr(vmx->vm, vcpuid, num, &result);
-	else
-		error = vmx_rdmsr(vmx, vcpuid, num, &result);
-
-	if (error == 0) {
-		vmx->ctx[vcpuid].guest_rax = (uint32_t)result;
-		vmx->ctx[vcpuid].guest_rdx = result >> 32;
+			res = vlapic_rdmsr(vlapic, ecx, &val);
+		} else {
+			res = vmx_rdmsr(vmx, vcpuid, ecx, &val);
+		}
 	}
 
-	return (error);
+	switch (res) {
+	case VMR_OK:
+		/* Store rdmsr result in the appropriate registers */
+		if (!is_wrmsr) {
+			vmxctx->guest_rax = (uint32_t)val;
+			vmxctx->guest_rdx = val >> 32;
+		}
+		return (HANDLED);
+	case VMR_GP:
+		vm_inject_gp(vmx->vm, vcpuid);
+		return (HANDLED);
+	case VMR_ERROR:
+		/* XXX: extra handling for unexpected errors? */
+	case VMR_UNHANLDED:
+		vmexit->exitcode = is_wrmsr ?
+		    VM_EXITCODE_WRMSR : VM_EXITCODE_RDMSR;
+		vmexit->u.msr.code = ecx;
+		vmexit->u.msr.wval = val;
+		return (UNHANDLED);
+	default:
+		panic("unexpected msr result %u\n", res);
+	}
 }
 
 static int
@@ -2102,7 +2122,7 @@ vmx_exit_process(struct vmx *vmx, int vcpu, struct vm_exit *vmexit)
 	struct vie *vie;
 	struct vlapic *vlapic;
 	struct vm_task_switch *ts;
-	uint32_t eax, ecx, edx, idtvec_info, idtvec_err, intr_info;
+	uint32_t idtvec_info, idtvec_err, intr_info;
 	uint32_t intr_type, intr_vec, reason;
 	uint64_t exitintinfo, qual, gpa;
 
@@ -2243,43 +2263,11 @@ vmx_exit_process(struct vmx *vmx, int vcpu, struct vm_exit *vmexit)
 		break;
 	case EXIT_REASON_RDMSR:
 		vmm_stat_incr(vmx->vm, vcpu, VMEXIT_RDMSR, 1);
-		ecx = vmxctx->guest_rcx;
-		VCPU_CTR1(vmx->vm, vcpu, "rdmsr 0x%08x", ecx);
-		SDT_PROBE4(vmm, vmx, exit, rdmsr, vmx, vcpu, vmexit, ecx);
-		error = emulate_rdmsr(vmx, vcpu, ecx);
-		if (error == 0) {
-			handled = HANDLED;
-		} else if (error > 0) {
-			vmexit->exitcode = VM_EXITCODE_RDMSR;
-			vmexit->u.msr.code = ecx;
-		} else {
-			/* Return to userspace with a valid exitcode */
-			KASSERT(vmexit->exitcode != VM_EXITCODE_BOGUS,
-			    ("emulate_rdmsr retu with bogus exitcode"));
-		}
+		handled = vmx_handle_msr(vmx, vcpu, vmexit, false);
 		break;
 	case EXIT_REASON_WRMSR:
 		vmm_stat_incr(vmx->vm, vcpu, VMEXIT_WRMSR, 1);
-		eax = vmxctx->guest_rax;
-		ecx = vmxctx->guest_rcx;
-		edx = vmxctx->guest_rdx;
-		VCPU_CTR2(vmx->vm, vcpu, "wrmsr 0x%08x value 0x%016lx",
-		    ecx, (uint64_t)edx << 32 | eax);
-		SDT_PROBE5(vmm, vmx, exit, wrmsr, vmx, vmexit, vcpu, ecx,
-		    (uint64_t)edx << 32 | eax);
-		error = emulate_wrmsr(vmx, vcpu, ecx,
-		    (uint64_t)edx << 32 | eax);
-		if (error == 0) {
-			handled = HANDLED;
-		} else if (error > 0) {
-			vmexit->exitcode = VM_EXITCODE_WRMSR;
-			vmexit->u.msr.code = ecx;
-			vmexit->u.msr.wval = (uint64_t)edx << 32 | eax;
-		} else {
-			/* Return to userspace with a valid exitcode */
-			KASSERT(vmexit->exitcode != VM_EXITCODE_BOGUS,
-			    ("emulate_wrmsr retu with bogus exitcode"));
-		}
+		handled = vmx_handle_msr(vmx, vcpu, vmexit, true);
 		break;
 	case EXIT_REASON_HLT:
 		vmm_stat_incr(vmx->vm, vcpu, VMEXIT_HLT, 1);

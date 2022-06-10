@@ -90,6 +90,11 @@ typedef void	(*vmi_vlapic_cleanup)(void *vmi, struct vlapic *vlapic);
 typedef void	(*vmi_savectx)(void *vmi, int vcpu);
 typedef void	(*vmi_restorectx)(void *vmi, int vcpu);
 
+typedef int	(*vmi_get_msr_t)(void *vmi, int vcpu, uint32_t msr,
+    uint64_t *valp);
+typedef int	(*vmi_set_msr_t)(void *vmi, int vcpu, uint32_t msr,
+    uint64_t val);
+
 struct vmm_ops {
 	vmm_init_func_t		init;		/* module wide initialization */
 	vmm_cleanup_func_t	cleanup;
@@ -109,6 +114,9 @@ struct vmm_ops {
 
 	vmi_savectx		vmsavectx;
 	vmi_restorectx		vmrestorectx;
+
+	vmi_get_msr_t		vmgetmsr;
+	vmi_set_msr_t		vmsetmsr;
 };
 
 extern struct vmm_ops vmm_ops_intel;
@@ -443,6 +451,7 @@ typedef struct vmm_data_req {
 	uint32_t	vdr_flags;
 	uint32_t	vdr_len;
 	void		*vdr_data;
+	uint32_t	*vdr_result_len;
 } vmm_data_req_t;
 typedef struct vmm_data_req vmm_data_req_t;
 
@@ -453,6 +462,7 @@ typedef struct vmm_data_version_entry {
 	uint16_t		vdve_class;
 	uint16_t		vdve_version;
 	uint16_t		vdve_len_expect;
+	uint16_t		vdve_len_per_item;
 	vmm_data_readf_t	vdve_readf;
 	vmm_data_writef_t	vdve_writef;
 } vmm_data_version_entry_t;

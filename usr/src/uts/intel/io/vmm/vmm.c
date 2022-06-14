@@ -1092,38 +1092,51 @@ vm_assign_pptdev(struct vm *vm, int pptfd)
 }
 
 int
-vm_get_register(struct vm *vm, int vcpu, int reg, uint64_t *retval)
+vm_get_register(struct vm *vm, int vcpuid, int reg, uint64_t *retval)
 {
-
-	if (vcpu < 0 || vcpu >= vm->maxcpus)
-		return (EINVAL);
-
-	if (reg >= VM_REG_LAST)
-		return (EINVAL);
-
-	return (VMGETREG(vm->cookie, vcpu, reg, retval));
-}
-
-int
-vm_set_register(struct vm *vm, int vcpuid, int reg, uint64_t val)
-{
-	struct vcpu *vcpu;
-	int error;
-
 	if (vcpuid < 0 || vcpuid >= vm->maxcpus)
 		return (EINVAL);
 
 	if (reg >= VM_REG_LAST)
 		return (EINVAL);
 
-	error = VMSETREG(vm->cookie, vcpuid, reg, val);
-	if (error || reg != VM_REG_GUEST_RIP)
-		return (error);
+	struct vcpu *vcpu = &vm->vcpu[vcpuid];
+	switch (reg) {
+	case VM_REG_GUEST_XCR0:
+		*retval = vcpu->guest_xcr0;
+		return (0);
+	default:
+		return (VMGETREG(vm->cookie, vcpuid, reg, retval));
+	}
+}
 
-	/* Set 'nextrip' to match the value of %rip */
-	vcpu = &vm->vcpu[vcpuid];
-	vcpu->nextrip = val;
-	return (0);
+int
+vm_set_register(struct vm *vm, int vcpuid, int reg, uint64_t val)
+{
+	if (vcpuid < 0 || vcpuid >= vm->maxcpus)
+		return (EINVAL);
+
+	if (reg >= VM_REG_LAST)
+		return (EINVAL);
+
+	int error;
+	struct vcpu *vcpu = &vm->vcpu[vcpuid];
+	switch (reg) {
+	case VM_REG_GUEST_RIP:
+		error = VMSETREG(vm->cookie, vcpuid, reg, val);
+		if (error == 0) {
+			vcpu->nextrip = val;
+		}
+		return (error);
+	case VM_REG_GUEST_XCR0:
+		if (!validate_guest_xcr0(val, vmm_get_host_xcr0())) {
+			return (EINVAL);
+		}
+		vcpu->guest_xcr0 = val;
+		return (0);
+	default:
+		return (VMSETREG(vm->cookie, vcpuid, reg, val));
+	}
 }
 
 static bool

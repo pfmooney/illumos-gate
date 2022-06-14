@@ -85,7 +85,6 @@ __FBSDID("$FreeBSD$");
 #include "vmcs.h"
 #include "vmx.h"
 #include "vmx_msr.h"
-#include "x86.h"
 #include "vmx_controls.h"
 
 #define	PINBASED_CTLS_ONE_SETTING					\

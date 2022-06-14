@@ -387,6 +387,19 @@ typedef enum vm_msr_result {
 	VMR_UNHANLDED	= 2, /* handle in userspace, kernel cannot emulate */
 } vm_msr_result_t;
 
+enum vm_cpuid_capability {
+	VCC_NONE,
+	VCC_NO_EXECUTE,
+	VCC_FFXSR,
+	VCC_TCE,
+	VCC_LAST
+};
+
+int x86_emulate_cpuid(struct vm *, int, uint64_t *, uint64_t *, uint64_t *,
+    uint64_t *);
+bool vm_cpuid_capability(struct vm *, int, enum vm_cpuid_capability);
+bool validate_guest_xcr0(uint64_t, uint64_t);
+
 void vmm_sol_glue_init(void);
 void vmm_sol_glue_cleanup(void);
 

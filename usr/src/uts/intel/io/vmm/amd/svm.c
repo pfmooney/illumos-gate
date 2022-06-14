@@ -72,7 +72,6 @@ __FBSDID("$FreeBSD$");
 #include "vlapic.h"
 #include "vlapic_priv.h"
 
-#include "x86.h"
 #include "vmcb.h"
 #include "svm.h"
 #include "svm_softc.h"

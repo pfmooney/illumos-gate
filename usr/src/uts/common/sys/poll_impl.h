@@ -275,11 +275,11 @@ extern void pollhead_clean(pollhead_t *);
 /*
  * private poll head interfaces:
  *
- *  pollhead_insert     adds a polldat to a pollhead list
- *  pollhead_delete     removes a polldat from a pollhead list
+ *  polldat_associate		adds a polldat to a pollhead list
+ *  polldat_disassociate	remove polldat from its assoc'd pollhead list
  */
-extern void pollhead_insert(pollhead_t *, polldat_t *);
-extern void pollhead_delete(pollhead_t *, polldat_t *);
+extern void polldat_associate(polldat_t *, pollhead_t *);
+extern void polldat_disassociate(polldat_t *);
 
 /*
  * poll state interfaces:

@@ -374,6 +374,31 @@ struct vmm_dirty_tracker {
 	void		*vdt_pfns;	/* bit vector of dirty bits */
 };
 
+
+/*
+ * Perform an operation against the flags (accessed/dirty) in the nested page
+ * table for the guest.  If BITMAP_IN or BITMAP_OUT flags are set, vno_bitmap
+ * should point to appropriately sized chunk of memory (one bit per page of
+ * memory covered by vno_len).  If using said bitmap, vno_len is limited to a
+ * maximum of 1 GiB.
+ */
+struct vm_npt_operation {
+	uint64_t	vno_gpa;
+	uint64_t	vno_len;
+	uint8_t		*vno_bitmap;
+	uint32_t	vno_operation;
+};
+
+/* Operations and flags for vm_npt_operation`vno_operation */
+#define	VNO_OP_RESET_DIRTY	0x1
+#define	VNO_OP_SET_DIRTY	0x2
+#define	VNO_OP_GET_DIRTY	0x3
+#define	VNO_OP_GET_TRACK_DIRTY	0x20
+#define	VNO_OP_EN_TRACK_DIRTY	0x21
+#define	VNO_OP_DIS_TRACK_DIRTY	0x22
+#define	VNO_FLAG_BITMAP_IN	(1 << 30)
+#define	VNO_FLAG_BITMAP_OUT	(1 << 31)
+
 /* Current (arbitrary) max length for vm_data_xfer */
 #define VM_DATA_XFER_LIMIT	8192
 
@@ -542,6 +567,7 @@ struct vm_legacy_cpuid {
 #define	VM_DESTROY_PENDING		(VMM_IOC_BASE | 0x26)
 
 #define	VM_VCPU_BARRIER			(VMM_IOC_BASE | 0x27)
+#define	VM_NPT_OPERATION		(VMM_IOC_BASE | 0x28)
 
 #define	VM_DEVMEM_GETOFFSET		(VMM_IOC_BASE | 0xff)
 

@@ -1300,7 +1300,41 @@ void
 vm_track_dirty_pages(struct vm *vm, uint64_t gpa, size_t len, uint8_t *bitmap)
 {
 	vmspace_t *vms = vm_get_vmspace(vm);
-	vmspace_track_dirty(vms, gpa, len, bitmap);
+	vmspace_bits_operate(vms, gpa, len,
+	    VBO_RESET_DIRTY | VBO_FLAG_BITMAP_OUT, bitmap);
+}
+
+int
+vm_npt_do_operation(struct vm *vm, uint64_t gpa, size_t len, uint32_t oper,
+    uint8_t *bitmap)
+{
+	vmspace_t *vms = vm_get_vmspace(vm);
+
+	ASSERT0(gpa & PAGEOFFSET);
+	ASSERT0(len & PAGEOFFSET);
+
+	/*
+	 * For now, the bits defined in vmm_dev.h are meant to match up 1:1 with
+	 * those in vmm_vm.h
+	 */
+	CTASSERT(VNO_OP_RESET_DIRTY == VBO_RESET_DIRTY);
+	CTASSERT(VNO_OP_SET_DIRTY == VBO_SET_DIRTY);
+	CTASSERT(VNO_OP_GET_DIRTY == VBO_GET_DIRTY);
+	CTASSERT(VNO_FLAG_BITMAP_IN == VBO_FLAG_BITMAP_IN);
+	CTASSERT(VNO_FLAG_BITMAP_OUT == VBO_FLAG_BITMAP_OUT);
+
+	const uint32_t oper_only =
+	    oper & ~(VNO_FLAG_BITMAP_IN | VNO_FLAG_BITMAP_OUT);
+	switch (oper_only) {
+	case VNO_OP_RESET_DIRTY:
+	case VNO_OP_SET_DIRTY:
+	case VNO_OP_GET_DIRTY:
+		break;
+	default:
+		return (EINVAL);
+	}
+	vmspace_bits_operate(vms, gpa, len, oper, bitmap);
+	return (0);
 }
 
 static void

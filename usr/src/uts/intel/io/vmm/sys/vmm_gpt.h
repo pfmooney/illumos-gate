@@ -33,6 +33,11 @@ enum vmm_gpt_node_level {
 	MAX_GPT_LEVEL,
 };
 
+typedef enum vmm_gpt_query {
+	VGQ_ACCESSED,
+	VGQ_DIRTY,
+} vmm_gpt_query_t;
+
 /*
  * The vmm_pte_ops structure contains function pointers for format-specific
  * operations on page table entries.  The operations are as follows:
@@ -62,6 +67,7 @@ struct vmm_pte_ops {
 	uint_t		(*vpeo_pte_prot)(uint64_t);
 	uint_t		(*vpeo_reset_dirty)(uint64_t *, bool);
 	uint_t		(*vpeo_reset_accessed)(uint64_t *, bool);
+	bool		(*vpeo_query)(uint64_t *, vmm_gpt_query_t);
 	uint64_t	(*vpeo_get_pmtp)(pfn_t);
 };
 
@@ -87,5 +93,6 @@ uint64_t vmm_gpt_get_pmtp(vmm_gpt_t *);
 bool vmm_gpt_is_mapped(vmm_gpt_t *, uint64_t *, pfn_t *, uint_t *);
 uint_t vmm_gpt_reset_accessed(vmm_gpt_t *, uint64_t *, bool);
 uint_t vmm_gpt_reset_dirty(vmm_gpt_t *, uint64_t *, bool);
+bool vmm_gpt_query(vmm_gpt_t *, uint64_t *, vmm_gpt_query_t);
 
 #endif /* _VMM_GPT_H */

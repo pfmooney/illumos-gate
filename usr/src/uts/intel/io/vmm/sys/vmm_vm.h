@@ -29,6 +29,15 @@ struct vmm_pte_ops;
 
 typedef void (*vmc_inval_cb_t)(void *, uintptr_t, size_t);
 
+typedef enum vmspace_bit_operation {
+	VBO_RESET_DIRTY = 1,
+	VBO_SET_DIRTY = 2,
+	VBO_GET_DIRTY = 3,
+
+	VBO_FLAG_BITMAP_IN = (1 << 30),
+	VBO_FLAG_BITMAP_OUT = (1 << 31),
+} vmspace_bit_oper_t;
+
 /* vmspace_t operations */
 vmspace_t *vmspace_alloc(size_t, struct vmm_pte_ops *, bool);
 void vmspace_destroy(vmspace_t *);
@@ -40,7 +49,8 @@ vm_client_t *vmspace_client_alloc(vmspace_t *);
 uint64_t vmspace_table_root(vmspace_t *);
 uint64_t vmspace_table_gen(vmspace_t *);
 uint64_t vmspace_resident_count(vmspace_t *);
-void vmspace_track_dirty(vmspace_t *, uint64_t, size_t, uint8_t *);
+void vmspace_bits_operate(vmspace_t *, uint64_t, size_t, vmspace_bit_oper_t,
+    uint8_t *);
 
 /* vm_client_t operations */
 vm_page_t *vmc_hold(vm_client_t *, uintptr_t, int);

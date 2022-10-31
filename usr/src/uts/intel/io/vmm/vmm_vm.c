@@ -292,32 +292,75 @@ vmspace_resident_count(vmspace_t *vms)
 	return (vms->vms_pages_mapped);
 }
 
+/*
+ * Perform an operation on the status (accessed/dirty) bits held in the page
+ * tables of this vmspace.
+ *
+ * Such manipulations race against both hardware writes (from running vCPUs) and
+ * emulated accesses reflected from userspace.  Safe functionality depends on
+ * the VM instance being read-locked to prevent vmspace_map/vmspace_unmap
+ * operations from changing the page tables during the walk.
+ */
 void
-vmspace_track_dirty(vmspace_t *vms, uint64_t gpa, size_t len, uint8_t *bitmap)
+vmspace_bits_operate(vmspace_t *vms, uint64_t gpa, size_t len,
+    vmspace_bit_oper_t oper, uint8_t *bitmap)
 {
+	const bool bit_input = (oper & VBO_FLAG_BITMAP_IN) != 0;
+	const bool bit_output = (oper & VBO_FLAG_BITMAP_OUT) != 0;
+	const vmspace_bit_oper_t oper_only =
+	    oper & ~(VBO_FLAG_BITMAP_IN | VBO_FLAG_BITMAP_OUT);
+
 	/*
-	 * Accumulate dirty bits into the given bit vector.  Note that this
-	 * races both against hardware writes from running vCPUs and
-	 * reflections from userspace.
-	 *
-	 * Called from a userspace-visible ioctl, this depends on the VM
-	 * instance being read-locked to prevent vmspace_map/vmspace_unmap
-	 * operations from changing the page tables during the walk.
+	 * The bitmap cannot be NULL if the requested operation involves reading
+	 * or writing from it.
 	 */
+	ASSERT(bitmap != NULL || (!bit_input && !bit_output));
+
 	for (size_t offset = 0; offset < len; offset += PAGESIZE) {
-		bool bit = false;
+		const uint64_t pfn_offset = offset >> PAGESHIFT;
+		const size_t bit_offset = pfn_offset / 8;
+		const uint8_t bit_mask = 1 << (pfn_offset % 8);
+
+		if (bit_input && (bitmap[bit_offset] & bit_mask) == 0) {
+			continue;
+		}
+
+		bool value = false;
 		uint64_t *entry = vmm_gpt_lookup(vms->vms_gpt, gpa + offset);
-		if (entry != NULL)
-			bit = vmm_gpt_reset_dirty(vms->vms_gpt, entry, false);
-		uint64_t pfn_offset = offset >> PAGESHIFT;
-		size_t bit_offset = pfn_offset / 8;
-		size_t bit_index = pfn_offset % 8;
-		bitmap[bit_offset] |= (bit << bit_index);
+		if (entry == NULL) {
+			if (bit_output) {
+				bitmap[bit_offset] &= ~bit_mask;
+			}
+			continue;
+		}
+
+		switch (oper_only) {
+		case VBO_RESET_DIRTY:
+			value = vmm_gpt_reset_dirty(vms->vms_gpt, entry, false);
+			break;
+		case VBO_SET_DIRTY:
+			value = !vmm_gpt_reset_dirty(vms->vms_gpt, entry, true);
+			break;
+		case VBO_GET_DIRTY:
+			value = vmm_gpt_query(vms->vms_gpt, entry, VGQ_DIRTY);
+			break;
+		default:
+			panic("unrecognized operator: %d", oper_only);
+			break;
+		}
+		if (bit_output) {
+			if (value) {
+				bitmap[bit_offset] |= bit_mask;
+			} else {
+				bitmap[bit_offset] &= ~bit_mask;
+			}
+		}
 	}
 
 	/*
-	 * Now invalidate those bits and shoot down address spaces that
-	 * may have them cached.
+	 * Invalidate the address range potentially effected by the changes to
+	 * page table bits, issuing shoot-downs for those who might have it in
+	 * cache.
 	 */
 	vmspace_hold_enter(vms);
 	vms->vms_pt_gen++;

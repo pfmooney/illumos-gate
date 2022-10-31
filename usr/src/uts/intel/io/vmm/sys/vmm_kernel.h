@@ -135,6 +135,7 @@ int vm_set_topology(struct vm *vm, uint16_t sockets, uint16_t cores,
  * APIs that race against hardware.
  */
 void vm_track_dirty_pages(struct vm *, uint64_t, size_t, uint8_t *);
+int vm_npt_do_operation(struct vm *, uint64_t, size_t, uint32_t, uint8_t *);
 
 /*
  * APIs that modify the guest memory map require all vcpus to be frozen.

@@ -576,6 +576,16 @@ vmm_gpt_reset_dirty(vmm_gpt_t *gpt, uint64_t *entry, bool on)
 }
 
 /*
+ * Query state from PTE pointed to by `entry`.
+ */
+bool
+vmm_gpt_query(vmm_gpt_t *gpt, uint64_t *entry, vmm_gpt_query_t query)
+{
+	ASSERT(entry != NULL);
+	return (gpt->vgpt_pte_ops->vpeo_query(entry, query));
+}
+
+/*
  * Get properly formatted PML4 (EPTP/nCR3) for GPT.
  */
 uint64_t

@@ -264,6 +264,9 @@ hrtime_t vm_normalize_hrtime(struct vm *, hrtime_t);
 hrtime_t vm_denormalize_hrtime(struct vm *, hrtime_t);
 uint64_t vm_get_freq_multiplier(struct vm *);
 
+hrtime_t vmm_clamp_periodic(hrtime_t);
+extern hrtime_t vmm_periodic_interval_min_ns;
+
 static __inline bool
 vcpu_is_running(struct vm *vm, int vcpu, int *hostcpu)
 {

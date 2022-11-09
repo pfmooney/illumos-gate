@@ -305,6 +305,12 @@ int trace_guest_exceptions;
 /* Trap WBINVD and ignore it */
 int trap_wbinvd = 1;
 
+/*
+ * Minimum interval (in nanoseconds) allowed for periodic emulated timers.
+ * Any configured for a shorter interval will be clamped to this value.
+ */
+hrtime_t vmm_periodic_interval_min_ns;
+
 static void vm_free_memmap(struct vm *vm, int ident);
 static bool sysmem_mapping(struct vm *vm, struct mem_map *mm);
 static void vcpu_notify_event_locked(struct vcpu *vcpu, vcpu_notify_t);
@@ -3274,6 +3280,18 @@ vm_denormalize_hrtime(struct vm *vm, hrtime_t hrt)
 {
 	/* To avoid underflow/overflow UB, perform math as unsigned */
 	return ((hrtime_t)((uint64_t)hrt + (uint64_t)vm->boot_hrtime));
+}
+
+hrtime_t
+vmm_clamp_periodic(hrtime_t interval)
+{
+	const hrtime_t clamp = vmm_periodic_interval_min_ns;
+
+	if (clamp > 0 && interval < clamp) {
+		return (clamp);
+	}
+
+	return (interval);
 }
 
 int

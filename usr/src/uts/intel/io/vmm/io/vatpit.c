@@ -90,6 +90,13 @@ struct channel {
 	uint8_t		mode;
 	uint16_t	initial;	/* initial counter value */
 
+	/*
+	 * When configured for periodic mode, timer clamping may result in an
+	 * interval which is longer than requested.  The effective 'initial', as
+	 * calculated for that interval is retained here.
+	 */
+	uint16_t	periodic_initial;
+
 	uint8_t		reg_cr[2];
 	uint8_t		reg_ol[2];
 	uint8_t		reg_status;
@@ -106,6 +113,9 @@ struct channel {
 
 	struct callout	callout;
 	struct vatpit_callout_arg callout_arg;
+
+	/* Number of times periodic_initial was clamped due to shortness */
+	uint64_t	timer_period_clamped;
 };
 
 struct vatpit {
@@ -116,6 +126,7 @@ struct vatpit {
 };
 
 static void pit_timer_start_cntr0(struct vatpit *vatpit);
+static void pit_timer_continue_cntr0(struct vatpit *vatpit);
 
 static uint64_t
 vatpit_delta_ticks(struct vatpit *vatpit, struct channel *c)
@@ -170,7 +181,7 @@ vatpit_callout_handler(void *a)
 	callout_deactivate(callout);
 
 	if (c->mode == TIMER_RATEGEN || c->mode == TIMER_SQWAVE) {
-		pit_timer_start_cntr0(vatpit);
+		pit_timer_continue_cntr0(vatpit);
 	} else {
 		/*
 		 * For non-periodic timers, clear the time target to distinguish
@@ -198,6 +209,36 @@ vatpit_callout_reset(struct vatpit *vatpit)
 }
 
 static void
+pit_clamp_interval(struct channel *c)
+{
+	/* Clamping checks only required for periodic modes */
+	ASSERT(c->mode == TIMER_RATEGEN || c->mode == TIMER_SQWAVE);
+
+	const hrtime_t interval = hrt_freq_interval(PIT_8254_FREQ, c->initial);
+	const hrtime_t clamped_interval = vmm_clamp_periodic(interval);
+
+	if (clamped_interval <= interval) {
+		/* Requested interval did not require clamping */
+		c->periodic_initial = c->initial;
+	} else {
+		/*
+		 * A too-short interval was programmed, so derive a clamped
+		 * value for the timer.
+		 */
+		const uint32_t clamped_count =
+		    hrt_freq_count(clamped_interval, PIT_8254_FREQ);
+		/*
+		 * If the clamping value was configured to be unreasonably
+		 * large, it could overflow the 16-bit emulated register, so be
+		 * wary of such a possibility
+		 */
+		c->periodic_initial = MIN(UINT16_MAX, clamped_count);
+
+		c->timer_period_clamped++;
+	}
+}
+
+static void
 pit_timer_start_cntr0(struct vatpit *vatpit)
 {
 	struct channel *c = &vatpit->channel[0];
@@ -206,20 +247,44 @@ pit_timer_start_cntr0(struct vatpit *vatpit)
 		return;
 	}
 
-	c->total_target += c->initial;
-	c->time_target = c->time_loaded +
-	    hrt_freq_interval(PIT_8254_FREQ, c->total_target);
+	if (c->mode == TIMER_RATEGEN || c->mode == TIMER_SQWAVE) {
+		/* Periodic timer,  */
+		pit_clamp_interval(c);
+		c->total_target = c->periodic_initial;
+	} else {
+		/* Simple one-shot */
+		c->periodic_initial = 0;
+		c->total_target = c->initial;
+	}
+
+	c->time_target =
+	    c->time_loaded + hrt_freq_interval(PIT_8254_FREQ, c->total_target);
+	vatpit_callout_reset(vatpit);
+}
+
+static void
+pit_timer_continue_cntr0(struct vatpit *vatpit)
+{
+	struct channel *c = &vatpit->channel[0];
+
+	if (c->periodic_initial == 0) {
+		return;
+	}
+
+	c->total_target += c->periodic_initial;
+	c->time_target =
+	    c->time_loaded + hrt_freq_interval(PIT_8254_FREQ, c->total_target);
 
 	/*
-	 * If we are more than 'c->initial' ticks behind, reset the timer base
-	 * to fire at the next 'c->initial' interval boundary.
+	 * If we are more than an interval of ticks behind, reset the timer base
+	 * to fire at the next interval boundary.
 	 */
-	hrtime_t now = gethrtime();
+	const hrtime_t now = gethrtime();
 	if (c->time_target < now) {
 		const uint64_t ticks_behind =
 		    hrt_freq_count(now - c->time_target, PIT_8254_FREQ);
 
-		c->total_target += roundup(ticks_behind, c->initial);
+		c->total_target += roundup(ticks_behind, c->periodic_initial);
 		c->time_target = c->time_loaded +
 		    hrt_freq_interval(PIT_8254_FREQ, c->total_target);
 	}
@@ -437,8 +502,6 @@ vatpit_handler(void *arg, bool in, uint16_t port, uint8_t bytes, uint32_t *eax)
 			c->time_loaded = gethrtime();
 			/* Start an interval timer for channel 0 */
 			if (port == TIMER_CNTR0) {
-				c->time_target = c->time_loaded;
-				c->total_target = 0;
 				pit_timer_start_cntr0(vatpit);
 			}
 			if (c->initial == 0)
@@ -638,11 +701,36 @@ vatpit_data_write(void *datap, const vmm_data_req_t *req)
 			continue;
 		}
 
-		/* back-calculate time_loaded for the appropriate interval */
-		const uint64_t time_target =
+
+		if (out->mode == TIMER_RATEGEN || out->mode == TIMER_SQWAVE) {
+			if (out->initial == 0) {
+				/*
+				 * Do not attempt to start a periodic timer with
+				 * an empty initial value.
+				 */
+				continue;
+			}
+
+			/*
+			 * Determine interval for periodic timer, which may
+			 * differ from the configured initial value if it is so
+			 * short as require clamping.
+			 *
+			 * If clamping is applied, and the clamped value differs
+			 * from how the timer was previously operating for the
+			 * guest, sadness about varying observed timer frequency
+			 * will ensue.
+			 */
+			pit_clamp_interval(out);
+
+			out->total_target = out->periodic_initial;
+		} else {
+			out->total_target = out->initial;
+		}
+
+		/* Back-calculate time_loaded for the appropriate interval */
+		out->time_target =
 		    vm_denormalize_hrtime(vatpit->vm, chan->vac_time_target);
-		out->total_target = out->initial;
-		out->time_target = time_target;
 		out->time_loaded = time_target -
 		    hrt_freq_interval(PIT_8254_FREQ, out->initial);
 

@@ -76,8 +76,31 @@ struct vhpet_callout_arg {
 struct vhpet_timer {
 	uint64_t	cap_config;	/* Configuration */
 	uint64_t	msireg;		/* FSB interrupt routing */
-	uint32_t	compval;	/* Comparator */
+
+	/*
+	 * Comparator register.
+	 *
+	 * Value of the main counter is compared against this to generate
+	 * interrupts when configured in the timer.
+	 */
+	uint32_t	compval;
+
+	/*
+	 * Comparator register (increment) value for periodic timers.
+	 *
+	 * This increment value represents the last value written to the
+	 * comparator register when the timer is in periodic mode.  It is added
+	 * to the "actual" comparator register (acting as an accumulator)
+	 * whenever the timer matches the main counter (signaling an interrupt).
+	 */
 	uint32_t	comprate;
+
+	/*
+	 * Since 'comprate' might be clamped if it was set to an interval
+	 * considered too short by the vmm, keep track of the original value.
+	 */
+	uint32_t	comprate_orig;
+
 	struct callout	callout;
 	hrtime_t	callout_expire;	/* time when counter==compval */
 	struct vhpet_callout_arg arg;
@@ -186,7 +209,6 @@ vhpet_timer_clear_isr(struct vhpet *vhpet, int n)
 static __inline bool
 vhpet_periodic_timer(struct vhpet *vhpet, int n)
 {
-
 	return ((vhpet->timer[n].cap_config & HPET_TCNF_TYPE) != 0);
 }
 
@@ -291,10 +313,7 @@ vhpet_handler(void *arg)
 	ASSERT(vhpet_counter_enabled(vhpet));
 
 	if (vhpet_periodic_timer(vhpet, n)) {
-		hrtime_t now;
-		uint32_t counter = vhpet_counter(vhpet, &now);
-
-		vhpet_start_timer(vhpet, n, counter, now);
+		vhpet_repeat_timer(vhpet, n);
 	} else {
 		/*
 		 * Zero out the expiration time to distinguish a fired timer
@@ -334,9 +353,9 @@ vhpet_start_timer(struct vhpet *vhpet, int n, uint32_t counter, hrtime_t now)
 
 	ASSERT(VHPET_LOCKED(vhpet));
 
-	if (timer->comprate != 0)
+	if (vhpet_periodic_timer(vhpet, n)) {
 		vhpet_adjust_compval(vhpet, n, counter);
-	else {
+	} else {
 		/*
 		 * In one-shot mode it is the guest's responsibility to make
 		 * sure that the comparator value is not in the "past". The
@@ -353,6 +372,18 @@ vhpet_start_timer(struct vhpet *vhpet, int n, uint32_t counter, hrtime_t now)
 }
 
 static void
+vhpet_repeat_timer(struct vhpet *vhpet, int n)
+{
+	uint32_t counter;
+	hrtime_t now;
+
+	ASSERT(VHPET_LOCKED(vhpt));
+
+	//vhpet_start_timer(vhpet, n, counter, now);
+	counter = vhpet_counter(vhpet, &now);
+}
+
+static void
 vhpet_start_counting(struct vhpet *vhpet)
 {
 	int i;
@@ -361,7 +392,8 @@ vhpet_start_counting(struct vhpet *vhpet)
 	for (i = 0; i < VHPET_NUM_TIMERS; i++) {
 		/*
 		 * Restart the timers based on the value of the main counter
-		 * when it stopped counting.
+		 * when it stopped counting, or where it happened to be set as
+		 * part of a write to its register(s).
 		 */
 		vhpet_start_timer(vhpet, i, vhpet->base_count,
 		    vhpet->base_time);
@@ -557,23 +589,23 @@ vhpet_mmio_write(struct vm *vm, int vcpuid, uint64_t gpa, uint64_t val,
 			old_compval = vhpet->timer[i].compval;
 			old_comprate = vhpet->timer[i].comprate;
 			if (vhpet_periodic_timer(vhpet, i)) {
-				/*
-				 * In periodic mode writes to the comparator
-				 * change the 'compval' register only if the
-				 * HPET_TCNF_VAL_SET bit is set in the config
-				 * register.
-				 */
 				val64 = vhpet->timer[i].comprate;
 				update_register(&val64, data, mask);
 				vhpet->timer[i].comprate = val64;
+
+				/*
+				 * In periodic mode, writes to the comparator
+				 * register are reflected in the accumulator
+				 * value only if HPET_TCNF_VAL_SET is set.
+				 */
 				if ((vhpet->timer[i].cap_config &
 				    HPET_TCNF_VAL_SET) != 0) {
 					vhpet->timer[i].compval = val64;
 				}
 			} else {
-				KASSERT(vhpet->timer[i].comprate == 0,
-				    ("vhpet one-shot timer %d has invalid "
-				    "rate %u", i, vhpet->timer[i].comprate));
+				/* non-periodic has no accumulator to track */
+				ASSERT0(vhpet->timer[i].comprate);
+
 				val64 = vhpet->timer[i].compval;
 				update_register(&val64, data, mask);
 				vhpet->timer[i].compval = val64;

@@ -137,6 +137,9 @@ struct vlapic {
 	hrtime_t	timer_period;
 	uint32_t	timer_cur_freq;
 
+	/* Number of times timer_period was clamped due to shortness */
+	uint64_t	timer_period_clamped;
+
 	kmutex_t	timer_lock;
 
 	uint64_t	msr_apicbase;

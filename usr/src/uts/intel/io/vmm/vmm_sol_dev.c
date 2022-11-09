@@ -3375,6 +3375,15 @@ _init(void)
 
 	vmm_zsd_init();
 
+	/*
+	 * Derive the periodic timer clamping value by the limit placed on
+	 * unprivileged users of CLOCK_HIGHRES.
+	 *
+	 * Purloined from: common/os/clock_highres.c
+	 */
+	extern long clock_highres_interval_min;
+	vmm_periodic_interval_min_ns = (hrtime_t)clock_highres_interval_min;
+
 	error = mod_install(&modlinkage);
 	if (error) {
 		ddi_soft_state_fini(&vmm_statep);

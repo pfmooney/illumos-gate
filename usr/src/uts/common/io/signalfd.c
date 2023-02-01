@@ -591,14 +591,14 @@ signalfd_consume_signal(k_sigset_t set, uio_t *uio, bool should_block)
 
 		DTRACE_PROC2(signal__clear, int, 0, ksiginfo_t *, infop);
 	} else {
-		ssi.ssi_signo = lwp->lwp_cursig;
-		ssi.ssi_code = SI_NOINFO;
-
 		/* Convert to the format expected by the probe. */
 		k_siginfo_t info = {
 			.si_signo = lwp->lwp_cursig,
 			.si_code = SI_NOINFO,
 		};
+
+		ssi.ssi_signo = info.si_signo;
+		ssi.ssi_code = info.si_code;
 		DTRACE_PROC2(signal__clear, int, 0, ksiginfo_t *, &info);
 	}
 

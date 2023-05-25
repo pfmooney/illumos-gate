@@ -35,7 +35,10 @@ PROG =	mem_partial \
 	import_vlapic \
 	time_data \
 	maxcpu \
-	npt_ops
+	npt_ops \
+	create_params
+
+NVLIST_PROG = create_params
 
 COMMON_OBJS =	common.o
 CLEAN_OBJS =	$(PROG:%=%.o)
@@ -54,6 +57,8 @@ CPPFLAGS =	-I$(COMPAT)/bhyve -I$(CONTRIB)/bhyve \
 		-I$(SRC)/uts/intel \
 		-I../common
 $(PROG) :=	LDLIBS += -lvmmapi
+
+$(NVLIST_PROG) :=	LDLIBS += -lnvpair
 
 all: $(PROG)
 

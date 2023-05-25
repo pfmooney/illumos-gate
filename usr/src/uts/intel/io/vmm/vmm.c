@@ -232,6 +232,10 @@ struct vm {
 	bool		is_paused;		/* (i) instance is paused */
 };
 
+struct vm_params {
+	bool use_reservoir;
+};
+
 static int vmm_initialized;
 static uint64_t vmm_host_freq;
 
@@ -593,7 +597,7 @@ uint_t cores_per_package = 1;
 uint_t threads_per_core = 1;
 
 int
-vm_create(uint64_t flags, struct vm **retvm)
+vm_create(const struct vm_params *params, struct vm **retvm)
 {
 	struct vm *vm;
 	struct vmspace *vmspace;
@@ -616,7 +620,7 @@ vm_create(uint64_t flags, struct vm **retvm)
 	vm = kmem_zalloc(sizeof (struct vm), KM_SLEEP);
 
 	vm->vmspace = vmspace;
-	vm->mem_transient = (flags & VCF_RESERVOIR_MEM) == 0;
+	vm->mem_transient = !params->use_reservoir;
 	for (uint_t i = 0; i < VM_MAXCPU; i++) {
 		vm->vcpu[i].vmclient = vmspace_client_alloc(vmspace);
 	}
@@ -5156,4 +5160,57 @@ vmm_data_write(struct vm *vm, const vmm_data_req_t *req)
 	}
 
 	return (err);
+}
+
+void
+vm_param_err(nvlist_t *errlist, const char *name, vm_param_errcode_t code,
+    const char *detail)
+{
+	nvlist_t *entry = fnvlist_alloc();
+
+	fnvlist_add_uint32(entry, "code", code);
+	fnvlist_add_string(entry, "detail", (detail != NULL) ? detail : "");
+	fnvlist_add_nvlist(errlist, name, entry);
+	fnvlist_free(entry);
+}
+
+struct vm_params *
+vm_params_parse(nvlist_t *plist, nvlist_t *errlist)
+{
+	nvpair_t *nvp;
+
+	struct vm_params *params = kmem_zalloc(sizeof (struct vm_params),
+	    KM_SLEEP);
+
+	nvp = nvlist_next_nvpair(plist, NULL);
+	while (nvp != NULL) {
+		const char *name = nvpair_name(nvp);
+
+		/* Right now, only the reservoir option is supported */
+		if (strcmp(name, "vmm.use_reservoir") == 0) {
+			if (nvpair_type(nvp) != DATA_TYPE_BOOLEAN_VALUE) {
+				vm_param_err(errlist, name, VPE_INVALID_TYPE,
+				    NULL);
+			} else {
+				boolean_t val = B_FALSE;
+				VERIFY0(nvpair_value_boolean_value(nvp, &val));
+				params->use_reservoir = val;
+			}
+		}
+
+		fnvlist_remove_nvpair(plist, nvp);
+		nvp = nvlist_next_nvpair(plist, NULL);
+	}
+
+	/*
+	 * Since current requirements are not (yet) stringent, this always
+	 * succeeds.
+	 */
+	return (params);
+}
+
+void
+vm_params_free(struct vm_params *params)
+{
+	kmem_free(params, sizeof (*params));
 }

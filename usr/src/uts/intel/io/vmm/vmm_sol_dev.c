@@ -2043,36 +2043,97 @@ vmm_hma_release(void)
 	mutex_exit(&vmmdev_mtx);
 }
 
+/*
+ * Extract VM creation parameters which are handled up at the softc layer (such
+ * as the name), rather than the internals of the vmm.
+ */
 static int
-vmmdev_do_vm_create(const struct vm_create_req *req, cred_t *cr)
+vmmdev_params_initial(nvlist_t *plist, nvlist_t *errlist, char *name_out)
 {
-	vmm_softc_t	*sc = NULL;
-	minor_t		minor;
-	int		error = ENOMEM;
-	size_t		len;
-	const char	*name = req->name;
-
-	len = strnlen(name, VM_MAX_NAMELEN);
-	if (len == 0) {
+	nvpair_t *nvp_name = NULL;
+	if (nvlist_lookup_nvpair(plist, "name", &nvp_name) != 0) {
+		vm_param_err(errlist, "name", VPE_MISSING_KEY, NULL);
 		return (EINVAL);
 	}
-	if (len >= VM_MAX_NAMELEN) {
-		return (ENAMETOOLONG);
+	if (nvpair_type(nvp_name) != DATA_TYPE_STRING) {
+		vm_param_err(errlist, "name", VPE_INVALID_TYPE, NULL);
+		return (EINVAL);
+	}
+	const char *name = NULL;
+	VERIFY0(nvpair_value_string(nvp_name, (char **)&name));
+
+	const size_t len = strnlen(name, VM_MAX_NAMELEN);
+	if (len == 0 || len >= VM_MAX_NAMELEN) {
+		vm_param_err(errlist, "name", VPE_INVALID_VALUE,
+		    "bad name length");
+		return (EINVAL);
 	}
 	if (strchr(name, '/') != NULL) {
+		vm_param_err(errlist, "name", VPE_INVALID_VALUE,
+		    "name cannot contain '/'");
 		return (EINVAL);
 	}
 
-	if (!vmm_hma_acquire())
+	/*
+	 * With the name validated, copy it out, then remove it from the params
+	 * list so it is not considered by anything else.
+	 */
+	strlcpy(name_out, name, VM_MAX_NAMELEN);
+	fnvlist_remove_nvpair(plist, nvp_name);
+
+	/*
+	 * It is at this point that we could extract and validate a 'maxcpu'
+	 * parameter as well, since that needs to be known at the vmm_softc
+	 * level for locking.  That will be added when 'maxcpu' is tunable.
+	 */
+
+	return (0);
+}
+
+static int
+vmmdev_do_vm_create(nvlist_t *plist, nvlist_t *errlist, cred_t *cr)
+{
+	char name[VM_MAX_NAMELEN] = { 0 };
+	int error = 0;
+	minor_t minor = -1;
+	vmm_softc_t *sc = NULL;
+	struct vm_params *params = NULL;
+
+	/*
+	 * As the parsing machinery encounters parameters it recognizes, those
+	 * parameters will be removed from the nvlist so they are not present
+	 * for later logic.  Doing so will also identify parameters which were
+	 * unrecognized during parsing.
+	 *
+	 * In order to keep an inventory of the parameters which were provided
+	 * for successful instance creaction, a copy of the list is taken here
+	 * so it can be stored in the vmm_softc.
+	 */
+	nvlist_t *plist_clone = fnvlist_dup(plist);
+
+	error = vmmdev_params_initial(plist, errlist, name);
+	if (error != 0) {
+		fnvlist_free(plist_clone);
+		return (error);
+	}
+
+	if (!vmm_hma_acquire()) {
+		fnvlist_free(plist_clone);
 		return (ENXIO);
+	}
 
 	mutex_enter(&vmm_mtx);
 
+	params = vm_params_parse(plist, errlist);
+	if (params == NULL) {
+		error = EINVAL;
+		goto fail;
+	}
+
 	/* Look for duplicate names */
 	if (vmm_lookup(name) != NULL) {
-		mutex_exit(&vmm_mtx);
-		vmm_hma_release();
-		return (EEXIST);
+		error = EEXIST;
+		goto fail;
 	}
 
 	/* Allow only one instance per non-global zone. */
@@ -2080,15 +2141,17 @@ vmmdev_do_vm_create(const struct vm_create_req *req, cred_t *cr)
 		for (sc = list_head(&vmm_list); sc != NULL;
 		    sc = list_next(&vmm_list, sc)) {
 			if (sc->vmm_zone == curzone) {
-				mutex_exit(&vmm_mtx);
-				vmm_hma_release();
-				return (EINVAL);
+				error = EINVAL;
+				goto fail;
 			}
 		}
 	}
 
-	minor = id_alloc(vmm_minors);
-	if (ddi_soft_state_zalloc(vmm_statep, minor) != DDI_SUCCESS) {
+	error = ENOMEM;
+	minor = id_alloc_nosleep(vmm_minors);
+	if (minor == -1) {
+		goto fail;
+	} else if (ddi_soft_state_zalloc(vmm_statep, minor) != DDI_SUCCESS) {
 		goto fail;
 	} else if ((sc = ddi_get_soft_state(vmm_statep, minor)) == NULL) {
 		ddi_soft_state_free(vmm_statep, minor);
@@ -2097,12 +2160,12 @@ vmmdev_do_vm_create(const struct vm_create_req *req, cred_t *cr)
 	    DDI_PSEUDO, 0) != DDI_SUCCESS) {
 		goto fail;
 	}
-
 	if (vmm_kstat_alloc(sc, minor, cr) != 0) {
+		ddi_remove_minor_node(vmmdev_dip, name);
 		goto fail;
 	}
 
-	error = vm_create(req->flags, &sc->vmm_vm);
+	error = vm_create(params, &sc->vmm_vm);
 	if (error == 0) {
 		/* Complete VM intialization and report success. */
 		(void) strlcpy(sc->vmm_name, name, sizeof (sc->vmm_name));
@@ -2125,20 +2188,31 @@ vmmdev_do_vm_create(const struct vm_create_req *req, cred_t *cr)
 		vmm_zsd_add_vm(sc);
 		vmm_kstat_init(sc);
 
+		sc->vmm_create_params = plist_clone;
+
 		list_insert_tail(&vmm_list, sc);
 		mutex_exit(&vmm_mtx);
+		vm_params_free(params);
+
 		return (0);
+	} else {
+		vmm_kstat_fini(sc);
+		ddi_remove_minor_node(vmmdev_dip, name);
 	}
 
-	vmm_kstat_fini(sc);
-	ddi_remove_minor_node(vmmdev_dip, name);
 fail:
-	id_free(vmm_minors, minor);
+	if (params == NULL) {
+		vm_params_free(params);
+	}
+	if (minor != -1) {
+		id_free(vmm_minors, minor);
+	}
 	if (sc != NULL) {
 		ddi_soft_state_free(vmm_statep, minor);
 	}
 	mutex_exit(&vmm_mtx);
 	vmm_hma_release();
+	fnvlist_free(plist_clone);
 
 	return (error);
 }
@@ -2670,6 +2744,7 @@ vmm_destroy_finish(vmm_softc_t *sc)
 	vm_destroy(sc->vmm_vm);
 	ddi_remove_minor_node(vmmdev_dip, sc->vmm_name);
 	(void) devfs_clean(ddi_get_parent(vmmdev_dip), NULL, DV_CLEAN_FORCE);
+	fnvlist_free(sc->vmm_create_params);
 
 	const minor_t minor = sc->vmm_minor;
 	ddi_soft_state_free(vmm_statep, minor);
@@ -3033,22 +3108,150 @@ vmm_is_supported(intptr_t arg)
 }
 
 static int
+vmmdev_create_legacy(void *uarg, int md, cred_t *cr)
+{
+	struct vm_create_req req;
+
+	if ((md & FWRITE) == 0) {
+		return (EPERM);
+	}
+	if (ddi_copyin(uarg, &req, sizeof (req), md) != 0) {
+		return (EFAULT);
+	}
+
+	/* Conjure params nvlist from legacy create request */
+	nvlist_t *plist = fnvlist_alloc();
+	fnvlist_add_string(plist, "name", req.name);
+	fnvlist_add_boolean_value(plist, "vmm.use_reservoir",
+	    (req.flags & VCF_RESERVOIR_MEM) != 0);
+
+	nvlist_t *errlist = fnvlist_alloc();
+	int err = vmmdev_do_vm_create(plist, errlist, cr);
+
+	fnvlist_free(plist);
+	fnvlist_free(errlist);
+
+	return (err);
+}
+
+static int
+vmmdev_create_nv(void *uarg, int md, cred_t *cr)
+{
+	struct vm_create_nv vcn;
+	nvlist_t *plist = NULL, *errlist = NULL;
+	int err = 0;
+
+	if ((md & FWRITE) == 0) {
+		return (EPERM);
+	}
+	if (ddi_copyin(uarg, &vcn, sizeof (vcn), md) != 0) {
+		return (EFAULT);
+	}
+
+	/*
+	 * Record the size of the error nvlist buffer, then zero it out in the
+	 * request struct.  This prevents all of the bail-out paths from needing
+	 * to do so (when they have no error nvlist to copyout).
+	 *
+	 * If the VM creation itself populates an error nvlist, it will circle
+	 * back to communicate the size of the packed buffer.
+	 */
+	const uint32_t err_buf_sz = vcn.vcn_sz_error;
+	vcn.vcn_sz_error = 0;
+
+	if (vcn.vcn_sz_param == 0 || vcn.vcn_param == NULL) {
+		err = EINVAL;
+		goto done;
+	}
+	if (vcn.vcn_sz_param > VM_NVLIST_MAX_SZ) {
+		err = E2BIG;
+		goto done;
+	}
+
+	void *buf = kmem_alloc(vcn.vcn_sz_param, KM_SLEEP);
+	if (ddi_copyin(vcn.vcn_param, buf, vcn.vcn_sz_param, md) != 0) {
+		kmem_free(buf, vcn.vcn_sz_param);
+		err = EFAULT;
+		goto done;
+	}
+
+	err = nvlist_unpack(buf, vcn.vcn_sz_param, &plist, KM_SLEEP);
+	kmem_free(buf, vcn.vcn_sz_param);
+	buf = NULL;
+	if (err != 0) {
+		goto done;
+	}
+
+	errlist = fnvlist_alloc();
+	err = vmmdev_do_vm_create(plist, errlist, cr);
+
+	if (nvlist_empty(errlist)) {
+		/* No error state which needs to be communicated! */
+		goto done;
+	}
+
+	size_t err_sz = 0;
+	char *ebuf = NULL;
+	int pack_err = nvlist_pack(errlist, &ebuf, &err_sz,
+	    NV_ENCODE_NATIVE, KM_SLEEP);
+	if (pack_err != 0) {
+		/*
+		 * Throw our hands up if we cannot pack the nvlist for
+		 * consumption in userspace
+		 */
+		ASSERT(ebuf == NULL);
+		err = (err != 0) ? err : pack_err;
+		goto done;
+	}
+
+	/*
+	 * Communicate the size of the error list, regardless of whether we are
+	 * able to copy it out to userspace.
+	 */
+	ASSERT3U(err_sz, <=, UINT32_MAX);
+	vcn.vcn_sz_error = err_sz;
+	/*
+	 * Until the error contents have been successfully copied out, assuming
+	 * they even will fit in the buffer, assume the valid size (communicated
+	 * to userspace) is zero.
+	 */
+	vcn.vcn_sz_error_valid = 0;
+
+	if (err_sz <= err_buf_sz) {
+		if (ddi_copyout(ebuf, vcn.vcn_error, err_sz, md) != 0) {
+			err = (err != 0) ? err : EFAULT;
+		} else {
+			/*
+			 * Successfully copied out errors, so userspace can know
+			 * that they are valid.
+			 */
+			vcn.vcn_sz_error_valid = err_sz;
+		}
+	} else {
+		err = (err != 0) ? err : E2BIG;
+	}
+	kmem_free(ebuf, err_sz);
+
+done:
+	if (ddi_copyout(&vcn, uarg, sizeof (vcn), md) != 0) {
+		err = (err != 0) ? err : EFAULT;
+	}
+	fnvlist_free(errlist);
+	fnvlist_free(plist);
+
+	return (err);
+}
+
+static int
 vmm_ctl_ioctl(int cmd, intptr_t arg, int md, cred_t *cr, int *rvalp)
 {
 	void *argp = (void *)arg;
 
 	switch (cmd) {
-	case VMM_CREATE_VM: {
-		struct vm_create_req req;
-
-		if ((md & FWRITE) == 0) {
-			return (EPERM);
-		}
-		if (ddi_copyin(argp, &req, sizeof (req), md) != 0) {
-			return (EFAULT);
-		}
-		return (vmmdev_do_vm_create(&req, cr));
-	}
+	case VMM_CREATE_VM:
+		return (vmmdev_create_legacy(argp, md, cr));
+	case VMM_CREATE_NV:
+		return (vmmdev_create_nv(argp, md, cr));
 	case VMM_DESTROY_VM: {
 		struct vm_destroy_req req;
 

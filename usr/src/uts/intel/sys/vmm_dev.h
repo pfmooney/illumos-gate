@@ -54,6 +54,33 @@ struct vm_create_req {
 	uint64_t	flags;
 };
 
+/* Current (arbitrary) size limit for parameter nvlist */
+#define	VM_NVLIST_MAX_SZ	8192
+
+struct vm_create_nv {
+	/* Buffer holding packed creation parameter nvlist */
+	void		*vcn_param;
+	/*
+	 * Buffer into which packed error nvlist will be placed, if there are
+	 * errors and they fit the size specified.
+	 */
+	void		*vcn_error;
+	/* Size of vcn_param buffer */
+	uint32_t	vcn_sz_param;
+	/*
+	 * Size of vcn_error buffer.  After completion of ioctl, this will be
+	 * updated to the size required to hold the packed nvlist of errors from
+	 * the request.
+	 */
+	uint32_t	vcn_sz_error;
+	/*
+	 * Size of the packed error nvlist placed in the vcn_param buffer.  If
+	 * that buffer was inadequately sized, or memory protection prevented
+	 * copyout, this will be zero, whereas vcn_sz_error will note the size
+	 * regardless.
+	 */
+	uint32_t	vcn_sz_error_valid;
+};
 
 struct vm_destroy_req {
 	char		name[VM_MAX_NAMELEN];
@@ -496,6 +523,7 @@ struct vm_legacy_cpuid {
 #define	VMM_VM_SUPPORTED	(VMMCTL_IOC_BASE | 0x03)
 #define	VMM_INTERFACE_VERSION	(VMMCTL_IOC_BASE | 0x04)
 #define	VMM_CHECK_IOMMU		(VMMCTL_IOC_BASE | 0x05)
+#define	VMM_CREATE_NV		(VMMCTL_IOC_BASE | 0x06)
 
 #define	VMM_RESV_QUERY		(VMMCTL_IOC_BASE | 0x10)
 #define	VMM_RESV_SET_TARGET	(VMMCTL_IOC_BASE | 0x11)

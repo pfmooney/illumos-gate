@@ -62,6 +62,7 @@ struct vmm_softc {
 	minor_t		vmm_minor;
 	char		vmm_name[VM_MAX_NAMELEN];
 	list_t		vmm_devmem_list;
+	nvlist_t	*vmm_create_params;
 
 	kcondvar_t	vmm_cv;
 	list_t		vmm_holds;

@@ -52,6 +52,7 @@
 #include <sys/vmm.h>
 #include <sys/vmm_data.h>
 #include <sys/linker_set.h>
+#include <sys/nvpair.h>
 
 SDT_PROVIDER_DECLARE(vmm);
 
@@ -69,6 +70,7 @@ struct vm_client;
 struct vm_object;
 struct vm_guest_paging;
 struct vmm_data_req;
+struct vm_params;
 
 /* Return values for architecture-specific calculation of the TSC multiplier */
 typedef enum {
@@ -139,7 +141,7 @@ struct vmm_ops {
 extern struct vmm_ops vmm_ops_intel;
 extern struct vmm_ops vmm_ops_amd;
 
-int vm_create(uint64_t flags, struct vm **retvm);
+int vm_create(const struct vm_params *, struct vm **retvm);
 void vm_destroy(struct vm *vm);
 int vm_reinit(struct vm *vm, uint64_t);
 uint16_t vm_get_maxcpus(struct vm *vm);
@@ -571,6 +573,10 @@ typedef struct vmm_data_version_entry {
 
 int vmm_data_read(struct vm *, const vmm_data_req_t *);
 int vmm_data_write(struct vm *, const vmm_data_req_t *);
+
+void vm_param_err(nvlist_t *, const char *, vm_param_errcode_t, const char *);
+struct vm_params *vm_params_parse(nvlist_t *, nvlist_t *);
+void vm_params_free(struct vm_params *);
 
 /*
  * TSC Scaling

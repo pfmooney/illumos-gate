@@ -479,4 +479,11 @@ struct vcpu_cpuid_entry {
 /* Maximum vcpu_cpuid_entry records per vCPU */
 #define	VMM_MAX_CPUID_ENTRIES		256
 
+/* Error codes emitted related to VM parameters */
+typedef enum vm_param_errcode {
+	VPE_MISSING_KEY = 1,
+	VPE_INVALID_TYPE = 2,
+	VPE_INVALID_VALUE = 3,
+} vm_param_errcode_t;
+
 #endif	/* _VMM_H_ */

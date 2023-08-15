@@ -11,7 +11,7 @@
 
 /*
  * Copyright 2019 Joyent, Inc.
- * Copyright 2022 Oxide Computer Company
+ * Copyright 2023 Oxide Computer Company
  */
 
 #ifndef _VMM_GPT_H
@@ -25,13 +25,13 @@
  * the root of the tree is referred to as "LEVEL4" while the
  * leaf level is "LEVEL1".
  */
-enum vmm_gpt_node_level {
+typedef enum vmm_gpt_node_level {
 	LEVEL4 = 0,
 	LEVEL3,
 	LEVEL2,
 	LEVEL1,
 	MAX_GPT_LEVEL,
-};
+} vmm_gpt_node_level_t;
 
 /*
  * The vmm_pte_ops structure contains function pointers for format-specific

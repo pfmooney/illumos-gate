@@ -31,13 +31,6 @@ struct mtx;
 void	critical_enter(void);
 void	critical_exit(void);
 
-struct unrhdr *new_unrhdr(int low, int high, struct mtx *mutex);
-void delete_unrhdr(struct unrhdr *uh);
-int alloc_unr(struct unrhdr *uh);
-void free_unr(struct unrhdr *uh, u_int item);
-
-#include <sys/libkern.h>
-
 #include_next <sys/systm.h>
 #include <sys/cmn_err.h>
 

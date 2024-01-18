@@ -51,15 +51,13 @@
 #include <sys/kmem.h>
 #include <sys/mutex.h>
 #include <sys/systm.h>
-#include <sys/cpuset.h>
 
 #include <x86/specialreg.h>
 #include <x86/apicreg.h>
 
 #include <machine/clock.h>
 
-#include <machine/vmm.h>
-#include <sys/vmm_kernel.h>
+#include <sys/vmm.h>
 
 #include "vmm_lapic.h"
 #include "vmm_stat.h"
@@ -814,13 +812,13 @@ vlapic_icrtmr_write_handler(struct vlapic *vlapic)
  * or xAPIC (8-bit) destination field.
  */
 void
-vlapic_calcdest(struct vm *vm, cpuset_t *dmask, uint32_t dest, bool phys,
+vlapic_calcdest(struct vm *vm, vcpuset_t *dmask, uint32_t dest, bool phys,
     bool lowprio, bool x2apic_dest)
 {
 	struct vlapic *vlapic;
 	uint32_t dfr, ldr, ldest, cluster;
 	uint32_t mda_flat_ldest, mda_cluster_ldest, mda_ldest, mda_cluster_id;
-	cpuset_t amask;
+	vcpuset_t amask;
 	int vcpuid;
 
 	if ((x2apic_dest && dest == 0xffffffff) ||
@@ -828,7 +826,7 @@ vlapic_calcdest(struct vm *vm, cpuset_t *dmask, uint32_t dest, bool phys,
 		/*
 		 * Broadcast in both logical and physical modes.
 		 */
-		*dmask = vm_active_cpus(vm);
+		vm_active_cpus(vm, dmask);
 		return;
 	}
 
@@ -836,11 +834,11 @@ vlapic_calcdest(struct vm *vm, cpuset_t *dmask, uint32_t dest, bool phys,
 		/*
 		 * Physical mode: destination is APIC ID.
 		 */
-		CPU_ZERO(dmask);
+		vcpuset_zero(dmask);
 		vcpuid = vm_apicid2vcpuid(vm, dest);
-		amask = vm_active_cpus(vm);
-		if (vcpuid < vm_get_maxcpus(vm) && CPU_ISSET(vcpuid, &amask))
-			CPU_SET(vcpuid, dmask);
+		vm_active_cpus(vm, &amask);
+		if (vcpuid < vm_get_maxcpus(vm) && vcpuset_test(&amask, vcpuid))
+			vcpuset_set(dmask, vcpuid);
 	} else {
 		/*
 		 * In the "Flat Model" the MDA is interpreted as an 8-bit wide
@@ -864,11 +862,10 @@ vlapic_calcdest(struct vm *vm, cpuset_t *dmask, uint32_t dest, bool phys,
 		 * Logical mode: match each APIC that has a bit set
 		 * in its LDR that matches a bit in the ldest.
 		 */
-		CPU_ZERO(dmask);
-		amask = vm_active_cpus(vm);
-		while ((vcpuid = CPU_FFS(&amask)) != 0) {
-			vcpuid--;
-			CPU_CLR(vcpuid, &amask);
+		vcpuset_zero(dmask);
+		vm_active_cpus(vm, &amask);
+		while ((vcpuid = vcpuset_ffs(&amask)) != -1) {
+			vcpuset_clear(&amask, vcpuid);
 
 			vlapic = vm_lapic(vm, vcpuid);
 			dfr = vlapic->apic_page->dfr;
@@ -899,7 +896,7 @@ vlapic_calcdest(struct vm *vm, cpuset_t *dmask, uint32_t dest, bool phys,
 			}
 
 			if ((mda_ldest & ldest) != 0) {
-				CPU_SET(vcpuid, dmask);
+				vcpuset_set(dmask, vcpuid);
 				if (lowprio)
 					break;
 			}
@@ -1032,7 +1029,7 @@ void
 vlapic_icrlo_write_handler(struct vlapic *vlapic)
 {
 	int i;
-	cpuset_t dmask;
+	vcpuset_t dmask;
 	uint64_t icrval;
 	uint32_t dest, vec, mode, dsh;
 	struct LAPIC *lapic;
@@ -1073,14 +1070,15 @@ vlapic_icrlo_write_handler(struct vlapic *vlapic)
 		    vlapic_x2mode(vlapic));
 		break;
 	case APIC_DEST_SELF:
-		CPU_SETOF(vlapic->vcpuid, &dmask);
+		vcpuset_zero(&dmask);
+		vcpuset_set(&dmask, vlapic->vcpuid);
 		break;
 	case APIC_DEST_ALLISELF:
-		dmask = vm_active_cpus(vlapic->vm);
+		vm_active_cpus(vlapic->vm, &dmask);
 		break;
 	case APIC_DEST_ALLESELF:
-		dmask = vm_active_cpus(vlapic->vm);
-		CPU_CLR(vlapic->vcpuid, &dmask);
+		vm_active_cpus(vlapic->vm, &dmask);
+		vcpuset_clear(&dmask, vlapic->vcpuid);
 		break;
 	default:
 		/*
@@ -1090,9 +1088,8 @@ vlapic_icrlo_write_handler(struct vlapic *vlapic)
 		panic("unknown delivery shorthand: %x", dsh);
 	}
 
-	while ((i = CPU_FFS(&dmask)) != 0) {
-		i--;
-		CPU_CLR(i, &dmask);
+	while ((i = vcpuset_ffs(&dmask)) != -1) {
+		vcpuset_clear(&dmask, i);
 		switch (mode) {
 		case APIC_DELMODE_FIXED:
 			(void) lapic_intr_edge(vlapic->vm, i, vec);
@@ -1748,7 +1745,7 @@ vlapic_deliver_intr(struct vm *vm, bool level, uint32_t dest, bool phys,
 {
 	bool lowprio;
 	int vcpuid;
-	cpuset_t dmask;
+	vcpuset_t dmask;
 
 	if (delmode != IOART_DELFIXED &&
 	    delmode != IOART_DELLOPRI &&
@@ -1765,9 +1762,8 @@ vlapic_deliver_intr(struct vm *vm, bool level, uint32_t dest, bool phys,
 	 */
 	vlapic_calcdest(vm, &dmask, dest, phys, lowprio, false);
 
-	while ((vcpuid = CPU_FFS(&dmask)) != 0) {
-		vcpuid--;
-		CPU_CLR(vcpuid, &dmask);
+	while ((vcpuid = vcpuset_ffs(&dmask)) != -1) {
+		vcpuset_clear(&dmask, vcpuid);
 		if (delmode == IOART_DELEXINT) {
 			(void) vm_inject_extint(vm, vcpuid);
 		} else {

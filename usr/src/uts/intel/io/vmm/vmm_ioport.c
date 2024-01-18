@@ -46,7 +46,7 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 
-#include <machine/vmm.h>
+#include <sys/vmm.h>
 
 #include "vatpic.h"
 #include "vatpit.h"

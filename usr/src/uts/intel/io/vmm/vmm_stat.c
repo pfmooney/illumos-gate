@@ -33,8 +33,7 @@
 #include <sys/systm.h>
 #include <sys/kmem.h>
 
-#include <machine/vmm.h>
-#include "vmm_util.h"
+#include <sys/vmm.h>
 #include "vmm_stat.h"
 
 /*
@@ -98,7 +97,7 @@ vmm_stat_copy(struct vm *vm, int vcpu, int index, int count, int *num_stats,
 		return (0);
 	}
 
-	tocopy = min(vst_num_elems - index, count);
+	tocopy = MIN(vst_num_elems - index, count);
 
 	/* Let stats functions update their counters */
 	for (i = 0; i < vst_num_types; i++) {

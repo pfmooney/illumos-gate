@@ -42,7 +42,7 @@
 #include <dev/pci/pcireg.h>
 
 #include <machine/resource.h>
-#include <machine/vmm.h>
+#include <sys/vmm.h>
 #include <machine/vmparam.h>
 #include <machine/pci_cfgreg.h>
 

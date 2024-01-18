@@ -43,10 +43,7 @@
 #ifndef	_VMM_DEV_H_
 #define	_VMM_DEV_H_
 
-#include <machine/vmm.h>
-
-#include <sys/param.h>
-#include <sys/cpuset.h>
+#include <sys/vmm.h>
 #include <sys/vmm_data.h>
 
 struct vm_create_req {
@@ -54,15 +51,14 @@ struct vm_create_req {
 	uint64_t	flags;
 };
 
-
 struct vm_destroy_req {
 	char		name[VM_MAX_NAMELEN];
 };
 
 struct vm_memmap {
-	vm_paddr_t	gpa;
+	uint64_t	gpa;
 	int		segid;		/* memory segment */
-	vm_ooffset_t	segoff;		/* offset into memory segment */
+	int64_t		segoff;		/* offset into memory segment */
 	size_t		len;		/* mmap length */
 	int		prot;		/* RWX */
 	int		flags;
@@ -71,7 +67,7 @@ struct vm_memmap {
 #define	VM_MEMMAP_F_IOMMU	0x02
 
 struct vm_munmap {
-	vm_paddr_t	gpa;
+	uint64_t	gpa;
 	size_t		len;
 };
 
@@ -146,8 +142,8 @@ struct vm_pptdev {
 
 struct vm_pptdev_mmio {
 	int		pptfd;
-	vm_paddr_t	gpa;
-	vm_paddr_t	hpa;
+	uint64_t	gpa;
+	uint64_t	hpa;
 	size_t		len;
 };
 
@@ -184,7 +180,6 @@ struct vm_stats {
 	int		cpuid;				/* in */
 	int		index;				/* in */
 	int		num_entries;			/* out */
-	struct timeval	tv;
 	uint64_t	statbuf[MAX_VM_STATS];
 };
 
@@ -242,11 +237,7 @@ struct vm_activate_cpu {
 struct vm_cpuset {
 	int		which;
 	int		cpusetsize;
-#ifndef _KERNEL
-	cpuset_t	*cpus;
-#else
 	void		*cpus;
-#endif
 };
 #define	VM_ACTIVE_CPUS		0
 /*

@@ -54,7 +54,7 @@
 #include <x86/apicreg.h>
 #include <dev/ic/i8259.h>
 
-#include <machine/vmm.h>
+#include <sys/vmm.h>
 
 #include "vmm_lapic.h"
 #include "vioapic.h"

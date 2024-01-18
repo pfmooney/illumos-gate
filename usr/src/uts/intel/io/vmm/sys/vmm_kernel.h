@@ -48,10 +48,12 @@
 #define	_VMM_KERNEL_H_
 
 #include <sys/sdt.h>
-#include <x86/segments.h>
+#include <sys/segments.h>
 #include <sys/vmm.h>
 #include <sys/vmm_data.h>
 #include <sys/linker_set.h>
+#include <sys/bitmap.h>
+#include <sys/stdbool.h>
 
 SDT_PROVIDER_DECLARE(vmm);
 
@@ -69,6 +71,7 @@ struct vm_client;
 struct vm_object;
 struct vm_guest_paging;
 struct vmm_data_req;
+struct vcpuset;
 
 /* Return values for architecture-specific calculation of the TSC multiplier */
 typedef enum {
@@ -229,10 +232,8 @@ int vm_service_mmio_read(struct vm *vm, int cpuid, uint64_t gpa, uint64_t *rval,
 int vm_service_mmio_write(struct vm *vm, int cpuid, uint64_t gpa, uint64_t wval,
     int wsize);
 
-#ifdef _SYS__CPUSET_H_
-cpuset_t vm_active_cpus(struct vm *vm);
-cpuset_t vm_debug_cpus(struct vm *vm);
-#endif	/* _SYS__CPUSET_H_ */
+void vm_active_cpus(struct vm *vm, struct vcpuset *);
+void vm_debug_cpus(struct vm *vm, struct vcpuset *);
 
 bool vcpu_entry_bailout_checks(struct vm *vm, int vcpuid, uint64_t rip);
 bool vcpu_run_state_pending(struct vm *vm, int vcpuid);
@@ -580,5 +581,31 @@ uint64_t vmm_calc_freq_multiplier(uint64_t guest_hz, uint64_t host_hz,
 
 /* represents a multiplier for a guest in which no scaling is required */
 #define	VM_TSCM_NOSCALE	0
+
+struct vcpuset {
+	ulong_t	bits[BT_SIZEOFMAP(VM_MAXCPU)];
+};
+typedef struct vcpuset vcpuset_t;
+
+void vcpuset_zero(vcpuset_t *);
+bool vcpuset_eq(const vcpuset_t *, const vcpuset_t *);
+bool vcpuset_test(const vcpuset_t *, uint_t);
+uint_t vcpuset_ffs(const vcpuset_t *);
+void vcpuset_set_atomic(vcpuset_t *, uint_t);
+void vcpuset_clear_atomic(vcpuset_t *, uint_t);
+void vcpuset_set(vcpuset_t *, uint_t);
+void vcpuset_clear(vcpuset_t *, uint_t);
+void vcpuset_copy(const vcpuset_t *, vcpuset_t *);
+void vcpuset_to_ulong(const vcpuset_t *, ulong_t *, uint_t);
+
+/*
+ * For parts of bhyve which track which host CPU is responsible for a given task
+ * for vCPU, this identifies the absence of such ownership.
+ */
+#define	NOCPU	-1
+
+bool vmm_is_intel(void);
+bool vmm_is_svm(void);
+bool vmm_supports_1G_pages(void);
 
 #endif /* _VMM_KERNEL_H_ */

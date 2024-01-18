@@ -75,9 +75,6 @@ void clock_ts_to_ct(struct timespec *, struct clocktime *);
 /* Traditional POSIX base year */
 #define	POSIX_BASE_YEAR	1970
 
-void timespec2fattime(struct timespec *tsp, int utc, u_int16_t *ddp, u_int16_t *dtp, u_int8_t *dhp);
-void fattime2timespec(unsigned dd, unsigned dt, unsigned dh, int utc, struct timespec *tsp);
-
 #endif /* _KERNEL */
 
 #endif	/* _COMPAT_FREEBSD_SYS_CLOCK_H_ */

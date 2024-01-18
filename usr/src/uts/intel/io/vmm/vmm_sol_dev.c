@@ -27,7 +27,6 @@
 #include <sys/mkdev.h>
 #include <sys/sunddi.h>
 #include <sys/fs/dv_node.h>
-#include <sys/cpuset.h>
 #include <sys/id_space.h>
 #include <sys/fs/sdev_plugin.h>
 #include <sys/smt.h>
@@ -39,7 +38,6 @@
 #include <x86/apicreg.h>
 
 #include <sys/vmm.h>
-#include <sys/vmm_kernel.h>
 #include <sys/vmm_instruction_emul.h>
 #include <sys/vmm_dev.h>
 #include <sys/vmm_impl.h>
@@ -57,7 +55,6 @@
 #include "io/vpmtmr.h"
 #include "vmm_lapic.h"
 #include "vmm_stat.h"
-#include "vmm_util.h"
 
 /*
  * Locking details:
@@ -633,7 +630,6 @@ vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
 			error = EFAULT;
 			break;
 		}
-		hrt2tv(gethrtime(), &vmstats.tv);
 		error = vmm_stat_copy(sc->vmm_vm, vmstats.cpuid, vmstats.index,
 		    nitems(vmstats.statbuf),
 		    &vmstats.num_entries, vmstats.statbuf);
@@ -1528,41 +1524,46 @@ vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
 
 	case VM_GET_CPUS: {
 		struct vm_cpuset vm_cpuset;
-		cpuset_t tempset;
-		void *srcp = &tempset;
-		int size;
+		vcpuset_t vset;
 
 		if (ddi_copyin(datap, &vm_cpuset, sizeof (vm_cpuset), md)) {
 			error = EFAULT;
 			break;
 		}
 
-		/* Be more generous about sizing since our cpuset_t is large. */
-		size = vm_cpuset.cpusetsize;
-		if (size <= 0 || size > sizeof (cpuset_t)) {
-			error = ERANGE;
-		}
-		/*
-		 * If they want a ulong_t or less, make sure they receive the
-		 * low bits with all the useful information.
-		 */
-		if (size <= sizeof (tempset.cpub[0])) {
-			srcp = &tempset.cpub[0];
-		}
-
-		if (vm_cpuset.which == VM_ACTIVE_CPUS) {
-			tempset = vm_active_cpus(sc->vmm_vm);
-		} else if (vm_cpuset.which == VM_DEBUG_CPUS) {
-			tempset = vm_debug_cpus(sc->vmm_vm);
-		} else {
-			error = EINVAL;
-		}
-
-		ASSERT(size > 0 && size <= sizeof (tempset));
-		if (error == 0 &&
-		    ddi_copyout(srcp, vm_cpuset.cpus, size, md)) {
-			error = EFAULT;
+		switch (vm_cpuset.which) {
+		case VM_ACTIVE_CPUS:
+			vm_active_cpus(sc->vmm_vm, &vset);
 			break;
+		case VM_DEBUG_CPUS:
+			vm_debug_cpus(sc->vmm_vm, &vset);
+			break;
+		default:
+			error = EINVAL;
+			break;
+		}
+
+		if (error == 0) {
+			/*
+			 * When bhyve was initially ported, (the kernel)
+			 * cpuset_t was used both in-kernel and in the bhyve
+			 * userspace (though a compat shim interface).  To
+			 * continue that fiction, we clamp sizing to a bitmask
+			 * mimicing the NCPU (256) sized vcpu limit.
+			 */
+			const int size = vm_cpuset.cpusetsize;
+			ulong_t output[BT_SIZEOFMAP(256)];
+
+			if (size <= 0 || size > sizeof (output)) {
+				error = ERANGE;
+			} else {
+				vcpuset_to_ulong(&vset, output, nitems(output));
+			}
+
+			if (error == 0 &&
+			    ddi_copyout(output, vm_cpuset.cpus, size, md)) {
+				error = EFAULT;
+			}
 		}
 		break;
 	}

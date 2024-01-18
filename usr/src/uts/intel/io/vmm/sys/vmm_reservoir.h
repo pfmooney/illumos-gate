@@ -20,6 +20,7 @@
 
 #include <sys/types.h>
 #include <sys/cred.h>
+#include <sys/stdbool.h>
 
 struct vmmr_region;
 typedef struct vmmr_region vmmr_region_t;

@@ -52,8 +52,8 @@
 #include <machine/cpufunc.h>
 #include <machine/md_var.h>
 #include <machine/specialreg.h>
-#include <machine/vmm.h>
-#include <sys/vmm_kernel.h>
+
+#include <sys/vmm.h>
 
 #include "vmx.h"
 #include "vmx_msr.h"

@@ -18,6 +18,7 @@
 
 #include <assert.h>
 #include <libnvpair.h>
+#include <stdbool.h>
 
 #define	NV_TYPE_NVLIST	DATA_TYPE_NVLIST
 #define	NV_TYPE_STRING	DATA_TYPE_STRING

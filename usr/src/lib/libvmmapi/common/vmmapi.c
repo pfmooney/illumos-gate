@@ -1007,6 +1007,24 @@ vm_inject_fault(struct vcpu *vcpu, int vector, int errcode_valid,
 
 	assert(error == 0);
 }
+
+void
+vm_inject_gp(struct vmctx *ctx, int vcpuid)
+{
+	vm_inject_fault(ctx, vcpuid, IDT_GP, 1, 0);
+}
+
+void
+vm_inject_ac(struct vmctx *ctx, int vcpuid, int errcode)
+{
+	vm_inject_fault(ctx, vcpuid, IDT_AC, 1, errcode);
+}
+
+void
+vm_inject_ss(struct vmctx *ctx, int vcpuid, int errcode)
+{
+	vm_inject_fault(ctx, vcpuid, IDT_SS, 1, errcode);
+}
 #endif /* __FreeBSD__ */
 
 int
@@ -1482,8 +1500,14 @@ vm_get_stats(struct vcpu *vcpu, struct timeval *ret_tv,
 	if (have_stats) {
 		if (ret_entries)
 			*ret_entries = count;
+#ifndef __FreeBSD__
+		if (ret_tv) {
+			clock_gettime(CLOCK_MONOTONIC, (timespec_t *)ret_tv);
+		}
+#else
 		if (ret_tv)
 			*ret_tv = vmstats.tv;
+#endif /* __FreeBSD__ */
 		return (stats_buf);
 	} else {
 		return (NULL);

@@ -51,8 +51,7 @@
 
 #include <machine/cpufunc.h>
 #include <machine/specialreg.h>
-#include <machine/vmm.h>
-#include <sys/vmm_kernel.h>
+#include <sys/vmm.h>
 
 #include "svm.h"
 #include "vmcb.h"

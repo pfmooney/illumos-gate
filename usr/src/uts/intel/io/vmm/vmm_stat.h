@@ -35,7 +35,7 @@
 #ifndef _VMM_STAT_H_
 #define	_VMM_STAT_H_
 
-#include <machine/vmm.h>
+#include <sys/vmm.h>
 
 struct vm;
 

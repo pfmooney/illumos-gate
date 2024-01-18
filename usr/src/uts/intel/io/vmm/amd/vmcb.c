@@ -49,7 +49,7 @@
 #include <sys/x86_archext.h>
 
 #include <machine/specialreg.h>
-#include <machine/vmm.h>
+#include <sys/vmm.h>
 
 #include "vmcb.h"
 #include "svm.h"

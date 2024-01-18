@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2004 Poul-Henning Kamp
+ * Copyright (c) 2011 NetApp, Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -40,12 +41,12 @@
 /*
  * Copyright 2014 Pluribus Networks Inc.
  * Copyright 2019 Joyent, Inc.
- * Copyright 2020 Oxide Computer Company
+ * Copyright 2022 Oxide Computer Company
  */
 
 #include <sys/types.h>
 #include <sys/archsystm.h>
-#include <sys/cpuset.h>
+#include <sys/cpuvar.h>
 #include <sys/fp.h>
 #include <sys/kmem.h>
 #include <sys/queue.h>
@@ -63,7 +64,7 @@
 #include <machine/cpufunc.h>
 #include <machine/md_var.h>
 #include <machine/specialreg.h>
-#include <machine/vmm.h>
+#include <sys/vmm.h>
 #include <machine/vmparam.h>
 #include <sys/vmm_impl.h>
 #include <sys/kernel.h>
@@ -88,14 +89,18 @@ sysinit(void)
 void
 invalidate_cache_all(void)
 {
-	cpuset_t cpuset;
+	cpuset_t *cpuset;
+
+	cpuset = cpuset_alloc(KM_SLEEP);
 
 	kpreempt_disable();
-	cpuset_all_but(&cpuset, CPU->cpu_id);
+	cpuset_all_but(cpuset, CPU->cpu_id);
 	xc_call((xc_arg_t)NULL, (xc_arg_t)NULL, (xc_arg_t)NULL,
 	    CPUSET2BV(cpuset), (xc_func_t)invalidate_cache);
 	invalidate_cache();
 	kpreempt_enable();
+
+	cpuset_free(cpuset);
 }
 
 vm_paddr_t
@@ -640,4 +645,123 @@ vmm_host_tsc_delta(void)
 	} else {
 		return (0);
 	}
+}
+
+void
+vcpuset_zero(vcpuset_t *set)
+{
+	for (uint_t i = 0; i < nitems(set->bits); i++) {
+		set->bits[i] = 0;
+	}
+}
+
+bool
+vcpuset_eq(const vcpuset_t *seta, const vcpuset_t *setb)
+{
+	for (uint_t i = 0; i < nitems(seta->bits); i++) {
+		if (seta->bits[i] != setb->bits[i]) {
+			return (false);
+		}
+	}
+	return (true);
+}
+
+bool
+vcpuset_test(const vcpuset_t *set, uint_t vcpu)
+{
+	ASSERT3U(vcpu, <, VM_MAXCPU);
+
+	return (BT_TEST(set->bits, vcpu) != 0);
+}
+
+/* Return index of highest bit set.  If empty, returns UINT_MAX (-1). */
+uint_t
+vcpuset_ffs(const vcpuset_t *set)
+{
+	int bit;
+
+	bit = bt_gethighbit(set->bits, (nitems(set->bits) - 1));
+	return ((uint_t)bit);
+}
+
+void
+vcpuset_set_atomic(vcpuset_t *set, uint_t vcpu)
+{
+	ASSERT3U(vcpu, <, VM_MAXCPU);
+
+	BT_ATOMIC_SET(set->bits, vcpu);
+}
+
+void
+vcpuset_clear_atomic(vcpuset_t *set, uint_t vcpu)
+{
+	ASSERT3U(vcpu, <, VM_MAXCPU);
+
+	BT_ATOMIC_CLEAR(set->bits, vcpu);
+}
+
+void
+vcpuset_set(vcpuset_t *set, uint_t vcpu)
+{
+	ASSERT3U(vcpu, <, VM_MAXCPU);
+
+	BT_SET(set->bits, vcpu);
+}
+
+void
+vcpuset_clear(vcpuset_t *set, uint_t vcpu)
+{
+	ASSERT3U(vcpu, <, VM_MAXCPU);
+
+	BT_CLEAR(set->bits, vcpu);
+}
+
+void
+vcpuset_copy(const vcpuset_t *src, vcpuset_t *dst)
+{
+	bcopy(src, dst, sizeof (*dst));
+}
+
+void
+vcpuset_to_ulong(const vcpuset_t *src, ulong_t *out, uint_t count)
+{
+	for (uint_t i = 0; i < count; i++) {
+		if (i < nitems(src->bits)) {
+			out[i] = src->bits[i];
+		} else {
+			out[i] = 0;
+		}
+	}
+}
+
+bool
+vmm_is_intel(void)
+{
+
+	return (strcmp(cpu_vendor, "GenuineIntel") == 0);
+}
+
+bool
+vmm_is_svm(void)
+{
+	return (strcmp(cpu_vendor, "AuthenticAMD") == 0 ||
+	    strcmp(cpu_vendor, "HygonGenuine") == 0);
+}
+
+bool
+vmm_supports_1G_pages(void)
+{
+	unsigned int regs[4];
+
+	/*
+	 * CPUID.80000001:EDX[bit 26] = 1 indicates support for 1GB pages
+	 *
+	 * Both Intel and AMD support this bit.
+	 */
+	if (cpu_exthigh >= 0x80000001) {
+		do_cpuid(0x80000001, regs);
+		if (regs[3] & (1 << 26))
+			return (true);
+	}
+	return (false);
 }

@@ -54,8 +54,8 @@
 
 #include <dev/acpica/acpi_hpet.h>
 
-#include <machine/vmm.h>
-#include <machine/vmm_dev.h>
+#include <sys/vmm.h>
+#include <sys/vmm_dev.h>
 
 #include "vmm_lapic.h"
 #include "vatpic.h"

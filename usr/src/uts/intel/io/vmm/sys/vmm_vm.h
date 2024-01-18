@@ -19,6 +19,7 @@
 #define	_VMM_VM_H
 
 #include <sys/types.h>
+#include <sys/stdbool.h>
 
 typedef struct vmspace vmspace_t;
 typedef struct vm_client vm_client_t;

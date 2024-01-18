@@ -57,8 +57,8 @@
 #include <dev/pci/pcivar.h>
 #include <dev/pci/pcireg.h>
 
-#include <machine/vmm.h>
-#include <machine/vmm_dev.h>
+#include <sys/vmm.h>
+#include <sys/vmm_dev.h>
 
 #include <sys/conf.h>
 #include <sys/ddi.h>

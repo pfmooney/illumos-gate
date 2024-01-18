@@ -19,6 +19,7 @@
 #define	_VMM_GPT_H
 
 #include <sys/types.h>
+#include <sys/stdbool.h>
 
 /*
  * Constants for the nodes in the GPT radix tree.  Note

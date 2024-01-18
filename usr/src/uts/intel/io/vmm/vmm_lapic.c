@@ -46,12 +46,11 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/cpuset.h>
 
 #include <x86/specialreg.h>
 #include <x86/apicreg.h>
 
-#include <machine/vmm.h>
+#include <sys/vmm.h>
 #include "vmm_lapic.h"
 #include "vlapic.h"
 
@@ -89,20 +88,22 @@ int
 lapic_set_local_intr(struct vm *vm, int cpu, int vector)
 {
 	struct vlapic *vlapic;
-	cpuset_t dmask;
+	vcpuset_t dmask;
 	int error;
 
 	if (cpu < -1 || cpu >= vm_get_maxcpus(vm))
 		return (EINVAL);
 
-	if (cpu == -1)
-		dmask = vm_active_cpus(vm);
-	else
-		CPU_SETOF(cpu, &dmask);
+	if (cpu == -1) {
+		vm_active_cpus(vm, &dmask);
+	} else {
+		vcpuset_zero(&dmask);
+		vcpuset_set(&dmask, cpu);
+	}
+
 	error = 0;
-	while ((cpu = CPU_FFS(&dmask)) != 0) {
-		cpu--;
-		CPU_CLR(cpu, &dmask);
+	while ((cpu = vcpuset_ffs(&dmask)) != -1) {
+		vcpuset_clear(&dmask, cpu);
 		vlapic = vm_lapic(vm, cpu);
 		error = vlapic_trigger_lvt(vlapic, vector);
 		if (error)

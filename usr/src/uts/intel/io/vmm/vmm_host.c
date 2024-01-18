@@ -47,7 +47,6 @@
 #include <sys/pcpu.h>
 
 #include <machine/cpufunc.h>
-#include <machine/segments.h>
 #include <machine/specialreg.h>
 
 #include "vmm_host.h"

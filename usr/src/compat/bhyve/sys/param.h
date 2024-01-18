@@ -25,17 +25,6 @@
 #define	MAXHOSTNAMELEN	256
 #define	SPECNAMELEN	255
 
-#ifdef	_KERNEL
-#include <sys/time.h>
-
-#ifndef	FALSE
-#define	FALSE	0
-#endif
-#ifndef	TRUE
-#define	TRUE	1
-#endif
-#endif
-
 #include <machine/param.h>
 
 #define	nitems(x)	(sizeof((x)) / sizeof((x)[0]))

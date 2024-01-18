@@ -19,7 +19,7 @@
 #include <sys/systm.h>
 #include <sys/cpuvar.h>
 
-#include <machine/vmm.h>
+#include <sys/vmm.h>
 #include <sys/vmm_vm.h>
 
 #include "intel/vmx.h"

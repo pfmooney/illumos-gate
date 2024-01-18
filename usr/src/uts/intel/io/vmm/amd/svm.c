@@ -63,11 +63,10 @@
 #include <machine/md_var.h>
 #include <machine/reg.h>
 #include <machine/specialreg.h>
-#include <machine/vmm.h>
-#include <machine/vmm_dev.h>
+#include <sys/vmm.h>
+#include <sys/vmm_dev.h>
 #include <sys/vmm_instruction_emul.h>
 #include <sys/vmm_vm.h>
-#include <sys/vmm_kernel.h>
 
 #include "vmm_lapic.h"
 #include "vmm_stat.h"

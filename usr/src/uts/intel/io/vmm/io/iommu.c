@@ -58,8 +58,8 @@
 #include <sys/ddi.h>
 #include <sys/sunddi.h>
 #include <sys/pci.h>
+#include <sys/vmm_kernel.h>
 
-#include "vmm_util.h"
 #include "iommu.h"
 
 

@@ -409,7 +409,7 @@ enum vm_entry_cmds {
 
 struct vm_entry {
 	int cpuid;
-	uint_t cmd;		/* see: vm_entry_cmds */
+	uint32_t cmd;		/* see: vm_entry_cmds */
 	void *exit_data;
 	union {
 		struct vm_inout inout;
@@ -478,5 +478,9 @@ struct vcpu_cpuid_entry {
 
 /* Maximum vcpu_cpuid_entry records per vCPU */
 #define	VMM_MAX_CPUID_ENTRIES		256
+
+#ifdef	_KERNEL
+#include <sys/vmm_kernel.h>
+#endif /* _KERNEL */
 
 #endif	/* _VMM_H_ */

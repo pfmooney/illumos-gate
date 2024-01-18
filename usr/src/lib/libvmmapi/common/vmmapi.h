@@ -45,7 +45,6 @@
 
 #include <sys/param.h>
 #include <sys/cpuset.h>
-#include <x86/segments.h>
 
 #include <stdbool.h>
 
@@ -228,7 +227,6 @@ vm_inject_ss(struct vcpu *vcpu, int errcode)
 {
 	vm_inject_fault(vcpu, IDT_SS, 1, errcode);
 }
-#endif
 int	vm_lapic_irq(struct vcpu *vcpu, int vector);
 int	vm_lapic_local_irq(struct vcpu *vcpu, int vector);
 int	vm_lapic_msi(struct vmctx *ctx, uint64_t addr, uint64_t msg);

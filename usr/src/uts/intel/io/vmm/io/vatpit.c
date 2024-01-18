@@ -52,7 +52,7 @@
 #include <sys/mutex.h>
 #include <sys/systm.h>
 
-#include <machine/vmm.h>
+#include <sys/vmm.h>
 
 #include "vatpic.h"
 #include "vioapic.h"

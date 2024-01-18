@@ -49,7 +49,7 @@
 #include <sys/systm.h>
 
 #include <machine/specialreg.h>
-#include <machine/vmm.h>
+#include <sys/vmm.h>
 #include "vmx.h"
 
 /* Bits 0-30 of VMX_BASIC MSR contain VMCS revision identifier */

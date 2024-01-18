@@ -19,9 +19,4 @@
 
 #include <sys/vmm.h>
 
-#ifdef _KERNEL
-#include <sys/_cpuset.h>
-#include <sys/vmm_kernel.h>
-#endif
-
 #endif	/* _COMPAT_FREEBSD_AMD64_MACHINE_VMM_H_ */

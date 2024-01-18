@@ -49,7 +49,7 @@
 #include <sys/kmem.h>
 #include <sys/systm.h>
 
-#include <machine/vmm.h>
+#include <sys/vmm.h>
 
 #include "vpmtmr.h"
 

@@ -54,14 +54,12 @@
 #include <machine/clock.h>
 #include <machine/cpufunc.h>
 #include <machine/md_var.h>
-#include <machine/segments.h>
 #include <machine/specialreg.h>
 
-#include <machine/vmm.h>
+#include <sys/vmm.h>
 #include <sys/vmm_kernel.h>
 
 #include "vmm_host.h"
-#include "vmm_util.h"
 
 /*
  * Return 'true' if the capability 'cap' is enabled in this virtual cpu

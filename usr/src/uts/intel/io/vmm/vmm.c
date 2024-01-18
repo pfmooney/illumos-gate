@@ -68,9 +68,9 @@
 #include <x86/apicreg.h>
 
 #include <machine/specialreg.h>
-#include <machine/vmm.h>
-#include <machine/vmm_dev.h>
 #include <machine/vmparam.h>
+#include <sys/vmm.h>
+#include <sys/vmm_dev.h>
 #include <sys/vmm_instruction_emul.h>
 #include <sys/vmm_vm.h>
 #include <sys/vmm_gpt.h>
@@ -78,7 +78,6 @@
 
 #include "vmm_ioport.h"
 #include "vmm_host.h"
-#include "vmm_util.h"
 #include "vatpic.h"
 #include "vatpit.h"
 #include "vhpet.h"
@@ -203,9 +202,9 @@ struct vm {
 	struct vatpit	*vatpit;		/* (i) virtual atpit */
 	struct vpmtmr	*vpmtmr;		/* (i) virtual ACPI PM timer */
 	struct vrtc	*vrtc;			/* (o) virtual RTC */
-	volatile cpuset_t active_cpus;		/* (i) active vcpus */
-	volatile cpuset_t debug_cpus;		/* (i) vcpus stopped for dbg */
-	volatile cpuset_t halted_cpus;		/* (x) cpus in a hard halt */
+	vcpuset_t	active_cpus;		/* (i) active vcpus */
+	vcpuset_t	debug_cpus;		/* (i) vcpus stopped for dbg */
+	vcpuset_t	halted_cpus;		/* (x) cpus in a hard halt */
 	int		suspend_how;		/* (i) stop VM execution */
 	int		suspend_source;		/* (i) src vcpuid of suspend */
 	hrtime_t	suspend_when;		/* (i) time suspend asserted */
@@ -545,8 +544,8 @@ vm_init(struct vm *vm, bool create)
 
 	vm_inout_init(vm, &vm->ioports);
 
-	CPU_ZERO(&vm->active_cpus);
-	CPU_ZERO(&vm->debug_cpus);
+	vcpuset_zero(&vm->active_cpus);
+	vcpuset_zero(&vm->debug_cpus);
 
 	vm->suspend_how = 0;
 	vm->suspend_source = 0;
@@ -762,7 +761,7 @@ vm_pause_instance(struct vm *vm)
 	for (uint_t i = 0; i < vm->maxcpus; i++) {
 		struct vcpu *vcpu = &vm->vcpu[i];
 
-		if (!CPU_ISSET(i, &vm->active_cpus)) {
+		if (!vcpuset_test(&vm->active_cpus, i)) {
 			continue;
 		}
 		vlapic_pause(vcpu->vlapic);
@@ -795,7 +794,7 @@ vm_resume_instance(struct vm *vm)
 	for (uint_t i = 0; i < vm->maxcpus; i++) {
 		struct vcpu *vcpu = &vm->vcpu[i];
 
-		if (!CPU_ISSET(i, &vm->active_cpus)) {
+		if (!vcpuset_test(&vm->active_cpus, i)) {
 			continue;
 		}
 		vlapic_resume(vcpu->vlapic);
@@ -1571,7 +1570,7 @@ vm_handle_hlt(struct vm *vm, int vcpuid, bool intr_disabled)
 	int vcpu_halted, vm_halted;
 	bool userspace_exit = false;
 
-	KASSERT(!CPU_ISSET(vcpuid, &vm->halted_cpus), ("vcpu already halted"));
+	ASSERT(!vcpuset_test(&vm->halted_cpus, vcpuid));
 
 	vcpu = &vm->vcpu[vcpuid];
 	vcpu_halted = 0;
@@ -1613,9 +1612,9 @@ vm_handle_hlt(struct vm *vm, int vcpuid, bool intr_disabled)
 		if (intr_disabled) {
 			if (!vcpu_halted && halt_detection_enabled) {
 				vcpu_halted = 1;
-				CPU_SET_ATOMIC(vcpuid, &vm->halted_cpus);
+				vcpuset_set_atomic(&vm->halted_cpus, vcpuid);
 			}
-			if (CPU_CMP(&vm->halted_cpus, &vm->active_cpus) == 0) {
+			if (vcpuset_eq(&vm->halted_cpus, &vm->active_cpus)) {
 				vm_halted = 1;
 				break;
 			}
@@ -1629,7 +1628,7 @@ vm_handle_hlt(struct vm *vm, int vcpuid, bool intr_disabled)
 	}
 
 	if (vcpu_halted)
-		CPU_CLR_ATOMIC(vcpuid, &vm->halted_cpus);
+		vcpuset_clear_atomic(&vm->halted_cpus, vcpuid);
 
 	vcpu_unlock(vcpu);
 
@@ -2215,7 +2214,7 @@ vm_suspend(struct vm *vm, enum vm_suspend_how how, int source)
 
 		vcpu_lock(vcpu);
 
-		if (!CPU_ISSET(i, &vm->active_cpus)) {
+		if (!vcpuset_test(&vm->active_cpus, i)) {
 			/*
 			 * vCPUs not already marked as active can be ignored,
 			 * since they cannot become marked as active unless the
@@ -2476,7 +2475,7 @@ vm_run(struct vm *vm, int vcpuid, const struct vm_entry *entry)
 
 	if (vcpuid < 0 || vcpuid >= vm->maxcpus)
 		return (EINVAL);
-	if (!CPU_ISSET(vcpuid, &vm->active_cpus))
+	if (!vcpuset_test(&vm->active_cpus, vcpuid))
 		return (EINVAL);
 	if (vm->is_paused) {
 		return (EBUSY);
@@ -3321,14 +3320,14 @@ vm_activate_cpu(struct vm *vm, int vcpuid)
 	if (vcpuid < 0 || vcpuid >= vm->maxcpus)
 		return (EINVAL);
 
-	if (CPU_ISSET(vcpuid, &vm->active_cpus))
+	if (vcpuset_test(&vm->active_cpus, vcpuid))
 		return (EBUSY);
 
 	if (vm_is_suspended(vm, NULL)) {
 		return (EBUSY);
 	}
 
-	CPU_SET_ATOMIC(vcpuid, &vm->active_cpus);
+	vcpuset_set_atomic(&vm->active_cpus, vcpuid);
 
 	/*
 	 * It is possible that this vCPU was undergoing activation at the same
@@ -3352,14 +3351,14 @@ vm_suspend_cpu(struct vm *vm, int vcpuid)
 	if (vcpuid == -1) {
 		vm->debug_cpus = vm->active_cpus;
 		for (i = 0; i < vm->maxcpus; i++) {
-			if (CPU_ISSET(i, &vm->active_cpus))
+			if (vcpuset_test(&vm->active_cpus, i))
 				vcpu_notify_event(vm, i);
 		}
 	} else {
-		if (!CPU_ISSET(vcpuid, &vm->active_cpus))
+		if (!vcpuset_test(&vm->active_cpus, vcpuid))
 			return (EINVAL);
 
-		CPU_SET_ATOMIC(vcpuid, &vm->debug_cpus);
+		vcpuset_set_atomic(&vm->debug_cpus, vcpuid);
 		vcpu_notify_event(vm, vcpuid);
 	}
 	return (0);
@@ -3373,12 +3372,12 @@ vm_resume_cpu(struct vm *vm, int vcpuid)
 		return (EINVAL);
 
 	if (vcpuid == -1) {
-		CPU_ZERO(&vm->debug_cpus);
+		vcpuset_zero(&vm->debug_cpus);
 	} else {
-		if (!CPU_ISSET(vcpuid, &vm->debug_cpus))
+		if (!vcpuset_test(&vm->debug_cpus, vcpuid))
 			return (EINVAL);
 
-		CPU_CLR_ATOMIC(vcpuid, &vm->debug_cpus);
+		vcpuset_clear_atomic(&vm->debug_cpus, vcpuid);
 	}
 	return (0);
 }
@@ -3439,7 +3438,7 @@ vcpu_bailout_checks(struct vm *vm, int vcpuid)
 		vmm_stat_incr(vm, vcpuid, VMEXIT_ASTPENDING, 1);
 		return (true);
 	}
-	if (CPU_ISSET(vcpuid, &vm->debug_cpus)) {
+	if (vcpuset_test(&vm->debug_cpus, vcpuid)) {
 		vme->exitcode = VM_EXITCODE_DEBUG;
 		return (true);
 	}
@@ -3520,16 +3519,16 @@ vm_vcpu_barrier(struct vm *vm, int vcpuid)
 	}
 }
 
-cpuset_t
-vm_active_cpus(struct vm *vm)
+void
+vm_active_cpus(struct vm *vm, vcpuset_t *out)
 {
-	return (vm->active_cpus);
+	vcpuset_copy(&vm->active_cpus, out);
 }
 
-cpuset_t
-vm_debug_cpus(struct vm *vm)
+void
+vm_debug_cpus(struct vm *vm, vcpuset_t *out)
 {
-	return (vm->debug_cpus);
+	vcpuset_copy(&vm->debug_cpus, out);
 }
 
 void *
@@ -3758,7 +3757,7 @@ vm_copy_setup(struct vm *vm, int vcpuid, struct vm_guest_paging *paging,
 		if (error || *fault)
 			return (error);
 		off = gpa & PAGEOFFSET;
-		n = min(remaining, PAGESIZE - off);
+		n = MIN(remaining, PAGESIZE - off);
 		copyinfo[nused].gpa = gpa;
 		copyinfo[nused].len = n;
 		remaining -= n;

@@ -24,51 +24,14 @@ typedef __uint16_t	u_int16_t;
 typedef __uint32_t	u_int32_t;
 typedef __uint64_t	u_int64_t;
 
-#ifndef	__REGISTER_T_DEFINED
-#define	__REGISTER_T_DEFINED
-typedef __register_t	register_t;
-#endif
-
-#ifndef	__VM_MEMATTR_T_DEFINED
-#define	__VM_MEMATTR_T_DEFINED
-typedef char	vm_memattr_t;
-#endif
-
-#ifndef	__VM_OFFSET_T_DEFINED
-#define	__VM_OFFSET_T_DEFINED
-typedef __vm_offset_t	vm_offset_t;
-#endif
-
 #ifndef	__VM_OOFFSET_T_DEFINED
 #define	__VM_OOFFSET_T_DEFINED
-typedef __vm_ooffset_t	vm_ooffset_t;
+typedef __int64_t vm_ooffset_t;
 #endif
 
 #ifndef	__VM_PADDR_T_DEFINED
 #define	__VM_PADDR_T_DEFINED
-typedef __vm_paddr_t	vm_paddr_t;
-#endif
-
-#ifndef	__VM_PINDEX_T_DEFINED
-#define	__VM_PINDEX_T_DEFINED
-typedef __uint64_t	vm_pindex_t;
-#endif
-
-#ifndef	__VM_SIZE_T_DEFINED
-#define	__VM_SIZE_T_DEFINED
-typedef __vm_size_t	vm_size_t;
-#endif
-
-#ifndef	__VM_MEMATTR_T_DEFINED
-#define	__VM_MEMATTR_T_DEFINED
-typedef char		vm_memattr_t;
-#endif
-
-#ifndef	__bool_true_false_are_defined
-#define	__bool_true_false_are_defined	1
-#define	false	0
-#define	true	1
-typedef _Bool bool;
+typedef __uint64_t vm_paddr_t;
 #endif
 
 #if defined(_KERNEL)

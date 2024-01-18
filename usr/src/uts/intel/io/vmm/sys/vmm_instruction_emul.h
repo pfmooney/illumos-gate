@@ -45,7 +45,7 @@
 #define	_VMM_INSTRUCTION_EMUL_H_
 
 #include <sys/mman.h>
-#include <machine/vmm.h>
+#include <sys/vmm.h>
 
 struct vie;
 

@@ -54,7 +54,7 @@
 #include <sys/clock.h>
 #include <sys/sysctl.h>
 
-#include <machine/vmm.h>
+#include <sys/vmm.h>
 
 #include <isa/rtc.h>
 

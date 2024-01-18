@@ -39,8 +39,6 @@
 #include <dev/io/iodev.h>
 #include <dev/pci/pcireg.h>
 
-#include <machine/iodev.h>
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

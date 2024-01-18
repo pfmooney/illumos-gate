@@ -79,6 +79,9 @@ SYMBOL_VERSION ILLUMOSprivate {
 		vm_gla2gpa_nofault;
 		vm_inject_exception;
 		vm_inject_fault;
+		vm_inject_gp;
+		vm_inject_ac;
+		vm_inject_ss;
 		vm_inject_nmi;
 		vm_ioapic_assert_irq;
 		vm_ioapic_deassert_irq;

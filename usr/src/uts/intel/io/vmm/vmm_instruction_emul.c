@@ -53,11 +53,10 @@
 #include <sys/proc.h>
 
 #include <machine/vmparam.h>
-#include <machine/vmm.h>
-#include <sys/vmm_kernel.h>
+#include <sys/vmm.h>
 #include <sys/vmm_vm.h>
-
 #include <sys/vmm_instruction_emul.h>
+
 #include <x86/psl.h>
 #include <x86/specialreg.h>
 

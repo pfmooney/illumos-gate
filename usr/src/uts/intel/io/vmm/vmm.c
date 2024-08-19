@@ -3118,7 +3118,7 @@ vcpu_arch_reset(struct vm *vm, int vcpuid, bool init_only)
 	VERIFY0(vm_set_seg_desc(vm, vcpuid, VM_REG_GUEST_TR, &desc));
 	VERIFY0(vm_set_register(vm, vcpuid, VM_REG_GUEST_TR, 0));
 
-	vlapic_reset(vm_lapic(vm, vcpuid));
+	vlapic_reset(vm_lapic(vm, vcpuid), init_only);
 
 	VERIFY0(vm_set_register(vm, vcpuid, VM_REG_GUEST_INTR_SHADOW, 0));
 

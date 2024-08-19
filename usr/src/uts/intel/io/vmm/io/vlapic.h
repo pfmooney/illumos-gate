@@ -40,13 +40,13 @@
 
 /*
  * Copyright 2018 Joyent, Inc.
- * Copyright 2022 Oxide Computer Company
+ * Copyright 2024 Oxide Computer Company
  */
 
 #ifndef _VLAPIC_H_
 #define	_VLAPIC_H_
 
-void vlapic_reset(struct vlapic *vlapic);
+void vlapic_reset(struct vlapic *vlapic, bool);
 
 int vlapic_mmio_write(struct vlapic *, uint64_t, uint64_t, uint_t);
 int vlapic_mmio_read(struct vlapic *, uint64_t, uint64_t *, uint_t);

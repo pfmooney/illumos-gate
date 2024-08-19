@@ -73,10 +73,4 @@ void vmx_msr_bitmap_initialize(struct vmx *);
 void vmx_msr_bitmap_destroy(struct vmx *);
 void vmx_msr_bitmap_change_access(struct vmx *, int, uint_t, int);
 
-#define	guest_msr_rw(vmx, vcpuid, msr) \
-    vmx_msr_bitmap_change_access((vmx), (vcpuid), (msr), MSR_BITMAP_ACCESS_RW)
-
-#define	guest_msr_ro(vmx, vcpuid, msr) \
-    vmx_msr_bitmap_change_access((vmx), (vcpuid), (msr), MSR_BITMAP_ACCESS_READ)
-
 #endif

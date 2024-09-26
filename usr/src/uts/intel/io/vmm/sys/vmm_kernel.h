@@ -49,6 +49,7 @@
 #include <sys/vmm.h>
 #include <sys/vmm_data.h>
 #include <sys/linker_set.h>
+#include <sys/cpuvar.h>
 
 SDT_PROVIDER_DECLARE(vmm);
 

@@ -34,6 +34,9 @@
 
 #include <sys/hma.h>
 
+#include "vmcb.h"
+#include "svm_pmu.h"
+
 /* This must match HOST_MSR_NUM in svm_msr.c (where it is CTASSERTed) */
 #define	SVM_HOST_MSR_NUM	4
 
@@ -44,6 +47,7 @@
 struct svm_vcpu {
 	struct vmcb	vmcb;	 /* hardware saved vcpu context */
 	struct svm_regctx swctx; /* software saved vcpu context */
+	uint8_t		*msr_bitmap; /* MSR permissions bitmap */
 	uint64_t	vmcb_pa; /* VMCB physical address */
 	uint64_t	nextrip; /* next instruction to be executed by guest */
 	int		lastcpu; /* host cpu that the vcpu last ran on */
@@ -51,6 +55,7 @@ struct svm_vcpu {
 	uint64_t	nptgen;	 /* page table gen when the vcpu last ran */
 	hma_svm_asid_t	hma_asid;
 	boolean_t	loaded;
+	struct svm_pmu_vcpu pmu;
 } __aligned(PAGE_SIZE);
 
 /*
@@ -61,46 +66,52 @@ struct svm_softc {
 	struct svm_vcpu vcpu[VM_MAXCPU];
 	uint64_t	nptp;		/* nested page table (host PA) */
 	uint8_t		*iopm_bitmap;	/* shared by all vcpus */
-	uint8_t		*msr_bitmap;	/* shared by all vcpus */
 	struct vm	*vm;
 	uint64_t	host_msrs[VM_MAXCPU][SVM_HOST_MSR_NUM];
+	struct svm_pmu	pmu;
 };
 
+/*
+ * Since the VMCB must be page-aligned, and is the first member of svm_vcpu,
+ * which is slated to be page-aligned, this is a belt-and-suspenders check to
+ * see that such alignment instructions are being heeded.
+ */
 CTASSERT((offsetof(struct svm_softc, nptp) & PAGE_MASK) == 0);
 
 static __inline struct svm_vcpu *
 svm_get_vcpu(struct svm_softc *sc, int vcpu)
 {
-
 	return (&(sc->vcpu[vcpu]));
 }
 
 static __inline struct vmcb *
 svm_get_vmcb(struct svm_softc *sc, int vcpu)
 {
-
 	return (&(sc->vcpu[vcpu].vmcb));
 }
 
 static __inline struct vmcb_state *
 svm_get_vmcb_state(struct svm_softc *sc, int vcpu)
 {
-
 	return (&(sc->vcpu[vcpu].vmcb.state));
 }
 
 static __inline struct vmcb_ctrl *
 svm_get_vmcb_ctrl(struct svm_softc *sc, int vcpu)
 {
-
 	return (&(sc->vcpu[vcpu].vmcb.ctrl));
 }
 
 static __inline struct svm_regctx *
 svm_get_guest_regctx(struct svm_softc *sc, int vcpu)
 {
-
 	return (&(sc->vcpu[vcpu].swctx));
+}
+
+static __inline struct svm_pmu_vcpu *
+svm_get_pmu(struct svm_softc *sc, int vcpu)
+{
+	return (&(sc->vcpu[vcpu].pmu));
 }
 
 static __inline void
@@ -110,6 +121,28 @@ svm_set_dirty(struct svm_softc *sc, int vcpu, uint32_t dirtybits)
 
 	vcpustate = svm_get_vcpu(sc, vcpu);
 	vcpustate->dirty |= dirtybits;
+}
+
+typedef enum svm_msr_perm {
+	SMP_NONE,
+	SMP_READ = 1,
+	SMP_WRITE = 2,
+} svm_msr_perm_t;
+
+void svm_msr_set_access(struct svm_softc *, int, uint32_t , svm_msr_perm_t);
+int svm_get_intercept(struct svm_softc *, int , int, uint32_t);
+void svm_set_intercept(struct svm_softc *, int , int, uint32_t , int);
+
+static __inline void
+svm_disable_intercept(struct svm_softc *sc, int vcpu, int off, uint32_t bitmask)
+{
+	svm_set_intercept(sc, vcpu, off, bitmask, 0);
+}
+
+static __inline void
+svm_enable_intercept(struct svm_softc *sc, int vcpu, int off, uint32_t bitmask)
+{
+	svm_set_intercept(sc, vcpu, off, bitmask, 1);
 }
 
 #endif /* _SVM_SOFTC_H_ */

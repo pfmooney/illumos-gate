@@ -49,6 +49,7 @@
 #include <sys/pcpu.h>
 #include <sys/proc.h>
 #include <sys/sysctl.h>
+#include <sys/sysmacros.h>
 
 #include <sys/x86_archext.h>
 #include <sys/trap.h>
@@ -75,6 +76,7 @@
 #include "svm.h"
 #include "svm_softc.h"
 #include "svm_msr.h"
+#include "svm_pmu.h"
 
 SYSCTL_DECL(_hw_vmm);
 SYSCTL_NODE(_hw_vmm, OID_AUTO, svm, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
@@ -178,106 +180,103 @@ svm_restore(void)
 	/* No-op on illumos */
 }
 
-/* Pentium compatible MSRs */
-#define	MSR_PENTIUM_START	0
-#define	MSR_PENTIUM_END		0x1FFF
-/* AMD 6th generation and Intel compatible MSRs */
-#define	MSR_AMD6TH_START	0xC0000000UL
-#define	MSR_AMD6TH_END		0xC0001FFFUL
-/* AMD 7th and 8th generation compatible MSRs */
-#define	MSR_AMD7TH_START	0xC0010000UL
-#define	MSR_AMD7TH_END		0xC0011FFFUL
+/*
+ * AMD defines 3 ranges (with an additional one held in reserve) of MSRs covered
+ * by the MSR permission bitmap.
+ */
+#define MSR_BM_RANGE0_LO	0x00000000
+#define MSR_BM_RANGE0_HI	0x00001fff
+#define MSR_BM_RANGE1_LO	0xc0000000
+#define MSR_BM_RANGE1_HI	0xc0001fff
+#define MSR_BM_RANGE2_LO	0xc0010000
+#define MSR_BM_RANGE2_HI	0xc0011fff
+#define MSR_BM_RANGE_SZ		0x2000
 
 /*
  * Get the index and bit position for a MSR in permission bitmap.
  * Two bits are used for each MSR: lower bit for read and higher bit for write.
  */
-static int
-svm_msr_index(uint64_t msr, int *index, int *bit)
+static bool
+svm_msr_index(uint32_t msr, uint_t *index, uint_t *bit)
 {
-	uint32_t base, off;
-
-	*index = -1;
 	*bit = (msr % 4) * 2;
-	base = 0;
 
-	if (msr <= MSR_PENTIUM_END) {
+	if (msr <= MSR_BM_RANGE0_HI) {
 		*index = msr / 4;
-		return (0);
+		return (true);
 	}
 
-	base += (MSR_PENTIUM_END - MSR_PENTIUM_START + 1);
-	if (msr >= MSR_AMD6TH_START && msr <= MSR_AMD6TH_END) {
-		off = (msr - MSR_AMD6TH_START);
+	if (msr >= MSR_BM_RANGE1_LO && msr <= MSR_BM_RANGE1_HI) {
+		const uint32_t base = MSR_BM_RANGE_SZ;
+		const uint32_t off = (msr - MSR_BM_RANGE1_LO);
 		*index = (off + base) / 4;
-		return (0);
+		return (true);
 	}
 
-	base += (MSR_AMD6TH_END - MSR_AMD6TH_START + 1);
-	if (msr >= MSR_AMD7TH_START && msr <= MSR_AMD7TH_END) {
-		off = (msr - MSR_AMD7TH_START);
+	if (msr >= MSR_BM_RANGE2_LO && msr <= MSR_BM_RANGE2_HI) {
+		const uint32_t base = MSR_BM_RANGE_SZ * 2;
+		const uint32_t off = (msr - MSR_BM_RANGE2_LO);
 		*index = (off + base) / 4;
-		return (0);
+		return (true);
 	}
 
-	return (EINVAL);
+	return (false);
 }
 
 /*
- * Allow vcpu to read or write the 'msr' without trapping into the hypervisor.
+ * Set the guest vCPU ability to directly access a specified MSR by
+ * asserting/clearing the corresponding bits in the provided permission bitmap.
  */
 static void
-svm_msr_perm(uint8_t *perm_bitmap, uint64_t msr, bool read, bool write)
+svm_msr_set_access_bm(uint8_t *perm_bitmap, uint32_t msr, svm_msr_perm_t perm)
 {
-	int index, bit, error;
+	uint_t index, bit;
 
-	error = svm_msr_index(msr, &index, &bit);
-	KASSERT(error == 0, ("%s: invalid msr %lx", __func__, msr));
-	KASSERT(index >= 0 && index < SVM_MSR_BITMAP_SIZE,
-	    ("%s: invalid index %d for msr %lx", __func__, index, msr));
-	KASSERT(bit >= 0 && bit <= 6, ("%s: invalid bit position %d "
-	    "msr %lx", __func__, bit, msr));
+	if (!svm_msr_index(msr, &index, &bit)) {
+		panic("msr %x out of range for SVM bitmap", msr);
+	}
+	ASSERT(index < SVM_MSR_BITMAP_SIZE);
+	ASSERT(bit < 8 && (bit % 2) == 0);
+	VERIFY(perm <= (SMP_WRITE | SMP_READ) && perm >= SMP_NONE);
 
-	if (read)
-		perm_bitmap[index] &= ~(1UL << bit);
-
-	if (write)
-		perm_bitmap[index] &= ~(2UL << bit);
+	/*
+	 * Since any bit set in the MSR bitmap means accesses of that type are
+	 * intercepted, we invert the svm_msr_perm_t value so that presence of
+	 * its flag value leads to absence of the bitmap value, thus allowing
+	 * direct guest access.
+	 */
+	const uint8_t mask = 0x3 << bit;
+	const uint8_t perm_bits = ~((uint8_t)perm) << bit;
+	perm_bitmap[index] = (perm_bitmap[index] & ~mask) | (perm_bits & mask);
 }
 
-static void
-svm_msr_rw_ok(uint8_t *perm_bitmap, uint64_t msr)
+void
+svm_msr_set_access(struct svm_softc *svm_sc, int vcpuid, uint32_t msr,
+    svm_msr_perm_t perm)
 {
-
-	svm_msr_perm(perm_bitmap, msr, true, true);
+	struct svm_vcpu *vcpu = svm_get_vcpu(svm_sc, vcpuid);
+	svm_msr_set_access_bm(vcpu->msr_bitmap, msr, perm);
 }
 
-static void
-svm_msr_rd_ok(uint8_t *perm_bitmap, uint64_t msr)
-{
-
-	svm_msr_perm(perm_bitmap, msr, true, false);
-}
-
-static __inline int
+int
 svm_get_intercept(struct svm_softc *sc, int vcpu, int idx, uint32_t bitmask)
 {
 	struct vmcb_ctrl *ctrl;
 
-	KASSERT(idx >= 0 && idx < 5, ("invalid intercept index %d", idx));
+	ASSERT(idx >= 0 && idx < 5);
 
 	ctrl = svm_get_vmcb_ctrl(sc, vcpu);
 	return (ctrl->intercept[idx] & bitmask ? 1 : 0);
 }
 
-static __inline void
+void
 svm_set_intercept(struct svm_softc *sc, int vcpu, int idx, uint32_t bitmask,
     int enabled)
 {
 	struct vmcb_ctrl *ctrl;
 	uint32_t oldval;
 
-	KASSERT(idx >= 0 && idx < 5, ("invalid intercept index %d", idx));
+	ASSERT(idx >= 0 && idx < 5);
 
 	ctrl = svm_get_vmcb_ctrl(sc, vcpu);
 	oldval = ctrl->intercept[idx];
@@ -292,34 +291,18 @@ svm_set_intercept(struct svm_softc *sc, int vcpu, int idx, uint32_t bitmask,
 	}
 }
 
-static __inline void
-svm_disable_intercept(struct svm_softc *sc, int vcpu, int off, uint32_t bitmask)
-{
-
-	svm_set_intercept(sc, vcpu, off, bitmask, 0);
-}
-
-static __inline void
-svm_enable_intercept(struct svm_softc *sc, int vcpu, int off, uint32_t bitmask)
-{
-
-	svm_set_intercept(sc, vcpu, off, bitmask, 1);
-}
-
 static void
-vmcb_init(struct svm_softc *sc, int vcpu, uint64_t iopm_base_pa,
-    uint64_t msrpm_base_pa, uint64_t np_pml4)
+vmcb_init(struct svm_softc *sc, int vcpuid, uint64_t iopm_base_pa,
+    uint64_t np_pml4)
 {
-	struct vmcb_ctrl *ctrl;
-	struct vmcb_state *state;
+	struct vmcb_ctrl *ctrl = svm_get_vmcb_ctrl(sc, vcpuid);
+	struct vmcb_state *state = svm_get_vmcb_state(sc, vcpuid);
+	struct svm_vcpu *vcpu = svm_get_vcpu(sc, vcpuid);
 	uint32_t mask;
 	int n;
 
-	ctrl = svm_get_vmcb_ctrl(sc, vcpu);
-	state = svm_get_vmcb_state(sc, vcpu);
-
 	ctrl->iopm_base_pa = iopm_base_pa;
-	ctrl->msrpm_base_pa = msrpm_base_pa;
+	ctrl->msrpm_base_pa = vtophys(vcpu->msr_bitmap);
 
 	/* Enable nested paging */
 	ctrl->np_ctrl = NP_ENABLE;
@@ -332,23 +315,23 @@ vmcb_init(struct svm_softc *sc, int vcpu, uint64_t iopm_base_pa,
 	for (n = 0; n < 16; n++) {
 		mask = (BIT(n) << 16) | BIT(n);
 		if (n == 0 || n == 2 || n == 3 || n == 4 || n == 8)
-			svm_disable_intercept(sc, vcpu, VMCB_CR_INTCPT, mask);
+			svm_disable_intercept(sc, vcpuid, VMCB_CR_INTCPT, mask);
 		else
-			svm_enable_intercept(sc, vcpu, VMCB_CR_INTCPT, mask);
+			svm_enable_intercept(sc, vcpuid, VMCB_CR_INTCPT, mask);
 	}
 
 	/*
 	 * Selectively intercept writes to %cr0.  This triggers on operations
 	 * which would change bits other than TS or MP.
 	 */
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL1_INTCPT,
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL1_INTCPT,
 	    VMCB_INTCPT_CR0_WRITE);
 
 	/*
 	 * Intercept everything when tracing guest exceptions otherwise
 	 * just intercept machine check exception.
 	 */
-	if (vcpu_trace_exceptions(sc->vm, vcpu)) {
+	if (vcpu_trace_exceptions(sc->vm, vcpuid)) {
 		for (n = 0; n < 32; n++) {
 			/*
 			 * Skip unimplemented vectors in the exception bitmap.
@@ -356,33 +339,35 @@ vmcb_init(struct svm_softc *sc, int vcpu, uint64_t iopm_base_pa,
 			if (n == 2 || n == 9) {
 				continue;
 			}
-			svm_enable_intercept(sc, vcpu, VMCB_EXC_INTCPT, BIT(n));
+			svm_enable_intercept(sc, vcpuid, VMCB_EXC_INTCPT,
+			    BIT(n));
 		}
 	} else {
-		svm_enable_intercept(sc, vcpu, VMCB_EXC_INTCPT, BIT(IDT_MC));
+		svm_enable_intercept(sc, vcpuid, VMCB_EXC_INTCPT, BIT(IDT_MC));
 	}
 
 	/* Intercept various events (for e.g. I/O, MSR and CPUID accesses) */
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL1_INTCPT, VMCB_INTCPT_IO);
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL1_INTCPT, VMCB_INTCPT_MSR);
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL1_INTCPT, VMCB_INTCPT_CPUID);
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL1_INTCPT, VMCB_INTCPT_INTR);
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL1_INTCPT, VMCB_INTCPT_INIT);
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL1_INTCPT, VMCB_INTCPT_NMI);
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL1_INTCPT, VMCB_INTCPT_SMI);
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL1_INTCPT, VMCB_INTCPT_SHUTDOWN);
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL1_INTCPT,
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL1_INTCPT, VMCB_INTCPT_IO);
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL1_INTCPT, VMCB_INTCPT_MSR);
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL1_INTCPT, VMCB_INTCPT_CPUID);
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL1_INTCPT, VMCB_INTCPT_INTR);
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL1_INTCPT, VMCB_INTCPT_INIT);
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL1_INTCPT, VMCB_INTCPT_NMI);
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL1_INTCPT, VMCB_INTCPT_SMI);
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL1_INTCPT, VMCB_INTCPT_RDPMC);
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL1_INTCPT, VMCB_INTCPT_SHUTDOWN);
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL1_INTCPT,
 	    VMCB_INTCPT_FERR_FREEZE);
 
 	/* Enable exit-on-hlt by default */
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL1_INTCPT, VMCB_INTCPT_HLT);
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL1_INTCPT, VMCB_INTCPT_HLT);
 
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL2_INTCPT, VMCB_INTCPT_MONITOR);
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL2_INTCPT, VMCB_INTCPT_MWAIT);
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL2_INTCPT, VMCB_INTCPT_MONITOR);
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL2_INTCPT, VMCB_INTCPT_MWAIT);
 
 	/* Intercept privileged invalidation instructions. */
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL1_INTCPT, VMCB_INTCPT_INVD);
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL1_INTCPT, VMCB_INTCPT_INVLPGA);
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL1_INTCPT, VMCB_INTCPT_INVD);
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL1_INTCPT, VMCB_INTCPT_INVLPGA);
 
 	/*
 	 * Intercept all virtualization-related instructions.
@@ -390,15 +375,15 @@ vmcb_init(struct svm_softc *sc, int vcpu, uint64_t iopm_base_pa,
 	 * From section "Canonicalization and Consistency Checks" in APMv2
 	 * the VMRUN intercept bit must be set to pass the consistency check.
 	 */
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL2_INTCPT, VMCB_INTCPT_VMRUN);
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL2_INTCPT, VMCB_INTCPT_VMMCALL);
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL2_INTCPT, VMCB_INTCPT_VMLOAD);
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL2_INTCPT, VMCB_INTCPT_VMSAVE);
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL2_INTCPT, VMCB_INTCPT_STGI);
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL2_INTCPT, VMCB_INTCPT_CLGI);
-	svm_enable_intercept(sc, vcpu, VMCB_CTRL2_INTCPT, VMCB_INTCPT_SKINIT);
-	if (vcpu_trap_wbinvd(sc->vm, vcpu) != 0) {
-		svm_enable_intercept(sc, vcpu, VMCB_CTRL2_INTCPT,
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL2_INTCPT, VMCB_INTCPT_VMRUN);
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL2_INTCPT, VMCB_INTCPT_VMMCALL);
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL2_INTCPT, VMCB_INTCPT_VMLOAD);
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL2_INTCPT, VMCB_INTCPT_VMSAVE);
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL2_INTCPT, VMCB_INTCPT_STGI);
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL2_INTCPT, VMCB_INTCPT_CLGI);
+	svm_enable_intercept(sc, vcpuid, VMCB_CTRL2_INTCPT, VMCB_INTCPT_SKINIT);
+	if (vcpu_trap_wbinvd(sc->vm, vcpuid) != 0) {
+		svm_enable_intercept(sc, vcpuid, VMCB_CTRL2_INTCPT,
 		    VMCB_INTCPT_WBINVD);
 	}
 
@@ -444,70 +429,84 @@ vmcb_init(struct svm_softc *sc, int vcpu, uint64_t iopm_base_pa,
 static void *
 svm_vminit(struct vm *vm)
 {
-	struct svm_softc *svm_sc;
-	struct svm_vcpu *vcpu;
-	vm_paddr_t msrpm_pa, iopm_pa, pml4_pa;
-	int i;
-	uint16_t maxcpus;
 
-	svm_sc = kmem_zalloc(sizeof (*svm_sc), KM_SLEEP);
+	/*
+	 * Attempt to allocate IO and MSR bitmaps first, since that is the only
+	 * part of this process which is fallible.
+	 */
+	void *io_bitmap = vmm_contig_alloc(SVM_IO_BITMAP_SIZE);
+	VERIFY(io_bitmap != NULL); /* XXX: Max Power */
+
+	const uint16_t maxcpus = vm_get_maxcpus(vm);
+	void *msr_bitmaps[VM_MAXCPU] = { 0 };
+	for (uint_t i = 0; i < maxcpus; i++) {
+		msr_bitmaps[i] = vmm_contig_alloc(SVM_MSR_BITMAP_SIZE);
+		VERIFY(msr_bitmaps[i] != NULL); /* XXX: Max Power */
+	}
+
+	struct svm_softc *svm_sc = kmem_zalloc(sizeof (*svm_sc), KM_SLEEP);
 	VERIFY3U(((uintptr_t)svm_sc & PAGE_MASK),  ==,  0);
 
-	svm_sc->msr_bitmap = vmm_contig_alloc(SVM_MSR_BITMAP_SIZE);
-	if (svm_sc->msr_bitmap == NULL)
-		panic("contigmalloc of SVM MSR bitmap failed");
-	svm_sc->iopm_bitmap = vmm_contig_alloc(SVM_IO_BITMAP_SIZE);
-	if (svm_sc->iopm_bitmap == NULL)
-		panic("contigmalloc of SVM IO bitmap failed");
+	svm_sc->iopm_bitmap = io_bitmap;
 
 	svm_sc->vm = vm;
 	svm_sc->nptp = vmspace_table_root(vm_get_vmspace(vm));
 
 	/*
-	 * Intercept read and write accesses to all MSRs.
+	 * Initialize MSR bitmap for vCPU 0, to then be cloned for the other
+	 * vCPUs.  To start, it is 1-filled, to enable interception for reads
+	 * and writes on all covered MSRs.
 	 */
-	memset(svm_sc->msr_bitmap, 0xFF, SVM_MSR_BITMAP_SIZE);
+	memset(msr_bitmaps[0], 0xff, SVM_MSR_BITMAP_SIZE);
 
 	/*
 	 * Access to the following MSRs is redirected to the VMCB when the
 	 * guest is executing. Therefore it is safe to allow the guest to
 	 * read/write these MSRs directly without hypervisor involvement.
 	 */
-	svm_msr_rw_ok(svm_sc->msr_bitmap, MSR_GSBASE);
-	svm_msr_rw_ok(svm_sc->msr_bitmap, MSR_FSBASE);
-	svm_msr_rw_ok(svm_sc->msr_bitmap, MSR_KGSBASE);
-
-	svm_msr_rw_ok(svm_sc->msr_bitmap, MSR_STAR);
-	svm_msr_rw_ok(svm_sc->msr_bitmap, MSR_LSTAR);
-	svm_msr_rw_ok(svm_sc->msr_bitmap, MSR_CSTAR);
-	svm_msr_rw_ok(svm_sc->msr_bitmap, MSR_SF_MASK);
-	svm_msr_rw_ok(svm_sc->msr_bitmap, MSR_SYSENTER_CS_MSR);
-	svm_msr_rw_ok(svm_sc->msr_bitmap, MSR_SYSENTER_ESP_MSR);
-	svm_msr_rw_ok(svm_sc->msr_bitmap, MSR_SYSENTER_EIP_MSR);
-	svm_msr_rw_ok(svm_sc->msr_bitmap, MSR_PAT);
-
-	svm_msr_rd_ok(svm_sc->msr_bitmap, MSR_TSC);
+	const uint32_t rw_msrs[] = {
+		MSR_GSBASE, MSR_FSBASE, MSR_KGSBASE,
+		MSR_STAR, MSR_LSTAR, MSR_CSTAR, MSR_SF_MASK,
+		MSR_SYSENTER_CS_MSR, MSR_SYSENTER_ESP_MSR, MSR_SYSENTER_EIP_MSR,
+		MSR_PAT,
+	};
+	for (uint_t i = 0; i < ARRAY_SIZE(rw_msrs); i++) {
+		svm_msr_set_access_bm(msr_bitmaps[0], rw_msrs[i],
+		    SMP_READ | SMP_WRITE);
+	}
 
 	/*
-	 * Intercept writes to make sure that the EFER_SVM bit is not cleared.
+	 * Direct reads to the TSC and EFER are allowed, but writes remain
+	 * intercepted to maintain proper state via emulation.
 	 */
-	svm_msr_rd_ok(svm_sc->msr_bitmap, MSR_EFER);
+	svm_msr_set_access_bm(msr_bitmaps[0], MSR_TSC, SMP_READ);
+	svm_msr_set_access_bm(msr_bitmaps[0], MSR_EFER, SMP_READ);
 
 	/* Intercept access to all I/O ports. */
 	memset(svm_sc->iopm_bitmap, 0xFF, SVM_IO_BITMAP_SIZE);
 
-	iopm_pa = vtophys(svm_sc->iopm_bitmap);
-	msrpm_pa = vtophys(svm_sc->msr_bitmap);
-	pml4_pa = svm_sc->nptp;
-	maxcpus = vm_get_maxcpus(svm_sc->vm);
-	for (i = 0; i < maxcpus; i++) {
-		vcpu = svm_get_vcpu(svm_sc, i);
+	const uint64_t iopm_pa = vtophys(svm_sc->iopm_bitmap);
+	const uint64_t pml4_pa = svm_sc->nptp;
+	for (uint_t i = 0; i < maxcpus; i++) {
+		if (i != 0) {
+			/*
+			 * Ensure the already-initialized MSR bitmap from vCPU0
+			 * gets copied to the others.
+			 */
+			bcopy(msr_bitmaps[0], msr_bitmaps[i],
+			    SVM_MSR_BITMAP_SIZE);
+		}
+
+		struct svm_vcpu *vcpu = svm_get_vcpu(svm_sc, i);
 		vcpu->nextrip = ~0;
 		vcpu->lastcpu = NOCPU;
 		vcpu->vmcb_pa = vtophys(&vcpu->vmcb);
-		vmcb_init(svm_sc, i, iopm_pa, msrpm_pa, pml4_pa);
-		svm_msr_guest_init(svm_sc, i);
+		vcpu->msr_bitmap = msr_bitmaps[i];
+		vmcb_init(svm_sc, i, iopm_pa, pml4_pa);
 	}
+
+	svm_pmu_init(svm_sc);
+
 	return (svm_sc);
 }
 
@@ -1226,6 +1225,8 @@ svm_handle_msr(struct svm_softc *svm_sc, int vcpu, struct vm_exit *vmexit,
 			res = vlapic_wrmsr(vlapic, ecx, val);
 		} else if (ecx == MSR_EFER) {
 			res = svm_write_efer(svm_sc, vcpu, val);
+		} else if (svm_pmu_owned_msr(ecx)) {
+			res = svm_pmu_wrmsr(svm_sc, vcpu, ecx, val);
 		} else {
 			res = svm_wrmsr(svm_sc, vcpu, ecx, val);
 		}
@@ -1236,6 +1237,8 @@ svm_handle_msr(struct svm_softc *svm_sc, int vcpu, struct vm_exit *vmexit,
 			struct vlapic *vlapic = vm_lapic(svm_sc->vm, vcpu);
 
 			res = vlapic_rdmsr(vlapic, ecx, &val);
+		} else if (svm_pmu_owned_msr(ecx)) {
+			res = svm_pmu_rdmsr(svm_sc, vcpu, ecx, &val);
 		} else {
 			res = svm_rdmsr(svm_sc, vcpu, ecx, &val);
 		}
@@ -1260,6 +1263,22 @@ svm_handle_msr(struct svm_softc *svm_sc, int vcpu, struct vm_exit *vmexit,
 		return (0);
 	default:
 		panic("unexpected msr result %u\n", res);
+	}
+}
+
+static void
+svm_handle_rdpmc(struct svm_softc *svm_sc, int vcpu)
+{
+	struct vmcb_state *state = svm_get_vmcb_state(svm_sc, vcpu);
+	struct svm_regctx *ctx = svm_get_guest_regctx(svm_sc, vcpu);
+	const uint32_t ecx = ctx->sctx_rcx;
+	uint64_t val = 0;
+
+	if (svm_pmu_rdpmc(svm_sc, vcpu, ecx, &val)) {
+		state->rax = (uint32_t)val;
+		ctx->sctx_rdx = val >> 32;
+	} else {
+		vm_inject_gp(svm_sc->vm, vcpu);
 	}
 }
 
@@ -1459,6 +1478,10 @@ svm_vmexit(struct svm_softc *svm_sc, int vcpu, struct vm_exit *vmexit)
 		}
 	case VMCB_EXIT_MSR:
 		handled = svm_handle_msr(svm_sc, vcpu, vmexit, info1 != 0);
+		break;
+	case VMCB_EXIT_RDPMC:
+		svm_handle_rdpmc(svm_sc, vcpu);
+		handled = 1;
 		break;
 	case VMCB_EXIT_IO:
 		handled = svm_handle_inout(svm_sc, vcpu, vmexit);
@@ -2004,12 +2027,17 @@ svm_vmrun(void *arg, int vcpu, uint64_t rip)
 			continue;
 		}
 
+		if (svm_pmu_enter(svm_sc, vcpu)) {
+			enable_gintr();
+			handled = 1;
+			continue;
+		}
+
 		/*
-		 * #VMEXIT resumes the host with the guest LDTR, so
-		 * save the current LDT selector so it can be restored
-		 * after an exit.  The userspace hypervisor probably
-		 * doesn't use a LDT, but save and restore it to be
-		 * safe.
+		 * #VMEXIT resumes the host with the guest LDTR, so save the
+		 * current LDT selector so it can be restored after an exit.
+		 * The userspace hypervisor probably doesn't use a LDT, but save
+		 * and restore it to be safe.
 		 */
 		ldt_sel = sldt();
 
@@ -2032,6 +2060,8 @@ svm_vmrun(void *arg, int vcpu, uint64_t rip)
 
 		/* Restore host LDTR. */
 		lldt(ldt_sel);
+
+		svm_pmu_exit(svm_sc, vcpu);
 
 		/* #VMEXIT disables interrupts so re-enable them here. */
 		enable_gintr();
@@ -2058,8 +2088,11 @@ svm_vmcleanup(void *arg)
 {
 	struct svm_softc *sc = arg;
 
+	const uint16_t maxcpus = vm_get_maxcpus(sc->vm);
+	for (uint_t i = 0; i < maxcpus; i++) {
+		vmm_contig_free(sc->vcpu[i].msr_bitmap, SVM_MSR_BITMAP_SIZE);
+	}
 	vmm_contig_free(sc->iopm_bitmap, SVM_IO_BITMAP_SIZE);
-	vmm_contig_free(sc->msr_bitmap, SVM_MSR_BITMAP_SIZE);
 	kmem_free(sc, sizeof (*sc));
 }
 

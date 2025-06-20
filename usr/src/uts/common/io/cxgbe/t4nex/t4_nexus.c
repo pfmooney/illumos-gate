@@ -39,7 +39,6 @@
 #include <sys/cred.h>
 #include <sys/stat.h>
 #include <sys/mkdev.h>
-#include <sys/queue.h>
 #include <sys/containerof.h>
 #include <sys/sensors.h>
 #include <sys/firmload.h>
@@ -79,7 +78,7 @@ static void t4_setup_adapter_memwin(struct adapter *sc);
 static int validate_mt_off_len(struct adapter *, int, uint32_t, int,
     uint32_t *);
 static uint32_t t4_position_memwin(struct adapter *, int, uint32_t);
-static int init_driver_props(struct adapter *sc, struct driver_properties *p);
+static void t4_init_driver_props(struct adapter *);
 static int remove_extra_props(struct adapter *sc, int n10g, int n1g);
 static int cfg_itype_and_nqueues(struct adapter *sc, int n10g, int n1g,
     struct intrs_and_queues *iaq);
@@ -173,7 +172,6 @@ t4_devo_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	int i, instance, rc = DDI_SUCCESS, rqidx, tqidx, q;
 	int irq = 0, nxg = 0, n1g = 0;
 	char name[16];
-	struct driver_properties *prp;
 	struct intrs_and_queues iaq;
 	ddi_device_acc_attr_t da = {
 		.devacc_attr_version = DDI_DEVICE_ATTR_V0,
@@ -206,9 +204,11 @@ t4_devo_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	mutex_init(&sc->lock, NULL, MUTEX_DRIVER, NULL);
 	cv_init(&sc->cv, NULL, CV_DRIVER, NULL);
 	mutex_init(&sc->sfl_lock, NULL, MUTEX_DRIVER, NULL);
-	TAILQ_INIT(&sc->sfl);
+	list_create(&sc->sfl_list, sizeof (struct sge_fl),
+	    offsetof(struct sge_fl, node_sfl));
 	mutex_init(&sc->mbox_lock, NULL, MUTEX_DRIVER, NULL);
-	STAILQ_INIT(&sc->mbox_list);
+	list_create(&sc->mbox_list, sizeof (struct t4_mbox_list),
+	    offsetof(struct t4_mbox_list, node));
 
 	mutex_enter(&t4_adapter_list_lock);
 	list_insert_tail(&t4_adapter_list, sc);
@@ -224,8 +224,8 @@ t4_devo_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	sc->mbox = sc->pf;
 
 	/* Initialize the driver properties */
-	prp = &sc->props;
-	(void) init_driver_props(sc, prp);
+	t4_init_driver_props(sc);
+	struct driver_properties *prp = &sc->props;
 
 	/*
 	 * Enable access to the PCI config space.
@@ -400,15 +400,8 @@ t4_devo_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		mutex_init(&pi->lock, NULL, MUTEX_DRIVER, NULL);
 		pi->mtu = ETHERMTU;
 
-		if (t4_port_is_10xg(pi)) {
-			nxg++;
-			pi->tmr_idx = prp->tmr_idx_10g;
-			pi->pktc_idx = prp->pktc_idx_10g;
-		} else {
-			n1g++;
-			pi->tmr_idx = prp->tmr_idx_1g;
-			pi->pktc_idx = prp->pktc_idx_1g;
-		}
+		pi->tmr_idx = prp->ethq_tmr_idx;
+		pi->pktc_idx = prp->ethq_pktc_idx;
 		pi->dbq_timer_idx = prp->dbq_timer_idx;
 
 		pi->xact_addr_filt = -1;
@@ -1615,15 +1608,34 @@ prop_lookup_int(struct adapter *sc, char *name, int defval)
 	    name, defval));
 }
 
+static bool
+prop_lookup_bool(struct adapter *sc, char *name, bool defval)
+{
+	int rc;
+
+	rc = ddi_prop_get_int(sc->dev, sc->dip, DDI_PROP_DONTPASS, name, -1);
+	if (rc == -1) {
+		rc = ddi_prop_get_int(DDI_DEV_T_ANY, sc->dip, DDI_PROP_DONTPASS,
+		    name, -1);
+	}
+
+	if (rc != -1) {
+		return (rc != 0);
+	} else {
+		return (defval);
+	}
+}
+
 const uint_t t4_holdoff_timer_default[SGE_NTIMERS] = {5, 10, 20, 50, 100, 200};
 const uint_t t4_holdoff_pktcnt_default[SGE_NCOUNTERS] = {1, 8, 16, 32};
 
-static int
-init_driver_props(struct adapter *sc, struct driver_properties *p)
+static void
+t4_init_driver_props(struct adapter *sc)
 {
+	struct driver_properties *p = &sc->props;
 	dev_t dev = sc->dev;
 	dev_info_t *dip = sc->dip;
-	int i;
+	int val;
 
 	/*
 	 * For now, just use the defaults for the hold-off timers and counters.
@@ -1642,44 +1654,13 @@ init_driver_props(struct adapter *sc, struct driver_properties *p)
 	(void) ddi_prop_update_int_array(dev, dip, "holdoff-pkt-counter-values",
 	    (int *)p->holdoff_pktcnt, SGE_NCOUNTERS);
 
-	/*
-	 * Maximum # of tx and rx queues to use for each
-	 * 100G, 40G, 25G, 10G and 1G port.
-	 */
-	p->max_ntxq_10g = prop_lookup_int(sc, "max-ntxq-10G-port", 8);
-	(void) ddi_prop_update_int(dev, dip, "max-ntxq-10G-port",
-	    p->max_ntxq_10g);
+	p->ethq_tmr_idx = prop_lookup_int(sc, "holdoff-timer-idx", 0);
+	p->ethq_pktc_idx = prop_lookup_int(sc, "holdoff-pktc-idx", 2);
 
-	p->max_nrxq_10g = prop_lookup_int(sc, "max-nrxq-10G-port", 8);
-	(void) ddi_prop_update_int(dev, dip, "max-nrxq-10G-port",
-	    p->max_nrxq_10g);
-
-	p->max_ntxq_1g = prop_lookup_int(sc, "max-ntxq-1G-port", 2);
-	(void) ddi_prop_update_int(dev, dip, "max-ntxq-1G-port",
-	    p->max_ntxq_1g);
-
-	p->max_nrxq_1g = prop_lookup_int(sc, "max-nrxq-1G-port", 2);
-	(void) ddi_prop_update_int(dev, dip, "max-nrxq-1G-port",
-	    p->max_nrxq_1g);
-
-	/*
-	 * Holdoff parameters for 10G and 1G ports.
-	 */
-	p->tmr_idx_10g = prop_lookup_int(sc, "holdoff-timer-idx-10G", 0);
-	(void) ddi_prop_update_int(dev, dip, "holdoff-timer-idx-10G",
-	    p->tmr_idx_10g);
-
-	p->pktc_idx_10g = prop_lookup_int(sc, "holdoff-pktc-idx-10G", 2);
-	(void) ddi_prop_update_int(dev, dip, "holdoff-pktc-idx-10G",
-	    p->pktc_idx_10g);
-
-	p->tmr_idx_1g = prop_lookup_int(sc, "holdoff-timer-idx-1G", 0);
-	(void) ddi_prop_update_int(dev, dip, "holdoff-timer-idx-1G",
-	    p->tmr_idx_1g);
-
-	p->pktc_idx_1g = prop_lookup_int(sc, "holdoff-pktc-idx-1G", 2);
-	(void) ddi_prop_update_int(dev, dip, "holdoff-pktc-idx-1G",
-	    p->pktc_idx_1g);
+	(void) ddi_prop_update_int(dev, dip, "holdoff-timer-idx",
+	    p->ethq_tmr_idx);
+	(void) ddi_prop_update_int(dev, dip, "holdoff-pktc-idx",
+	    p->ethq_pktc_idx);
 
 	/*
 	 * Holdoff parameters for FW queue
@@ -1690,23 +1671,22 @@ init_driver_props(struct adapter *sc, struct driver_properties *p)
 	/*
 	 * Size (number of entries) of each tx and rx queue.
 	 */
-	i = prop_lookup_int(sc, "qsize-txq", TX_EQ_QSIZE);
-	p->qsize_txq = max(i, 128);
-	if (p->qsize_txq != i) {
+	val = prop_lookup_int(sc, "qsize-txq", TX_EQ_QSIZE);
+	p->qsize_txq = MAX(val, 128);
+	if (p->qsize_txq != val) {
 		cxgb_printf(dip, CE_WARN,
 		    "using %d instead of %d as the tx queue size",
-		    p->qsize_txq, i);
+		    p->qsize_txq, val);
 	}
 	(void) ddi_prop_update_int(dev, dip, "qsize-txq", p->qsize_txq);
 
-	i = prop_lookup_int(sc, "qsize-rxq", RX_IQ_QSIZE);
-	p->qsize_rxq = max(i, 128);
-	while (p->qsize_rxq & 7)
-		p->qsize_rxq--;
-	if (p->qsize_rxq != i) {
+	val = prop_lookup_int(sc, "qsize-rxq", RX_IQ_QSIZE);
+	p->qsize_rxq = MAX(val, 128) & ~15;
+	p->qsize_rxq = MIN(p->qsize_rxq, SGE_MAX_IQ_SIZE);
+	if (p->qsize_rxq != val) {
 		cxgb_printf(dip, CE_WARN,
 		    "using %d instead of %d as the rx queue size",
-		    p->qsize_rxq, i);
+		    p->qsize_rxq, val);
 	}
 	(void) ddi_prop_update_int(dev, dip, "qsize-rxq", p->qsize_rxq);
 
@@ -1718,33 +1698,17 @@ init_driver_props(struct adapter *sc, struct driver_properties *p)
 	    DDI_INTR_TYPE_MSIX | DDI_INTR_TYPE_MSI | DDI_INTR_TYPE_FIXED);
 	(void) ddi_prop_update_int(dev, dip, "interrupt-types", p->intr_types);
 
-	/*
-	 * Write combining
-	 * 0 to disable, 1 to enable
-	 */
-	p->wc = prop_lookup_int(sc, "write-combine", 1);
-	cxgb_printf(dip, CE_WARN, "write-combine: using of %d", p->wc);
-	if (p->wc != 0 && p->wc != 1) {
-		cxgb_printf(dip, CE_WARN,
-		    "write-combine: using 1 instead of %d", p->wc);
-		p->wc = 1;
-	}
-	(void) ddi_prop_update_int(dev, dip, "write-combine", p->wc);
+	p->write_combine = prop_lookup_bool(sc, "write-combine", true);
+	(void) ddi_prop_update_int(dev, dip, "write-combine",
+	    p->write_combine ? 1 : 0);
 
-	p->t4_fw_install = prop_lookup_int(sc, "t4_fw_install", 1);
-	if (p->t4_fw_install != 0 && p->t4_fw_install != 2)
-		p->t4_fw_install = 1;
-	(void) ddi_prop_update_int(dev, dip, "t4_fw_install", p->t4_fw_install);
+	p->t4_fw_install = prop_lookup_bool(sc, "t4_fw_install", true);
+	(void) ddi_prop_update_int(dev, dip, "t4_fw_install",
+	    p->t4_fw_install ? 1 : 0);
 
-	/* Multiple Rings */
-	p->multi_rings = prop_lookup_int(sc, "multi-rings", 1);
-	if (p->multi_rings != 0 && p->multi_rings != 1) {
-		cxgb_printf(dip, CE_NOTE,
-		    "multi-rings: using value 1 instead of %d", p->multi_rings);
-		p->multi_rings = 1;
-	}
-
-	(void) ddi_prop_update_int(dev, dip, "multi-rings", p->multi_rings);
+	p->multi_rings = prop_lookup_bool(sc, "multi-rings", true);
+	(void) ddi_prop_update_int(dev, dip, "multi-rings",
+	    p->multi_rings ? 1 : 0);
 
 	/* TX (completion) DBQ Timer */
 	p->dbq_timer_idx = 0;

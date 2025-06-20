@@ -31,7 +31,6 @@
 #include <sys/mac_provider.h>
 #include <sys/mac_ether.h>
 #include <sys/strsubr.h>
-#include <sys/queue.h>
 
 #include "common/common.h"
 #include "common/t4_regs.h"

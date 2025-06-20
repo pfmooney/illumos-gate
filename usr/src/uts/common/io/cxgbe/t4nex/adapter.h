@@ -30,7 +30,7 @@
 #include <sys/ddi.h>
 #include <sys/mac_provider.h>
 #include <sys/ethernet.h>
-#include <sys/queue.h>
+#include <sys/list.h>
 #include <sys/containerof.h>
 #include <sys/ddi_ufm.h>
 
@@ -39,6 +39,7 @@
 
 struct adapter;
 typedef struct adapter adapter_t;
+struct sge_fl;
 
 #define	FW_IQ_QSIZE	256
 #define	FW_IQ_ESIZE	64	/* At least 64 mandated by the firmware spec */
@@ -141,9 +142,9 @@ struct tx_sdesc {
 };
 
 typedef enum t4_iq_flags {
-	IQ_ALLOCATED	= (1 << 0),	/* firmware resources allocated */
-	IQ_INTR		= (1 << 1),	/* iq takes direct interrupt */
-	IQ_HAS_FL	= (1 << 2),	/* iq has fl */
+	IQ_ALLOC_HOST	= (1 << 0),	/* host-side resources allocated */
+	IQ_ALLOC_DEV	= (1 << 1),	/* device-side resource allocated */
+	IQ_INTR		= (1 << 2),	/* iq takes direct interrupt */
 } t4_iq_flags_t;
 
 typedef enum t4_iq_state {
@@ -189,33 +190,41 @@ struct sge_iq {
 	t4_iq_flags_t flags;
 	t4_intr_config_t intr_params;
 
+	kmutex_t lock;
 	ddi_dma_handle_t dhdl;
 	ddi_acc_handle_t ahdl;
 
 	__be64 *desc;		/* KVA of descriptor ring */
 	uint64_t ba;		/* bus address of descriptor ring */
 	const __be64 *cdesc;	/* current descriptor */
-	struct adapter *adapter; /* associated  adapter */
-	uint8_t  gen;		/* generation bit */
-	int8_t   intr_pktc_idx;	/* packet count threshold index */
-	uint8_t  esize;		/* size (bytes) of each entry in the queue */
+
+	uint16_t esize;		/* size (bytes) of each entry in the queue */
 	uint16_t qsize;		/* size (# of entries) of the queue */
 	uint16_t cidx;		/* consumer index */
 	uint16_t pending;	/* # of descs processed since last doorbell */
+	uint8_t gen;		/* generation bit */
+	uint8_t polling;	/* Is IQ in polling mode? */
+	int8_t intr_pktc_idx;	/* packet count threshold index */
+
 	uint16_t cntxt_id;	/* SGE context id  for the iq */
 	uint16_t abs_id;	/* absolute SGE id for the iq */
-	kmutex_t lock;		/* Rx access lock */
-	uint8_t polling;
+
+	struct adapter *adapter; /* associated  adapter */
+	struct sge_fl *fl;	/* associated freelist (if any) */
 
 	struct sge_iq_stats stats;
 
-	STAILQ_ENTRY(sge_iq) link;
+	/*
+	 * TODO: add expectations about node ownership
+	 */
+	list_node_t node_intr_fwd;
 };
 
 typedef enum t4_eq_flags {
 	/* Initialization state flags: */
-	EQ_ALLOCATED	= (1 << 0),	/* firmware resources allocated */
-	EQ_MTX		= (1 << 1),	/* mutex has been initialized */
+	EQ_ALLOC_HOST	= (1 << 0),	/* host-side resources allocated */
+	EQ_ALLOC_DEV	= (1 << 1),	/* EQ allocated in device firmware */
+	EQ_ALLOC_DESC	= (1 << 2),	/* descriptor inputs allocated */
 
 	/* Runtime state flags: */
 
@@ -223,7 +232,7 @@ typedef enum t4_eq_flags {
 	 * Short on resources (memory and/or descriptors) while attempting to
 	 * enqueue work in EQ
 	 */
-	EQ_CORKED	= (1 << 2),
+	EQ_CORKED	= (1 << 3),
 } t4_eq_flags_t;
 
 /* Listed in order of preference. */
@@ -234,6 +243,11 @@ typedef enum t4_doorbells {
 	DOORBELL_KDB	= (1 << 3),
 } t4_doorbells_t;
 
+typedef enum t4_eq_type {
+	TET_ETH_TX,
+	TET_FREELIST,
+} t4_eq_type_t;
+
 /*
  * Egress Queue: driver is producer, T4 is consumer.
  *
@@ -241,54 +255,67 @@ typedef enum t4_doorbells {
  * consumes them) but it's special enough to have its own struct (see sge_fl).
  */
 struct sge_eq {
+	t4_eq_type_t eqtype;
+	t4_eq_flags_t flags;
+
+	kmutex_t lock;
 	ddi_dma_handle_t desc_dhdl;
 	ddi_acc_handle_t desc_ahdl;
-	t4_eq_flags_t flags;
-	kmutex_t lock;
 
-	struct tx_desc *desc;	/* KVA of descriptor ring */
+	// struct tx_desc *desc;	/* KVA of descriptor ring */
+	void *desc;		/* KVA of descriptor ring */
 	uint64_t ba;		/* bus address of descriptor ring */
-	struct sge_qstat *spg;	/* status page, for convenience */
-	t4_doorbells_t doorbells;
-	caddr_t udb;		/* KVA of doorbell (lies within BAR2) */
-	uint_t udb_qid;		/* relative qid within the doorbell page */
+
+	/* Sizing and status */
 	uint16_t cap;		/* max # of desc, for convenience */
 	uint16_t avail;		/* available descriptors, for convenience */
 	uint16_t qsize;		/* size (# of entries) of the queue */
+	uint16_t esize;		/* size of entries in queue */
 	uint16_t cidx;		/* consumer idx (desc idx) */
 	uint16_t pidx;		/* producer idx (desc idx) */
 	uint16_t pending;	/* # of descriptors used since last doorbell */
+
+	/* Doorbell bits */
+	t4_doorbells_t doorbells;
+	caddr_t udb;		/* KVA of doorbell (lies within BAR2) */
+	uint_t udb_qid;		/* relative qid within the doorbell page */
+
+	struct sge_qstat *spg;	/* status page, for convenience */
 	uint16_t iqid;		/* iq that gets egr_update for the eq */
 	uint8_t tx_chan;	/* tx channel used by the eq */
 	uint32_t cntxt_id;	/* SGE context id for the eq */
 };
 
 typedef enum t4_fl_flags {
-	FL_MTX		= (1 << 0),	/* mutex has been initialized */
-	FL_STARVING	= (1 << 1),	/* on the list of starving fl's */
-	FL_DOOMED	= (1 << 2),	/* about to be destroyed */
+	FL_STARVING	= (1 << 0),	/* on the list of starving fl's */
+	FL_DOOMED	= (1 << 1),	/* about to be destroyed */
 } t4_fl_flags_t;
 
 #define	FL_RUNNING_LOW(fl)	(fl->cap - fl->needed <= fl->lowat)
 #define	FL_NOT_RUNNING_LOW(fl)	(fl->cap - fl->needed >= 2 * fl->lowat)
 
 struct sge_fl {
-	t4_fl_flags_t flags;
-	kmutex_t lock;
-	ddi_dma_handle_t dhdl;
-	ddi_acc_handle_t ahdl;
+	struct sge_eq eq;
 
-	__be64 *desc;		/* KVA of descriptor ring, ptr to addresses */
-	uint64_t ba;		/* bus address of descriptor ring */
+	t4_fl_flags_t flags;
+	// kmutex_t lock;
+	// ddi_dma_handle_t dhdl;
+	// ddi_acc_handle_t ahdl;
+
+	// __be64 *desc;		/* KVA of descriptor ring, ptr to addresses */
+	// uint64_t ba;		/* bus address of descriptor ring */
+
+	// uint32_t cap;		/* max # of buffers, for convenience */
+	// uint16_t qsize;		/* size (# of entries) of the queue */
+	// uint32_t cidx;		/* consumer idx (buffer idx, NOT hw desc idx) */
+	// uint32_t pidx;		/* producer idx (buffer idx, NOT hw desc idx) */
+	// uint32_t pending;	/* # of bufs allocated since last doorbell */
+
+	// uint16_t cntxt_id;	/* SGE context id for the freelist */
+
 	struct fl_sdesc *sdesc;	/* KVA of software descriptor ring */
-	uint32_t cap;		/* max # of buffers, for convenience */
-	uint16_t qsize;		/* size (# of entries) of the queue */
-	uint16_t cntxt_id;	/* SGE context id for the freelist */
-	uint32_t cidx;		/* consumer idx (buffer idx, NOT hw desc idx) */
-	uint32_t pidx;		/* producer idx (buffer idx, NOT hw desc idx) */
 	uint32_t needed;	/* # of buffers needed to fill up fl. */
 	uint32_t lowat;		/* # of buffers <= this means fl needs help */
-	uint32_t pending;	/* # of bufs allocated since last doorbell */
 	uint32_t offset;	/* current packet within the larger buffer */
 	uint16_t copy_threshold; /* anything this size or less is copied up */
 
@@ -296,7 +323,7 @@ struct sge_fl {
 	uint64_t passed_up;	/* # of frames wrapped in mblk and handed up */
 	uint64_t allocb_fail;	/* # of mblk allocation failures */
 
-	TAILQ_ENTRY(sge_fl) link; /* All starving freelists */
+	list_node_t node_sfl;	/* Node in adapter list of starving freelists */
 };
 
 /* txq: SGE egress queue + miscellaneous items */
@@ -400,6 +427,7 @@ struct sge {
 	uint_t eqmap_sz; /* size of eq context id map */
 	struct sge_iq **iqmap;	/* iq->cntxt_id to iq mapping */
 	struct sge_eq **eqmap;	/* eq->cntxt_id to eq mapping */
+	struct sge_fl **flmap;	/* fl->cntxt_id to fl mapping */
 
 	/* Device access and DMA attributes for all the descriptor rings */
 	ddi_device_acc_attr_t acc_attr_desc;
@@ -415,15 +443,9 @@ struct sge {
 };
 
 struct driver_properties {
-	int max_ntxq_10g;
-	int max_nrxq_10g;
-	int max_ntxq_1g;
-	int max_nrxq_1g;
 	int intr_types;
-	int tmr_idx_10g;
-	int pktc_idx_10g;
-	int tmr_idx_1g;
-	int pktc_idx_1g;
+	uint8_t ethq_tmr_idx;
+	int8_t ethq_pktc_idx;
 	uint8_t dbq_timer_idx;
 	uint8_t fwq_tmr_idx;
 	int8_t fwq_pktc_idx;
@@ -433,14 +455,13 @@ struct driver_properties {
 	uint_t holdoff_timer_us[SGE_NTIMERS];
 	uint_t holdoff_pktcnt[SGE_NCOUNTERS];
 
-	int wc;
-
-	int multi_rings;
-	int t4_fw_install;
+	bool write_combine;
+	bool multi_rings;
+	bool t4_fw_install;
 };
 
 struct t4_mbox_list {
-	STAILQ_ENTRY(t4_mbox_list) link;
+	list_node_t node;
 };
 
 typedef enum t4_adapter_flags {
@@ -508,7 +529,7 @@ struct adapter {
 
 	/* Starving free lists */
 	kmutex_t sfl_lock;	/* same cache-line as sc_lock? but that's ok */
-	TAILQ_HEAD(, sge_fl) sfl;
+	list_t sfl_list;
 	timeout_id_t sfl_timer;
 
 	/* Sensors */
@@ -519,7 +540,7 @@ struct adapter {
 
 	/* support for single-threading access to adapter mailbox registers */
 	kmutex_t mbox_lock;
-	STAILQ_HEAD(, t4_mbox_list) mbox_list;
+	list_t mbox_list;
 };
 
 struct memwin {
@@ -542,10 +563,10 @@ struct memwin {
 #define	IQ_LOCK_ASSERT_OWNED(iq)	ASSERT(mutex_owned(&(iq)->lock))
 #define	IQ_LOCK_ASSERT_NOTOWNED(iq)	ASSERT(!mutex_owned(&(iq)->lock))
 
-#define	FL_LOCK(fl)			mutex_enter(&(fl)->lock)
-#define	FL_UNLOCK(fl)			mutex_exit(&(fl)->lock)
-#define	FL_LOCK_ASSERT_OWNED(fl)	ASSERT(mutex_owned(&(fl)->lock))
-#define	FL_LOCK_ASSERT_NOTOWNED(fl)	ASSERT(!mutex_owned(&(fl)->lock))
+#define	FL_LOCK(fl)			mutex_enter(&(fl)->eq.lock)
+#define	FL_UNLOCK(fl)			mutex_exit(&(fl)->eq.lock)
+#define	FL_LOCK_ASSERT_OWNED(fl)	ASSERT(mutex_owned(&(fl)->eq.lock))
+#define	FL_LOCK_ASSERT_NOTOWNED(fl)	ASSERT(!mutex_owned(&(fl)->eq.lock))
 
 #define	RXQ_LOCK(rxq)			IQ_LOCK(&(rxq)->iq)
 #define	RXQ_UNLOCK(rxq)			IQ_UNLOCK(&(rxq)->iq)
@@ -580,25 +601,25 @@ struct memwin {
 #define	T4_EXTRA_INTR 2
 
 static inline void t4_mbox_list_add(struct adapter *adap,
-				    struct t4_mbox_list *entry)
+    struct t4_mbox_list *entry)
 {
 	mutex_enter(&adap->mbox_lock);
-	STAILQ_INSERT_TAIL(&adap->mbox_list, entry, link);
+	list_insert_tail(&adap->mbox_list, entry);
 	mutex_exit(&adap->mbox_lock);
 }
 
 static inline void t4_mbox_list_del(struct adapter *adap,
-				    struct t4_mbox_list *entry)
+    struct t4_mbox_list *entry)
 {
 	mutex_enter(&adap->mbox_lock);
-	STAILQ_REMOVE(&adap->mbox_list, entry, t4_mbox_list, link);
+	list_remove(&adap->mbox_list, entry);
 	mutex_exit(&adap->mbox_lock);
 }
 
 static inline struct t4_mbox_list *
 t4_mbox_list_first_entry(struct adapter *adap)
 {
-	return (STAILQ_FIRST(&adap->mbox_list));
+	return (list_head(&adap->mbox_list));
 }
 
 static inline struct port_info *

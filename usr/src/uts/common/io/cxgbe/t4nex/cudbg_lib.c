@@ -156,9 +156,7 @@ read_sge_ctxt(struct cudbg_init *pdbg_init, u32 cid,
 	int rc = -1;
 
 	if (is_fw_attached(pdbg_init)) {
-		ADAPTER_LOCK(padap);
 		rc = t4_sge_ctxt_rd(padap, padap->mbox, cid, ctype, data);
-		ADAPTER_UNLOCK(padap);
 	}
 
 	if (rc)
@@ -2664,9 +2662,7 @@ cudbg_t4_fwcache(struct cudbg_init *pdbg_init,
 	if (is_fw_attached(pdbg_init)) {
 
 		/* Flush uP dcache before reading edcX/mcX  */
-		ADAPTER_LOCK(padap);
 		rc = t4_fwcache(padap, FW_PARAM_DEV_FWCACHE_FLUSH);
-		ADAPTER_UNLOCK(padap);
 
 		if (rc) {
 			if (pdbg_init->verbose)
@@ -3302,7 +3298,6 @@ collect_tid(struct cudbg_init *pdbg_init,
 	para[5] = FW_PARAM_PFVF_A(SERVER_START);
 	para[6] = FW_PARAM_PFVF_A(SERVER_END);
 
-	ADAPTER_LOCK(padap);
 	mbox = padap->mbox;
 	pf = padap->pf;
 	rc = t4_query_params(padap, mbox, pf, 0, 7, para, val);
@@ -3389,7 +3384,6 @@ collect_tid(struct cudbg_init *pdbg_init,
 	rc = compress_buff(&scratch_buff, dbg_buff);
 
 err1:
-	ADAPTER_UNLOCK(padap);
 	release_scratch_buff(&scratch_buff, dbg_buff);
 err:
 	return rc;
@@ -3580,10 +3574,8 @@ collect_mps_tcam(struct cudbg_init *pdbg_init,
 				htons(V_FW_LDST_CMD_FID(FW_LDST_MPS_RPLC) |
 				      V_FW_LDST_CMD_IDX(i));
 
-			ADAPTER_LOCK(padap);
 			rc = t4_wr_mbox(padap, padap->mbox, &ldst_cmd,
 					sizeof(ldst_cmd), &ldst_cmd);
-			ADAPTER_UNLOCK(padap);
 
 			if (rc)
 				mps_rpl_backdoor(padap, &mps_rplc);

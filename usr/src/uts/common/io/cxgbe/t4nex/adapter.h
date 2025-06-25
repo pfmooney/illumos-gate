@@ -33,6 +33,7 @@
 #include <sys/list.h>
 #include <sys/containerof.h>
 #include <sys/ddi_ufm.h>
+#include <sys/mac_provider.h>
 
 #include "firmware/t4fw_interface.h"
 #include "shared.h"
@@ -40,6 +41,7 @@
 struct adapter;
 typedef struct adapter adapter_t;
 struct sge_fl;
+struct sge_iq;
 
 #define	FW_IQ_QSIZE	256
 #define	FW_IQ_ESIZE	64	/* At least 64 mandated by the firmware spec */
@@ -74,45 +76,47 @@ typedef enum t4_port_feat {
 } t4_port_feat_t;
 
 struct port_info {
-	dev_info_t *dip;
-	mac_handle_t mh;
-	mac_callbacks_t *mc;
-	int mtu;
-	uint8_t hw_addr[ETHERADDRL];
+	kmutex_t	lock;
+	dev_info_t	*dip;
+	struct adapter	*adapter;
+	uint8_t		port_id;
 
-	kmutex_t lock;
-	struct adapter *adapter;
+	t4_port_flags_t	flags;
+	t4_port_feat_t	features;
 
-	t4_port_flags_t flags;
+	mac_handle_t	mh;
+	int		mtu;
+	uint8_t		hw_addr[ETHERADDRL];
+	int16_t 	xact_addr_filt; /* index of exact MAC address filter */
 
-	uint16_t viid;
-	int16_t  xact_addr_filt; /* index of exact MAC address filter */
-	uint16_t rss_size;	/* size of VI's RSS table slice */
-	uint16_t ntxq;		/* # of tx queues */
-	uint16_t first_txq;	/* index of first tx queue */
-	uint16_t nrxq;		/* # of rx queues */
-	uint16_t first_rxq;	/* index of first rx queue */
-	uint8_t  lport;		/* associated offload logical port */
-	int8_t   mdio_addr;
-	uint8_t  port_type;
-	uint8_t  mod_type;
-	uint8_t  port_id;
-	uint8_t  tx_chan;
-	uint8_t  rx_chan;
-	uint8_t  rx_cchan;
-	uint8_t instance; /* Associated adapter instance */
-	uint8_t child_inst; /* Associated child instance */
+	uint16_t	ntxq;		/* # of tx queues */
+	uint16_t	first_txq;	/* index of first tx queue */
+	uint16_t	nrxq;		/* # of rx queues */
+	uint16_t	first_rxq;	/* index of first rx queue */
 
-	uint8_t	tmr_idx;
-	int8_t	pktc_idx;
-	uint8_t	dbq_timer_idx;
+	/* Port attributes/data set by common code: */
+	uint16_t	viid;
+	uint16_t	rss_size;	/* size of VI's RSS table slice */
+
+	uint8_t		port_type;
+	int8_t		mdio_addr;
+	uint8_t		mod_type;
+
+	uint8_t		lport;
+	uint8_t		tx_chan;
+	uint8_t		rx_chan;
+	uint8_t		rx_cchan;
+
+	uint8_t		rss_mode;
+
+	uint8_t		tmr_idx;
+	int8_t		pktc_idx;
+	uint8_t		dbq_timer_idx;
 
 	struct link_config link_cfg;
+	uint8_t		macaddr_cnt;
+
 	struct port_stats stats;
-	t4_port_feat_t features;
-	uint8_t macaddr_cnt;
-	u8 rss_mode;
-	u16 viid_mirror;
 	kstat_t *ksp_config;
 	kstat_t *ksp_info;
 	kstat_t *ksp_fec;
@@ -121,9 +125,10 @@ struct port_info {
 	u8 vin;
 	u8 smt_idx;
 
-	u8 vivld_mirror;
-	u8 vin_mirror;
-	u8 smt_idx_mirror;
+	/* Mirroring bits utilized by common code (unused by our driver) */
+	 u16 viid_mirror;
+	 u8 vivld_mirror;
+	 u8 vin_mirror;
 };
 
 struct fl_sdesc {
@@ -189,6 +194,7 @@ struct sge_iq {
 	t4_iq_state_t state;
 	t4_iq_flags_t flags;
 	t4_intr_config_t intr_params;
+	uint_t intr_idx;	/* Assigned interrupt index */
 
 	kmutex_t lock;
 	ddi_dma_handle_t dhdl;
@@ -291,27 +297,19 @@ typedef enum t4_fl_flags {
 	FL_DOOMED	= (1 << 1),	/* about to be destroyed */
 } t4_fl_flags_t;
 
-#define	FL_RUNNING_LOW(fl)	(fl->cap - fl->needed <= fl->lowat)
-#define	FL_NOT_RUNNING_LOW(fl)	(fl->cap - fl->needed >= 2 * fl->lowat)
+#define	FL_RUNNING_LOW(fl)	(fl->eq.cap - fl->needed <= fl->lowat)
+#define	FL_NOT_RUNNING_LOW(fl)	(fl->eq.cap - fl->needed >= 2 * fl->lowat)
+
+struct sge_fl_stats {
+	uint64_t copied_up;	/* # of frames copied into mblk and handed up */
+	uint64_t passed_up;	/* # of frames wrapped in mblk and handed up */
+	uint64_t allocb_fail;	/* # of mblk allocation failures */
+};
 
 struct sge_fl {
 	struct sge_eq eq;
 
 	t4_fl_flags_t flags;
-	// kmutex_t lock;
-	// ddi_dma_handle_t dhdl;
-	// ddi_acc_handle_t ahdl;
-
-	// __be64 *desc;		/* KVA of descriptor ring, ptr to addresses */
-	// uint64_t ba;		/* bus address of descriptor ring */
-
-	// uint32_t cap;		/* max # of buffers, for convenience */
-	// uint16_t qsize;		/* size (# of entries) of the queue */
-	// uint32_t cidx;		/* consumer idx (buffer idx, NOT hw desc idx) */
-	// uint32_t pidx;		/* producer idx (buffer idx, NOT hw desc idx) */
-	// uint32_t pending;	/* # of bufs allocated since last doorbell */
-
-	// uint16_t cntxt_id;	/* SGE context id for the freelist */
 
 	struct fl_sdesc *sdesc;	/* KVA of software descriptor ring */
 	uint32_t needed;	/* # of buffers needed to fill up fl. */
@@ -319,11 +317,34 @@ struct sge_fl {
 	uint32_t offset;	/* current packet within the larger buffer */
 	uint16_t copy_threshold; /* anything this size or less is copied up */
 
-	uint64_t copied_up;	/* # of frames copied into mblk and handed up */
-	uint64_t passed_up;	/* # of frames wrapped in mblk and handed up */
-	uint64_t allocb_fail;	/* # of mblk allocation failures */
+	struct sge_fl_stats stats;
 
 	list_node_t node_sfl;	/* Node in adapter list of starving freelists */
+};
+
+struct sge_txq_stats {
+	/* stats for common events first */
+	uint64_t txpkts;	/* # of ethernet packets */
+	uint64_t txbytes;	/* # of ethernet bytes */
+	uint64_t txcsum;	/* # of times hardware assisted with checksum */
+	uint64_t tso_wrs;	/* # of IPv4 TSO work requests */
+	uint64_t imm_wrs;	/* # of work requests with immediate data */
+	uint64_t sgl_wrs;	/* # of work requests with direct SGL */
+	uint64_t txpkt_wrs;	/* # of txpkt work requests (not coalesced) */
+	uint64_t txpkts_wrs;	/* # of coalesced tx work requests */
+	uint64_t txpkts_pkts;	/* # of frames in coalesced tx work requests */
+	uint64_t txb_used;	/* # of tx copy buffers used (64 byte each) */
+	uint64_t hdl_used;	/* # of DMA handles used */
+
+	/* stats for not-that-common events */
+	uint32_t txb_full;	/* txb ran out of space */
+	uint32_t dma_hdl_failed; /* couldn't obtain DMA handle */
+	uint32_t dma_map_failed; /* couldn't obtain DMA mapping */
+	uint32_t qfull;		/* out of hardware descriptors */
+	uint32_t pullup_early;	/* # of pullups before starting frame's SGL */
+	uint32_t pullup_late;	/* # of pullups while building frame's SGL */
+	uint32_t pullup_failed;	/* # of failed pullups */
+	uint32_t csum_failed;	/* # of csum reqs we failed to fulfill */
 };
 
 /* txq: SGE egress queue + miscellaneous items */
@@ -351,32 +372,15 @@ struct sge_txq {
 	uint32_t txb_avail;	/* # of bytes available */
 	uint16_t copy_threshold; /* anything this size or less is copied up */
 
-	uint64_t txpkts;	/* # of ethernet packets */
-	uint64_t txbytes;	/* # of ethernet bytes */
 	kstat_t *ksp;
+	struct sge_txq_stats stats;
+};
 
+struct sge_rxq_stats {
 	/* stats for common events first */
-
-	uint64_t txcsum;	/* # of times hardware assisted with checksum */
-	uint64_t tso_wrs;	/* # of IPv4 TSO work requests */
-	uint64_t imm_wrs;	/* # of work requests with immediate data */
-	uint64_t sgl_wrs;	/* # of work requests with direct SGL */
-	uint64_t txpkt_wrs;	/* # of txpkt work requests (not coalesced) */
-	uint64_t txpkts_wrs;	/* # of coalesced tx work requests */
-	uint64_t txpkts_pkts;	/* # of frames in coalesced tx work requests */
-	uint64_t txb_used;	/* # of tx copy buffers used (64 byte each) */
-	uint64_t hdl_used;	/* # of DMA handles used */
-
-	/* stats for not-that-common events */
-
-	uint32_t txb_full;	/* txb ran out of space */
-	uint32_t dma_hdl_failed; /* couldn't obtain DMA handle */
-	uint32_t dma_map_failed; /* couldn't obtain DMA mapping */
-	uint32_t qfull;		/* out of hardware descriptors */
-	uint32_t pullup_early;	/* # of pullups before starting frame's SGL */
-	uint32_t pullup_late;	/* # of pullups while building frame's SGL */
-	uint32_t pullup_failed;	/* # of failed pullups */
-	uint32_t csum_failed;	/* # of csum reqs we failed to fulfill */
+	uint64_t rxcsum;	/* # of times hardware assisted with checksum */
+	uint64_t rxpkts;	/* # of ethernet packets */
+	uint64_t rxbytes;	/* # of ethernet bytes */
 };
 
 /* rxq: SGE ingress queue + SGE free list + miscellaneous items */
@@ -390,15 +394,7 @@ struct sge_rxq {
 	mac_ring_handle_t ring_handle;
 	uint64_t ring_gen_num;
 
-	/* stats for common events first */
-
-	uint64_t rxcsum;	/* # of times hardware assisted with checksum */
-	uint64_t rxpkts;	/* # of ethernet packets */
-	uint64_t rxbytes;	/* # of ethernet bytes */
-
-	/* stats for not-that-common events */
-
-	uint32_t nomem;		/* mblk allocation during rx failed */
+	struct sge_rxq_stats stats;
 };
 
 struct sge {
@@ -418,6 +414,7 @@ struct sge {
 	int8_t fwq_pktc_idx;	/* Intr. coalesce count for FWQ */
 
 	struct sge_iq fwq;	/* Firmware event queue */
+	struct sge_iq dev_intrq; /* device-wide interrupt event queue */
 	struct sge_txq *txq;	/* NIC tx queues */
 	struct sge_rxq *rxq;	/* NIC rx queues */
 
@@ -443,7 +440,6 @@ struct sge {
 };
 
 struct driver_properties {
-	int intr_types;
 	uint8_t ethq_tmr_idx;
 	int8_t ethq_pktc_idx;
 	uint8_t dbq_timer_idx;
@@ -456,7 +452,6 @@ struct driver_properties {
 	uint_t holdoff_pktcnt[SGE_NCOUNTERS];
 
 	bool write_combine;
-	bool multi_rings;
 	bool t4_fw_install;
 };
 
@@ -475,6 +470,38 @@ typedef enum t4_adapter_flags {
 	TAF_MASTER_PF	= (1 << 4),
 	TAF_DBQ_TIMER	= (1 << 5),
 } t4_adapter_flags_t;
+
+/* Plan for interrupt allocation */
+typedef enum t4_intr_plan {
+	/* Everything on a single interrupt */
+	TIP_SINGLE,
+	/* One for errors, one for queue processing */
+	TIP_ERR_QUEUES,
+	/* One for errors, one for FWQ, one for RX queues */
+	TIP_ERR_FWQ_QUEUES,
+	/* 1 & 1 for errors and FWQ, with rest divided evenly between ports */
+	TIP_PER_PORT,
+} t4_intr_plan_t;
+
+struct t4_intrs_queues {
+	int intr_type;		/* DDI_INTR_TYPE_* */
+	uint_t intr_avail;	/* Interrupts available to alloc */
+	t4_intr_plan_t intr_plan; /* Plan for interrupt allocation */
+	uint_t intr_count;	/* Number of interrupts to allocate */
+	uint_t intr_per_port;	/* Per-port interrupts allocated */
+	bool intr_fwd;		/* Interrupts forwarded */
+
+	uint_t port_1g;		/* 1Gb ports */
+	uint_t port_xg;		/* 10+Gb ports */
+
+	uint_t port_max_rxq;	/* Max RX queues per port */
+	uint_t port_max_txq;	/* Max TX queues per port */
+
+	int ntxq10g;		/* # of NIC txq's for each 10G port */
+	int nrxq10g;		/* # of NIC rxq's for each 10G port */
+	int ntxq1g;		/* # of NIC txq's for each 1G port */
+	int nrxq1g;		/* # of NIC rxq's for each 1G port */
+};
 
 struct adapter {
 	list_node_t node;
@@ -502,11 +529,9 @@ struct adapter {
 	caddr_t bar2_ptr;
 
 	/* Interrupt information */
-	int intr_type;
-	int intr_count;
+	ddi_intr_handle_t *intr_handle;
 	int intr_cap;
 	uint_t intr_pri;
-	ddi_intr_handle_t *intr_handle;
 
 	struct driver_properties props;
 	kstat_t *ksp;
@@ -523,6 +548,7 @@ struct adapter {
 
 	unsigned int cfcsum;
 	struct adapter_params params;
+	struct t4_intrs_queues intr_queue_cfg;
 
 	kmutex_t lock;
 	kcondvar_t cv;
@@ -686,28 +712,30 @@ void t4_debug_fini(void);
 /* t4_sge.c */
 void t4_sge_init(struct adapter *sc);
 int t4_alloc_fwq(struct adapter *);
-int t4_free_fwq(struct adapter *);
+void t4_free_fwq(struct adapter *);
 int t4_setup_port_queues(struct port_info *pi);
 int t4_teardown_port_queues(struct port_info *pi);
-uint_t t4_intr_all(caddr_t arg1, caddr_t arg2);
-uint_t t4_intr(caddr_t arg1, caddr_t arg2);
-uint_t t4_intr_err(caddr_t arg1, caddr_t arg2);
+uint_t t4_intr_all(caddr_t, caddr_t);
+uint_t t4_intr_err(caddr_t, caddr_t);
+uint_t t4_intr_all_queues(caddr_t, caddr_t);
+uint_t t4_intr_fwq(caddr_t, caddr_t);
+uint_t t4_intr_queues(caddr_t, caddr_t);
+uint_t t4_intr_port_queues(caddr_t, caddr_t);
 void t4_iq_gts_update(struct sge_iq *, t4_intr_config_t, uint16_t);
 void t4_iq_update_intr_cfg(struct sge_iq *, uint8_t, int8_t);
 void t4_eq_update_dbq_timer(struct sge_eq *, struct port_info *);
 int t4_mgmt_tx(struct adapter *sc, mblk_t *m);
 
 mblk_t *t4_eth_tx(void *, mblk_t *);
-mblk_t *t4_mc_tx(void *arg, mblk_t *m);
 mblk_t *t4_ring_rx(struct sge_rxq *rxq, int poll_bytes);
 
 /* t4_mac.c */
-void t4_mc_cb_init(struct port_info *);
 void t4_os_link_changed(struct adapter *sc, int idx, int link_stat);
 void t4_mac_rx(struct port_info *pi, struct sge_rxq *rxq, mblk_t *m);
 void t4_mac_tx_update(struct port_info *pi, struct sge_txq *txq);
 int t4_addmac(void *arg, const uint8_t *ucaddr);
 const char **t4_get_priv_props(struct port_info *, size_t *);
+extern mac_callbacks_t t4_mac_callbacks;
 
 /* t4_ioctl.c */
 int t4_ioctl(struct adapter *sc, int cmd, void *data, int mode);

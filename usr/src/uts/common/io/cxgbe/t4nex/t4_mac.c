@@ -56,30 +56,18 @@ static void t4_propinfo_priv(struct port_info *, const char *,
 static int t4_getprop_priv(struct port_info *, const char *, uint_t, void *);
 static int t4_setprop_priv(struct port_info *, const char *, const void *);
 
-mac_callbacks_t t4_m_callbacks = {
+mac_callbacks_t t4_mac_callbacks = {
 	.mc_callbacks	= MC_GETCAPAB | MC_PROPERTIES,
 	.mc_getstat	= t4_mc_getstat,
 	.mc_start	= t4_mc_start,
 	.mc_stop	= t4_mc_stop,
 	.mc_setpromisc	= t4_mc_setpromisc,
 	.mc_multicst	= t4_mc_multicst,
-	.mc_unicst	= t4_mc_unicst,
-	.mc_tx		= t4_mc_tx,
-	.mc_getcapab	= t4_mc_getcapab,
-	.mc_setprop	= t4_mc_setprop,
-	.mc_getprop	= t4_mc_getprop,
-	.mc_propinfo	= t4_mc_propinfo,
-};
-
-mac_callbacks_t t4_m_ring_callbacks = {
-	.mc_callbacks	= MC_GETCAPAB | MC_PROPERTIES,
-	.mc_getstat	= t4_mc_getstat,
-	.mc_start	= t4_mc_start,
-	.mc_stop	= t4_mc_stop,
-	.mc_setpromisc	= t4_mc_setpromisc,
-	.mc_multicst	= t4_mc_multicst,
-	.mc_unicst	= NULL, /* t4_addmac */
-	.mc_tx		= NULL, /* t4_eth_tx */
+	/*
+	 * Not required for rings-capalbe driver:
+	 * .mc_unicst
+	 * .mc_tx
+	 */
 	.mc_getcapab	= t4_mc_getcapab,
 	.mc_setprop	= t4_mc_setprop,
 	.mc_getprop	= t4_mc_getprop,
@@ -400,7 +388,8 @@ t4_mc_getstat(void *arg, uint_t stat, uint64_t *val)
 		break;
 
 	case MAC_STAT_NORCVBUF:
-		*val = 0;	/* TODO should come from rxq->nomem */
+		/* TODO: pull from freelist stats? */
+		*val = 0;
 		break;
 
 	case MAC_STAT_IERRORS:
@@ -815,7 +804,7 @@ t4_mc_unicst(void *arg, const uint8_t *ucaddr)
 	ADAPTER_LOCK(sc);
 
 	/* We will support adding only one mac address */
-	if (pi->adapter->props.multi_rings && pi->macaddr_cnt) {
+	if (pi->macaddr_cnt) {
 		ADAPTER_UNLOCK(sc);
 		return (ENOSPC);
 	}
@@ -955,11 +944,11 @@ t4_rx_stat(mac_ring_driver_t rh, uint_t stat, uint64_t *val)
 
 	switch (stat) {
 	case MAC_STAT_RBYTES:
-		*val = rxq->rxbytes;
+		*val = rxq->stats.rxbytes;
 		break;
 
 	case MAC_STAT_IPACKETS:
-		*val = rxq->rxpkts;
+		*val = rxq->stats.rxpkts;
 		break;
 
 	default:
@@ -980,11 +969,11 @@ t4_tx_stat(mac_ring_driver_t rh, uint_t stat, uint64_t *val)
 
 	switch (stat) {
 	case MAC_STAT_RBYTES:
-		*val = txq->txbytes;
+		*val = txq->stats.txbytes;
 		break;
 
 	case MAC_STAT_IPACKETS:
-		*val = txq->txpkts;
+		*val = txq->stats.txpkts;
 		break;
 
 	default:
@@ -996,9 +985,8 @@ t4_tx_stat(mac_ring_driver_t rh, uint_t stat, uint64_t *val)
 }
 
 /*
- * Callback funtion for MAC layer to register all rings
- * for given ring_group, noted by group_index.
- * Since we have only one group, ring index becomes
+ * Callback funtion for MAC layer to register all rings for given ring_group,
+ * noted by group_index. Since we have only one group, ring index becomes
  * absolute index.
  */
 void
@@ -1006,13 +994,17 @@ t4_fill_ring(void *arg, mac_ring_type_t rtype, const int group_index,
     const int ring_index, mac_ring_info_t *infop, mac_ring_handle_t rh)
 {
 	struct port_info *pi = arg;
-	mac_intr_t *mintr;
+
+	ASSERT3S(ring_index, >=, 0);
 
 	switch (rtype) {
 	case MAC_RING_TYPE_RX: {
-		struct sge_rxq *rxq;
+		struct sge_rxq *rxq =
+		    &pi->adapter->sge.rxq[pi->first_rxq + ring_index];
+		mac_intr_t *mintr = &infop->mri_intr;
 
-		rxq = &pi->adapter->sge.rxq[pi->first_rxq + ring_index];
+		ASSERT3S(ring_index, <, pi->nrxq);
+
 		rxq->ring_handle = rh;
 
 		infop->mri_driver = (mac_ring_driver_t)rxq;
@@ -1021,7 +1013,6 @@ t4_fill_ring(void *arg, mac_ring_type_t rtype, const int group_index,
 		infop->mri_poll = t4_poll_ring;
 		infop->mri_stat = t4_rx_stat;
 
-		mintr = &infop->mri_intr;
 		mintr->mi_handle = (mac_intr_handle_t)rxq;
 		mintr->mi_enable = t4_ring_intr_enable;
 		mintr->mi_disable = t4_ring_intr_disable;
@@ -1031,7 +1022,11 @@ t4_fill_ring(void *arg, mac_ring_type_t rtype, const int group_index,
 	case MAC_RING_TYPE_TX: {
 		struct sge_txq *txq =
 		    &pi->adapter->sge.txq[pi->first_txq + ring_index];
+
+		ASSERT3S(ring_index, <, pi->ntxq);
+
 		txq->ring_handle = rh;
+
 		infop->mri_driver = (mac_ring_driver_t)txq;
 		infop->mri_start = NULL;
 		infop->mri_stop = NULL;
@@ -1040,19 +1035,9 @@ t4_fill_ring(void *arg, mac_ring_type_t rtype, const int group_index,
 		break;
 	}
 	default:
-		ASSERT(0);
+		panic("unexpected ring type: %d", rtype);
 		break;
 	}
-}
-
-mblk_t *
-t4_mc_tx(void *arg, mblk_t *m)
-{
-	struct port_info *pi = arg;
-	struct adapter *sc = pi->adapter;
-	struct sge_txq *txq = &sc->sge.txq[pi->first_txq];
-
-	return (t4_eth_tx(txq, m));
 }
 
 static int
@@ -1181,10 +1166,6 @@ t4_mc_getcapab(void *arg, mac_capab_t cap, void *data)
 	case MAC_CAPAB_RINGS: {
 		mac_capab_rings_t *cap_rings = data;
 
-		if (!pi->adapter->props.multi_rings) {
-			status = B_FALSE;
-			break;
-		}
 		switch (cap_rings->mr_type) {
 		case MAC_RING_TYPE_RX:
 			cap_rings->mr_group_type = MAC_GROUP_TYPE_STATIC;
@@ -1832,8 +1813,8 @@ t4_propinfo_priv(struct port_info *pi, const char *name,
     mac_prop_info_handle_t ph)
 {
 	struct adapter *sc = pi->adapter;
-	struct driver_properties *dp = &sc->props;
-	struct link_config *lc = &pi->link_cfg;
+	const struct driver_properties *dp = &sc->props;
+	const struct link_config *lc = &pi->link_cfg;
 
 	const t4_priv_prop_t *prop = t4_priv_prop_match(name);
 	if (prop == NULL || !t4_priv_prop_supported(pi, prop)) {
@@ -1843,18 +1824,16 @@ t4_propinfo_priv(struct port_info *pi, const char *name,
 	int v = 0;
 	switch (prop->tpp_id) {
 	case T4PROP_FW_TMR:
-		v = t4_convert_holdoff_timer(sc, sc->props.fwq_tmr_idx);
+		v = t4_convert_holdoff_timer(sc, dp->fwq_tmr_idx);
 		break;
 	case T4PROP_FW_PKTC:
-		v = t4_convert_holdoff_pktcnt(sc, sc->props.fwq_pktc_idx);
+		v = t4_convert_holdoff_pktcnt(sc, dp->fwq_pktc_idx);
 		break;
 	case T4PROP_RX_TMR:
-		v = t4_convert_holdoff_timer(sc, t4_port_is_10xg(pi) ?
-		    dp->tmr_idx_10g : dp->tmr_idx_1g);
+		v = t4_convert_holdoff_timer(sc, dp->ethq_tmr_idx);
 		break;
 	case T4PROP_RX_PKTC:
-		v = t4_convert_holdoff_pktcnt(sc, t4_port_is_10xg(pi) ?
-		    dp->pktc_idx_10g : dp->pktc_idx_1g);
+		v = t4_convert_holdoff_pktcnt(sc, dp->ethq_pktc_idx);
 		break;
 	case T4PROP_TX_TMR:
 		v = t4_convert_dbq_timer(sc, dp->dbq_timer_idx);
@@ -2170,15 +2149,6 @@ t4_setprop_priv(struct port_info *pi, const char *name, const void *val)
 }
 
 void
-t4_mc_cb_init(struct port_info *pi)
-{
-	if (pi->adapter->props.multi_rings)
-		pi->mc = &t4_m_ring_callbacks;
-	else
-		pi->mc = &t4_m_callbacks;
-}
-
-void
 t4_os_link_changed(struct adapter *sc, int idx, int link_stat)
 {
 	struct port_info *pi = sc->port[idx];
@@ -2196,8 +2166,5 @@ t4_mac_rx(struct port_info *pi, struct sge_rxq *rxq, mblk_t *m)
 void
 t4_mac_tx_update(struct port_info *pi, struct sge_txq *txq)
 {
-	if (pi->adapter->props.multi_rings)
-		mac_tx_ring_update(pi->mh, txq->ring_handle);
-	else
-		mac_tx_update(pi->mh);
+	mac_tx_ring_update(pi->mh, txq->ring_handle);
 }

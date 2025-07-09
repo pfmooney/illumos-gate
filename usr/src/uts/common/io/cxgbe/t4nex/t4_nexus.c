@@ -1783,8 +1783,8 @@ t4_setup_intrs(struct adapter *sc)
 		ASSERT3U(intr_count, ==, 2);
 		(void) ddi_intr_add_handler(sc->intr_handle[0], t4_intr_err, sc,
 		    NULL);
-		(void) ddi_intr_add_handler(sc->intr_handle[1],
-		    t4_intr_all_queues, sc, NULL);
+		(void) ddi_intr_add_handler(sc->intr_handle[1], t4_intr_fwq, sc,
+		    NULL);
 		break;
 	case TIP_ERR_FWQ_QUEUES:
 		ASSERT3U(intr_count, ==, 3);
@@ -1792,8 +1792,6 @@ t4_setup_intrs(struct adapter *sc)
 		    NULL);
 		(void) ddi_intr_add_handler(sc->intr_handle[1], t4_intr_fwq, sc,
 		    NULL);
-		(void) ddi_intr_add_handler(sc->intr_handle[1], t4_intr_queues,
-		    sc, NULL);
 		break;
 	case TIP_PER_PORT:
 		(void) ddi_intr_add_handler(sc->intr_handle[0], t4_intr_err, sc,
@@ -2223,12 +2221,6 @@ t4_port_queues_enable(struct port_info *pi)
 {
 	ASSERT(pi->flags & TPF_INIT_DONE);
 
-	/*
-	 * TODO: whatever was queued up after we set iq->state to IQS_DISABLED
-	 * back in t4_port_queues_disable will be processed now, after an
-	 * unbounded delay.  This can't be good.
-	 */
-
 	int i;
 	struct adapter *sc = pi->adapter;
 	struct sge_rxq *rxq;
@@ -2237,10 +2229,9 @@ t4_port_queues_enable(struct port_info *pi)
 	for_each_rxq(pi, i, rxq) {
 		struct sge_iq *iq = &rxq->iq;
 
-		if (atomic_cas_uint(&iq->state, IQS_DISABLED, IQS_IDLE) !=
-		    IQS_DISABLED)
-			panic("%s: iq %p wasn't disabled", __func__,
-			    (void *) iq);
+		IQ_LOCK(iq);
+		VERIFY0(iq->flags & IQ_ENABLED);
+		iq->flags |= IQ_ENABLED;
 
 		/*
 		 * Freelists which were marked "doomed" by a previous
@@ -2249,7 +2240,7 @@ t4_port_queues_enable(struct port_info *pi)
 		rxq->fl.flags &= ~FL_DOOMED;
 
 		t4_iq_gts_update(iq, iq->intr_params, 0);
-
+		IQ_UNLOCK(iq);
 	}
 	mutex_exit(&sc->sfl_lock);
 }
@@ -2268,9 +2259,11 @@ t4_port_queues_disable(struct port_info *pi)
 	 */
 
 	for_each_rxq(pi, i, rxq) {
-		while (atomic_cas_uint(&rxq->iq.state, IQS_IDLE,
-		    IQS_DISABLED) != IQS_IDLE)
-			msleep(1);
+		struct sge_iq *iq = &rxq->iq;
+
+		IQ_LOCK(iq);
+		iq->flags &= ~IQ_ENABLED;
+		IQ_UNLOCK(iq);
 	}
 
 	mutex_enter(&sc->sfl_lock);

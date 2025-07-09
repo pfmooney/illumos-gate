@@ -886,11 +886,11 @@ t4_ring_intr_enable(mac_intr_handle_t intrh)
 	struct sge_rxq *rxq = (struct sge_rxq *)intrh;
 	struct sge_iq *iq = &rxq->iq;
 
-	RXQ_LOCK(rxq);
-	iq->polling = 0;
-	iq->state = IQS_IDLE;
+	IQ_LOCK(iq);
+	iq->flags &= ~IQ_POLLING;
 	t4_iq_gts_update(iq, iq->intr_params, 0);
-	RXQ_UNLOCK(rxq);
+	IQ_UNLOCK(iq);
+
 	return (0);
 }
 
@@ -901,18 +901,16 @@ int
 t4_ring_intr_disable(mac_intr_handle_t intrh)
 {
 	struct sge_rxq *rxq = (struct sge_rxq *)intrh;
-	struct sge_iq *iq;
+	struct sge_iq *iq = &rxq->iq;
 
 	/*
 	 * Nothing to be done here WRT the interrupt, as it will not fire until
 	 * re-enabled through the t4_iq_gts_update() in t4_ring_intr_enable().
 	 */
 
-	iq = &rxq->iq;
-	RXQ_LOCK(rxq);
-	iq->polling = 1;
-	iq->state = IQS_BUSY;
-	RXQ_UNLOCK(rxq);
+	IQ_LOCK(iq);
+	iq->flags |= IQ_POLLING;
+	IQ_UNLOCK(iq);
 
 	return (0);
 }
@@ -921,17 +919,17 @@ mblk_t *
 t4_poll_ring(void *arg, int n_bytes)
 {
 	struct sge_rxq *rxq = (struct sge_rxq *)arg;
-	mblk_t *mp = NULL;
 
 	ASSERT(n_bytes >= 0);
 	if (n_bytes == 0)
 		return (NULL);
 
-	RXQ_LOCK(rxq);
-	mp = t4_ring_rx(rxq, n_bytes);
-	RXQ_UNLOCK(rxq);
-
-	return (mp);
+	struct t4_poll_req req = {
+		.tpr_byte_budget = n_bytes,
+		.tpr_mp = NULL,
+	};
+	(void) t4_service_iq(&rxq->iq, 0, &req);
+	return (req.tpr_mp);
 }
 
 /*
@@ -2154,13 +2152,6 @@ t4_os_link_changed(struct adapter *sc, int idx, int link_stat)
 	struct port_info *pi = sc->port[idx];
 
 	mac_link_update(pi->mh, link_stat ? LINK_STATE_UP : LINK_STATE_DOWN);
-}
-
-/* ARGSUSED */
-void
-t4_mac_rx(struct port_info *pi, struct sge_rxq *rxq, mblk_t *m)
-{
-	mac_rx(pi->mh, NULL, m);
 }
 
 void

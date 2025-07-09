@@ -150,13 +150,11 @@ typedef enum t4_iq_flags {
 	IQ_ALLOC_HOST	= (1 << 0),	/* host-side resources allocated */
 	IQ_ALLOC_DEV	= (1 << 1),	/* device-side resource allocated */
 	IQ_INTR		= (1 << 2),	/* iq takes direct interrupt */
-} t4_iq_flags_t;
 
-typedef enum t4_iq_state {
-	IQS_DISABLED	= 0,
-	IQS_BUSY	= 1,
-	IQS_IDLE	= 2,
-} t4_iq_state_t;
+	/* Runtime state flags: */
+	IQ_ENABLED	= (1 << 3),
+	IQ_POLLING	= (1 << 4),
+} t4_iq_flags_t;
 
 struct rxbuf_cache_params {
 	dev_info_t		*dip;
@@ -191,12 +189,17 @@ typedef enum t4_intr_config {
  * Ingress Queue: T4 is producer, driver is consumer.
  */
 struct sge_iq {
-	t4_iq_state_t state;
+	kmutex_t lock;
 	t4_iq_flags_t flags;
+
 	t4_intr_config_t intr_params;
 	uint_t intr_idx;	/* Assigned interrupt index */
+	struct sge_iq *intr_evtq;
+	/*
+	 * TODO: add expectations about node ownership
+	 */
+	list_node_t intr_fwd_node;
 
-	kmutex_t lock;
 	ddi_dma_handle_t dhdl;
 	ddi_acc_handle_t ahdl;
 
@@ -220,10 +223,14 @@ struct sge_iq {
 
 	struct sge_iq_stats stats;
 
-	/*
-	 * TODO: add expectations about node ownership
-	 */
-	list_node_t node_intr_fwd;
+};
+
+/*
+ * Details used when servicing an IQ as part of polling.
+ */
+struct t4_poll_req {
+	mblk_t	*tpr_mp;
+	uint_t	tpr_byte_budget;
 };
 
 typedef enum t4_eq_flags {
@@ -310,6 +317,7 @@ struct sge_fl {
 	struct sge_eq eq;
 
 	t4_fl_flags_t flags;
+	struct sge_iq *iq;	/* IQ which this FL is associated with */
 
 	struct fl_sdesc *sdesc;	/* KVA of software descriptor ring */
 	uint32_t needed;	/* # of buffers needed to fill up fl. */
@@ -409,7 +417,7 @@ struct sge {
 	int neq;	/* total egress queues */
 	int stat_len;	/* length of status page at ring end */
 	int pktshift;	/* padding between CPL & packet data */
-	int fl_align;	/* response queue message alignment */
+	uint_t fl_align;	/* response queue message alignment */
 	uint8_t fwq_tmr_idx;	/* Intr. coalesce timer for FWQ */
 	int8_t fwq_pktc_idx;	/* Intr. coalesce count for FWQ */
 
@@ -717,7 +725,6 @@ int t4_setup_port_queues(struct port_info *pi);
 int t4_teardown_port_queues(struct port_info *pi);
 uint_t t4_intr_all(caddr_t, caddr_t);
 uint_t t4_intr_err(caddr_t, caddr_t);
-uint_t t4_intr_all_queues(caddr_t, caddr_t);
 uint_t t4_intr_fwq(caddr_t, caddr_t);
 uint_t t4_intr_queues(caddr_t, caddr_t);
 uint_t t4_intr_port_queues(caddr_t, caddr_t);
@@ -727,11 +734,10 @@ void t4_eq_update_dbq_timer(struct sge_eq *, struct port_info *);
 int t4_mgmt_tx(struct adapter *sc, mblk_t *m);
 
 mblk_t *t4_eth_tx(void *, mblk_t *);
-mblk_t *t4_ring_rx(struct sge_rxq *rxq, int poll_bytes);
+int t4_service_iq(struct sge_iq *, uint_t, struct t4_poll_req *);
 
 /* t4_mac.c */
 void t4_os_link_changed(struct adapter *sc, int idx, int link_stat);
-void t4_mac_rx(struct port_info *pi, struct sge_rxq *rxq, mblk_t *m);
 void t4_mac_tx_update(struct port_info *pi, struct sge_txq *txq);
 int t4_addmac(void *arg, const uint8_t *ucaddr);
 const char **t4_get_priv_props(struct port_info *, size_t *);

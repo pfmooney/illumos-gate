@@ -51,7 +51,8 @@ struct sge_iq;
 
 #define	EQ_ESIZE	64	/* All egress queues use this entry size */
 
-#define	RX_FL_ESIZE	64	/* 8 64bit addresses */
+#define	RX_FL_ESIZE	64	/* 8 x 64bit addresses */
+#define	FL_BUF_PER_BLOCK	8
 
 #define	FL_BUF_SIZES	4
 

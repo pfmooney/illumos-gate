@@ -134,7 +134,7 @@ static inline void copy_to_txd(struct sge_eq *eq, caddr_t from, caddr_t *to,
     int len);
 static void t4_tx_ring_db(struct sge_txq *);
 static uint_t t4_tx_reclaim_descs(struct sge_txq *, uint_t);
-static inline void ring_fl_db(struct adapter *sc, struct sge_fl *fl);
+static void t4_fl_ring_db(struct sge_fl *fl);
 static kstat_t *setup_port_config_kstats(struct port_info *pi);
 static kstat_t *setup_port_info_kstats(struct port_info *pi);
 static kstat_t *setup_rxq_kstats(struct port_info *pi, struct sge_rxq *rxq,
@@ -1067,8 +1067,6 @@ t4_alloc_iq(struct port_info *pi, const struct t4_iq_params *tip,
 		}
 
 		/* Allocate space for one software descriptor per buffer. */
-		/* XXX: check math for eq->cap */
-		/* eq->cap = (eq->qsize - sc->sge.stat_len / RX_FL_ESIZE) * 8;*/
 		fl->needed = eq->cap;
 		fl->lowat = P2ROUNDUP(sc->sge.fl_starve_threshold, 8);
 
@@ -1329,8 +1327,20 @@ t4_alloc_eq_base(struct port_info *pi, struct sge_eq *eq, t4_eq_type_t eqtype)
 	}
 	eq->flags |= EQ_ALLOC_HOST;
 
-	/* TODO: fl->cap = (fl->qsize - sc->sge.stat_len / esize) * 8; */
 	eq->cap = eq->qsize - (sc->sge.stat_len / esize);
+	if (eqtype == TET_FREELIST) {
+		/*
+		 * While the entry size for freelists reflects what the adapter
+		 * is expecting: that freelist pointers are provided to it in
+		 * 64-byte (8 x 64-bit pointers) blocks, our handling of the
+		 * entries themselves are single pointers at a time.
+		 *
+		 * As such, the capacity reflects the count of 64-bit pointer
+		 * entries.  The logic for ringing the freelist doorbell takes
+		 * this into account.
+		 */
+		eq->cap *= FL_BUF_PER_BLOCK;
+	}
 	eq->avail = eq->cap - 1;	/* one less to avoid cidx = pidx */
 	eq->pidx = eq->cidx = 0;
 	eq->spg = t4_eq_txd(eq, eq->cap);
@@ -1800,7 +1810,7 @@ recycled:
 	}
 
 	if (eq->pending >= 8)
-		ring_fl_db(sc, fl);
+		t4_fl_ring_db(fl);
 
 	return (FL_RUNNING_LOW(fl) && !(fl->flags & FL_STARVING));
 }
@@ -2854,10 +2864,7 @@ t4_tx_ring_db(struct sge_txq *txq)
 
 	membar_producer();
 
-	if (t4_cver_eq(sc, CHELSIO_T4))
-		val = V_PIDX(eq->pending);
-	else
-		val = V_PIDX_T5(eq->pending);
+	val = V_PIDX(eq->pending);
 
 	db_mode = (1 << (ffs(db) - 1));
 	switch (db_mode) {
@@ -3029,64 +3036,49 @@ t4_handle_fw_msg(struct sge_iq *iq, const struct rss_header *rss)
 	}
 }
 
-#define	FL_HW_IDX(idx)	((idx) >> 3)
+/* Freelist entries are delivered in blocks of 8 to the device */
+#define	FL_DESC_BLOCK(idx)	((idx) / FL_BUF_PER_BLOCK)
 
-static inline void
-ring_fl_db(struct adapter *sc, struct sge_fl *fl)
+static void
+t4_fl_ring_db(struct sge_fl *fl)
 {
+	struct adapter *sc = fl->iq->adapter;
 	struct sge_eq *eq = &fl->eq;
-	int desc_start, desc_last, ndesc;
-	uint32_t v = sc->params.arch.sge_fl_db;
 
-	ndesc = FL_HW_IDX(eq->pending);
-
+	uint_t ndesc = FL_DESC_BLOCK(eq->pending);
 	/* Hold back one credit if pidx = cidx */
-	if (FL_HW_IDX(eq->pidx) == FL_HW_IDX(eq->cidx))
+	if (FL_DESC_BLOCK(eq->pidx) == FL_DESC_BLOCK(eq->cidx)) {
+		if (ndesc <= 1) {
+			return;
+		}
 		ndesc--;
-
-	/*
-	 * There are chances of ndesc modified above (to avoid pidx = cidx).
-	 * If there is nothing to post, return.
-	 */
-	if (ndesc <= 0)
-		return;
-
-	desc_last = FL_HW_IDX(eq->pidx);
+	}
 
 	if (eq->pidx < eq->pending) {
-		/* There was a wrap */
-		desc_start = FL_HW_IDX(eq->pidx + eq->cap - eq->pending);
+		/* Wrap-around means two intervals to be synced */
+		const uint_t desc_start =
+		    FL_DESC_BLOCK(eq->pidx + eq->cap - eq->pending);
+		const uint_t desc_last = FL_DESC_BLOCK(eq->pidx);
 
-		/* From desc_start to the end of list */
 		(void) ddi_dma_sync(eq->desc_dhdl, desc_start * RX_FL_ESIZE, 0,
 		    DDI_DMA_SYNC_FORDEV);
 
-		/* From start of list to the desc_last */
-		if (desc_last != 0)
+		if (desc_last != 0) {
 			(void) ddi_dma_sync(eq->desc_dhdl, 0, desc_last *
 			    RX_FL_ESIZE, DDI_DMA_SYNC_FORDEV);
+		}
 	} else {
-		/* There was no wrap, sync from start_desc to last_desc */
-		desc_start = FL_HW_IDX(eq->pidx - eq->pending);
+		const uint_t desc_start = FL_DESC_BLOCK(eq->pidx - eq->pending);
 		(void) ddi_dma_sync(eq->desc_dhdl, desc_start * RX_FL_ESIZE,
 		    ndesc * RX_FL_ESIZE, DDI_DMA_SYNC_FORDEV);
 	}
 
-	if (t4_cver_eq(sc, CHELSIO_T4))
-		v |= V_PIDX(ndesc);
-	else
-		v |= V_PIDX_T5(ndesc);
-	v |= V_QID(eq->cntxt_id) | V_PIDX(ndesc);
-
 	membar_producer();
 
-	t4_write_reg(sc, MYPF_REG(A_SGE_PF_KDOORBELL), v);
+	t4_write_reg(sc, MYPF_REG(A_SGE_PF_KDOORBELL),
+	    sc->params.arch.sge_fl_db | V_QID(eq->cntxt_id) | V_PIDX(ndesc));
 
-	/*
-	 * Update pending count:
-	 * Deduct the number of descriptors posted
-	 */
-	eq->pending -= ndesc * 8;
+	eq->pending -= ndesc * FL_BUF_PER_BLOCK;
 }
 
 static void

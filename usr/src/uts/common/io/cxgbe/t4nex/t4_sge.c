@@ -84,6 +84,17 @@ struct rxbuf {
 	volatile uint_t ref_cnt;
 };
 
+struct t4_iq_params {
+	uint8_t		tip_tmr_idx;
+	int8_t		tip_pktc_idx;
+	uint_t		tip_qsize;
+	uint8_t		tip_esize;
+	uint_t		tip_fl_qsize;
+	int		tip_cong_chan;
+	struct sge_iq	*tip_intr_evtq;
+	uint_t		tip_intr_idx;
+};
+
 static int t4_alloc_eq_base(struct port_info *, struct sge_eq *, t4_eq_type_t);
 static void t4_free_iq(struct port_info *, struct sge_iq *);
 static int t4_alloc_rxq(struct port_info *, struct sge_rxq *, int);
@@ -336,38 +347,27 @@ t4_sge_init(struct adapter *sc)
 	    V_TIMERVALUE5(us_to_core_ticks(sc, p->holdoff_timer_us[5])));
 }
 
-/*
- * Given an arbitrary "index," come up with an iq that can be used by other
- * queues (of this port) for interrupt forwarding, SGE egress updates, etc.
- * The iq returned is guaranteed to be something that takes direct interrupts.
- */
-// static struct sge_iq *
-// port_intr_iq(struct port_info *pi, int idx)
-// {
-// 	struct adapter *sc = pi->adapter;
-// 	struct sge *s = &sc->sge;
-// 	struct sge_iq *iq = NULL;
-// 
-// 	if (sc->intr_count == 1)
-// 		return (&sc->sge.fwq);
-// 
-// 	/*
-// 	 * Not compiled with offload support and intr_count > 1.  Only NIC
-// 	 * queues exist and they'd better be taking direct interrupts.
-// 	 */
-// 	ASSERT(!(sc->flags & TAF_INTR_FWD));
-// 
-// 	idx %= pi->nrxq;
-// 	iq = &s->rxq[pi->first_rxq + idx].iq;
-// 
-// 	return (iq);
-// }
-
-static uint_t
-t4_rxq_intr_idx(struct port_info *pi, uint_t iq_idx)
+static void
+t4_rxq_intr_assign(struct port_info *pi, uint_t iq_idx,
+    struct t4_iq_params *iqp)
 {
-	/* TODO: assign proper index including forwarding */
-	return (0);
+	struct adapter *sc = pi->adapter;
+	const struct t4_intrs_queues *iqc = &sc->intr_queue_cfg;
+
+	switch (iqc->intr_plan) {
+	case TIP_SINGLE:
+	case TIP_ERR_QUEUES:
+	case TIP_ERR_FWQ_QUEUES:
+		/* Forward all RXQ interrupts to FWQ */
+		iqp->tip_intr_evtq = &sc->sge.fwq;
+		iqp->tip_intr_idx = 0;
+		break;
+	default:
+		/* TODO: handle more cases */
+		iqp->tip_intr_evtq = &sc->sge.fwq;
+		iqp->tip_intr_idx = 0;
+		break;
+	}
 }
 
 int
@@ -956,17 +956,6 @@ doorbell:
 	return (frame);
 }
 
-struct t4_iq_params {
-	uint8_t		tip_tmr_idx;
-	int8_t		tip_pktc_idx;
-	uint_t		tip_qsize;
-	uint8_t		tip_esize;
-	uint_t		tip_fl_qsize;
-	int		tip_cong_chan;
-	struct sge_iq	*tip_intr_evtq;
-	uint_t		tip_intr_idx;
-};
-
 static int
 t4_alloc_iq(struct port_info *pi, const struct t4_iq_params *tip,
     struct sge_iq *iq, struct sge_fl *fl)
@@ -1210,6 +1199,9 @@ t4_free_iq(struct port_info *pi, struct sge_iq *iq)
 	iq->flags &= ~IQ_INTR;
 	ASSERT0(iq->flags);
 
+	iq->intr_idx = 0;
+	iq->intr_evtq = NULL;
+
 	if (fl != NULL) {
 		if (eq->flags & EQ_ALLOC_DESC) {
 			FL_LOCK(fl);
@@ -1273,9 +1265,9 @@ t4_alloc_rxq(struct port_info *pi, struct sge_rxq *rxq, int i)
 		.tip_pktc_idx	= pi->pktc_idx,
 		.tip_qsize	= sc->props.qsize_rxq,
 		.tip_esize	= RX_IQ_ESIZE,
-		.tip_intr_idx	= t4_rxq_intr_idx(pi, i),
 		.tip_cong_chan	= t4_get_tp_ch_map(sc, pi->tx_chan),
 	};
+	t4_rxq_intr_assign(pi, i, &iqp);
 	const int rc = t4_alloc_iq(pi, &iqp, &rxq->iq, &rxq->fl);
 	if (rc != 0) {
 		return (rc);

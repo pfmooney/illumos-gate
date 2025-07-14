@@ -1625,6 +1625,8 @@ t4_init_driver_props(struct adapter *sc)
 	p->dbq_timer_idx = 0;
 }
 
+static uint_t t4_intr_count_clamp = 1;
+
 static int
 t4_cfg_intrs_queues(struct adapter *sc)
 {
@@ -1673,6 +1675,11 @@ t4_cfg_intrs_queues(struct adapter *sc)
 	}
 	iaq->intr_type = itype;
 	iaq->intr_avail = intr_avail;
+
+	/* TODO: clean up? */
+	if (t4_intr_count_clamp != 0) {
+		iaq->intr_count = MIN(iaq->intr_count, t4_intr_count_clamp);
+	}
 
 	for (uint_t i = 0; i < sc->params.nports; i++) {
 		if (t4_port_is_10xg(sc->port[i])) {

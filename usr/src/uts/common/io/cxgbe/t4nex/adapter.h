@@ -90,10 +90,10 @@ struct port_info {
 	uint8_t		hw_addr[ETHERADDRL];
 	int16_t 	xact_addr_filt; /* index of exact MAC address filter */
 
-	uint16_t	ntxq;		/* # of tx queues */
-	uint16_t	first_txq;	/* index of first tx queue */
-	uint16_t	nrxq;		/* # of rx queues */
-	uint16_t	first_rxq;	/* index of first rx queue */
+	uint16_t	rxq_count;	/* # of rx queues */
+	uint16_t	rxq_start;	/* index of first rx queue */
+	uint16_t	txq_count;	/* # of tx queues */
+	uint16_t	txq_start;	/* index of first tx queue */
 
 	/* Port attributes/data set by common code: */
 	uint16_t	viid;
@@ -412,18 +412,17 @@ struct sge {
 	uint64_t dbq_timer_tick;
 	uint16_t dbq_timers[SGE_NDBQTIMERS];
 
-	int nrxq;	/* total rx queues (all ports and the rest) */
-	int ntxq;	/* total tx queues (all ports and the rest) */
-	int niq;	/* total ingress queues */
-	int neq;	/* total egress queues */
-	int stat_len;	/* length of status page at ring end */
-	int pktshift;	/* padding between CPL & packet data */
+	uint_t stat_len;	/* length of status page at ring end */
+	uint_t pktshift;	/* padding between CPL & packet data */
 	uint_t fl_align;	/* response queue message alignment */
 	uint8_t fwq_tmr_idx;	/* Intr. coalesce timer for FWQ */
 	int8_t fwq_pktc_idx;	/* Intr. coalesce count for FWQ */
 
 	struct sge_iq fwq;	/* Firmware event queue */
 	struct sge_iq dev_intrq; /* device-wide interrupt event queue */
+
+	uint_t rxq_count;	/* total rx queues (all ports and the rest) */
+	uint_t txq_count;	/* total tx queues (all ports and the rest) */
 	struct sge_txq *txq;	/* NIC tx queues */
 	struct sge_rxq *rxq;	/* NIC rx queues */
 
@@ -472,12 +471,11 @@ typedef enum t4_adapter_flags {
 	/* Initialization progress status bits */
 	TAF_INIT_DONE	= (1 << 0),
 	TAF_FW_OK	= (1 << 1),
-	TAF_INTR_FWD	= (1 << 2),
-	TAF_INTR_ALLOC	= (1 << 3),
+	TAF_INTR_ALLOC	= (1 << 2),
 
 	/* State & capability bits */
-	TAF_MASTER_PF	= (1 << 4),
-	TAF_DBQ_TIMER	= (1 << 5),
+	TAF_MASTER_PF	= (1 << 8),
+	TAF_DBQ_TIMER	= (1 << 9),
 } t4_adapter_flags_t;
 
 /* Plan for interrupt allocation */
@@ -494,22 +492,14 @@ typedef enum t4_intr_plan {
 
 struct t4_intrs_queues {
 	int intr_type;		/* DDI_INTR_TYPE_* */
-	uint_t intr_avail;	/* Interrupts available to alloc */
 	t4_intr_plan_t intr_plan; /* Plan for interrupt allocation */
 	uint_t intr_count;	/* Number of interrupts to allocate */
 	uint_t intr_per_port;	/* Per-port interrupts allocated */
-	bool intr_fwd;		/* Interrupts forwarded */
 
-	uint_t port_1g;		/* 1Gb ports */
-	uint_t port_xg;		/* 10+Gb ports */
+	uint_t shared_iqs;	/* How many IQs are allocated for shared use */
 
 	uint_t port_max_rxq;	/* Max RX queues per port */
 	uint_t port_max_txq;	/* Max TX queues per port */
-
-	int ntxq10g;		/* # of NIC txq's for each 10G port */
-	int nrxq10g;		/* # of NIC rxq's for each 10G port */
-	int ntxq1g;		/* # of NIC txq's for each 1G port */
-	int nrxq1g;		/* # of NIC rxq's for each 1G port */
 };
 
 struct adapter {
@@ -624,11 +614,11 @@ struct memwin {
 #define	TXQ_LOCK_ASSERT_NOTOWNED(txq)	EQ_LOCK_ASSERT_NOTOWNED(&(txq)->eq)
 
 #define	for_each_txq(pi, iter, txq) \
-	txq = &pi->adapter->sge.txq[pi->first_txq]; \
-	for (iter = 0; iter < pi->ntxq; ++iter, ++txq)
+	txq = &pi->adapter->sge.txq[pi->txq_start]; \
+	for (iter = 0; iter < pi->txq_count; ++iter, ++txq)
 #define	for_each_rxq(pi, iter, rxq) \
-	rxq = &pi->adapter->sge.rxq[pi->first_rxq]; \
-	for (iter = 0; iter < pi->nrxq; ++iter, ++rxq)
+	rxq = &pi->adapter->sge.rxq[pi->rxq_start]; \
+	for (iter = 0; iter < pi->rxq_count; ++iter, ++rxq)
 
 #define	NFIQ(sc) ((sc)->intr_count > 1 ? (sc)->intr_count - 1 : 1)
 

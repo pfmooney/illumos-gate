@@ -51,6 +51,17 @@
 #include "common/t4_regs.h"
 #include "common/t4_extra_regs.h"
 
+typedef enum t4_port_speed {
+	TPS_1G,
+	TPS_10G,
+	TPS_25G,
+	TPS_40G,
+	TPS_50G,
+	TPS_100G,
+	TPS_200G,
+	TPS_400G,
+} t4_port_speed_t;
+
 static void *t4_soft_state;
 
 static kmutex_t t4_adapter_list_lock;
@@ -77,6 +88,7 @@ static kstat_t *setup_kstats(struct adapter *sc);
 static kstat_t *setup_wc_kstats(struct adapter *);
 static int update_wc_kstats(kstat_t *, int);
 static int t4_port_full_uninit(struct port_info *);
+static t4_port_speed_t t4_port_speed(const struct port_info *);
 
 static int t4_temperature_read(void *, sensor_ioctl_scalar_t *);
 static int t4_voltage_read(void *, sensor_ioctl_scalar_t *);
@@ -100,6 +112,7 @@ static ddi_ufm_ops_t t4_ufm_ops = {
 	.ddi_ufm_op_fill_slot = t4_ufm_fill_slot,
 	.ddi_ufm_op_getcaps = t4_ufm_getcaps
 };
+
 
 /* ARGSUSED */
 static int
@@ -156,10 +169,7 @@ static int t4_devo_detach(dev_info_t *, ddi_detach_cmd_t);
 static int
 t4_devo_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 {
-	struct adapter *sc = NULL;
-	struct sge *s;
-	int i, instance, rc = DDI_SUCCESS, rqidx, tqidx;
-	int nxg = 0, n1g = 0;
+	int i, rc = DDI_SUCCESS;
 	char name[16];
 	ddi_device_acc_attr_t da = {
 		.devacc_attr_version = DDI_DEVICE_ATTR_V0,
@@ -178,7 +188,7 @@ t4_devo_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	/*
 	 * Allocate space for soft state.
 	 */
-	instance = ddi_get_instance(dip);
+	const int instance = ddi_get_instance(dip);
 	rc = ddi_soft_state_zalloc(t4_soft_state, instance);
 	if (rc != DDI_SUCCESS) {
 		cxgb_printf(dip, CE_WARN,
@@ -186,7 +196,7 @@ t4_devo_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		return (DDI_FAILURE);
 	}
 
-	sc = ddi_get_soft_state(t4_soft_state, instance);
+	struct adapter *sc = ddi_get_soft_state(t4_soft_state, instance);
 	sc->dip = dip;
 	sc->dev = makedevice(ddi_driver_major(dip), instance);
 	mutex_init(&sc->lock, NULL, MUTEX_DRIVER, NULL);
@@ -398,50 +408,28 @@ t4_devo_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	if ((rc = t4_cfg_intrs_queues(sc)) != 0) {
 		goto done; /* error message displayed already */
 	}
-	const struct t4_intrs_queues *iaq = &sc->intr_queue_cfg;
 
-	s = &sc->sge;
-	s->nrxq = nxg * iaq->nrxq10g + n1g * iaq->nrxq1g;
-	s->ntxq = nxg * iaq->ntxq10g + n1g * iaq->ntxq1g;
-	s->neq = s->ntxq + s->nrxq;	/* the fl in an rxq is an eq */
-	s->niq = s->nrxq + 1;		/* 1 extra for firmware event queue */
-	if (iaq->intr_fwd != 0)
-		sc->flags |= TAF_INTR_FWD;
-	s->rxq = kmem_zalloc(s->nrxq * sizeof (struct sge_rxq), KM_SLEEP);
-	s->txq = kmem_zalloc(s->ntxq * sizeof (struct sge_txq), KM_SLEEP);
-	s->iqmap =
-	    kmem_zalloc(s->iqmap_sz * sizeof (struct sge_iq *), KM_SLEEP);
-	s->eqmap =
-	    kmem_zalloc(s->eqmap_sz * sizeof (struct sge_eq *), KM_SLEEP);
+	const struct t4_intrs_queues *iaq = &sc->intr_queue_cfg;
+	struct sge *sge = &sc->sge;
+	sge->rxq =
+	    kmem_zalloc(sge->rxq_count * sizeof (struct sge_rxq), KM_SLEEP);
+	sge->txq =
+	    kmem_zalloc(sge->txq_count * sizeof (struct sge_txq), KM_SLEEP);
+	sge->iqmap =
+	    kmem_zalloc(sge->iqmap_sz * sizeof (struct sge_iq *), KM_SLEEP);
+	sge->eqmap =
+	    kmem_zalloc(sge->eqmap_sz * sizeof (struct sge_eq *), KM_SLEEP);
 
 	sc->intr_handle =
 	    kmem_zalloc(iaq->intr_count * sizeof (ddi_intr_handle_t),
 	    KM_SLEEP);
 
 	/*
-	 * Second pass over the ports.  This time we know the number of rx and
-	 * tx queues that each port should get.
+	 * Enable hw checksumming and LSO for all ports by default.
+	 * They can be disabled using ndd (hw_csum and hw_lso).
 	 */
-	rqidx = tqidx = 0;
 	for_each_port(sc, i) {
-		struct port_info *pi = sc->port[i];
-
-		if (pi == NULL)
-			continue;
-
-		pi->first_rxq = rqidx;
-		pi->nrxq = (t4_port_is_10xg(pi)) ? iaq->nrxq10g : iaq->nrxq1g;
-		pi->first_txq = tqidx;
-		pi->ntxq = (t4_port_is_10xg(pi)) ? iaq->ntxq10g : iaq->ntxq1g;
-
-		rqidx += pi->nrxq;
-		tqidx += pi->ntxq;
-
-		/*
-		 * Enable hw checksumming and LSO for all ports by default.
-		 * They can be disabled using ndd (hw_csum and hw_lso).
-		 */
-		pi->features |= (CXGBE_HW_CSUM | CXGBE_HW_LSO);
+		sc->port[i]->features |= (CXGBE_HW_CSUM | CXGBE_HW_LSO);
 	}
 
 	/* Setup Interrupts. */
@@ -501,12 +489,6 @@ t4_devo_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	 * Hardware/Firmware/etc. Version/Revision IDs.
 	 */
 	t4_dump_version_info(sc);
-
-	cxgb_printf(dip, CE_NOTE, "(%d rxq, %d txq total) %d %s.",
-	    rqidx, tqidx, iaq->intr_count,
-	    iaq->intr_type == DDI_INTR_TYPE_MSIX ? "MSI-X interrupts" :
-	    iaq->intr_type == DDI_INTR_TYPE_MSI ? "MSI interrupts" :
-	    "fixed interrupt");
 
 	sc->ksp = setup_kstats(sc);
 	sc->ksp_stat = setup_wc_kstats(sc);
@@ -577,9 +559,9 @@ t4_devo_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 
 	s = &sc->sge;
 	if (s->rxq != NULL)
-		kmem_free(s->rxq, s->nrxq * sizeof (struct sge_rxq));
+		kmem_free(s->rxq, s->rxq_count * sizeof (struct sge_rxq));
 	if (s->txq != NULL)
-		kmem_free(s->txq, s->ntxq * sizeof (struct sge_txq));
+		kmem_free(s->txq, s->txq_count * sizeof (struct sge_txq));
 	if (s->iqmap != NULL)
 		kmem_free(s->iqmap, s->iqmap_sz * sizeof (struct sge_iq *));
 	if (s->eqmap != NULL)
@@ -1627,6 +1609,19 @@ t4_init_driver_props(struct adapter *sc)
 
 static uint_t t4_intr_count_clamp = 1;
 
+/* TODO: tune these empirically? */
+static const struct t4_queue_count {
+	t4_port_speed_t tqc_speed;
+	uint_t		tqc_rxq_count;
+	uint_t		tqc_txq_count;
+} t4_queue_counts[] = {
+	{ TPS_100G, 32, 32 },
+	{ TPS_50G, 24, 24 },
+	{ TPS_25G, 16, 16 },
+	{ TPS_10G, 8, 8 },
+	{ TPS_1G, 2, 2 },
+};
+
 static int
 t4_cfg_intrs_queues(struct adapter *sc)
 {
@@ -1655,49 +1650,47 @@ t4_cfg_intrs_queues(struct adapter *sc)
 		}
 		int avail;
 		rc = ddi_intr_get_navail(sc->dip, itype, &avail);
-		if (rc != DDI_SUCCESS) {
+		if (rc != DDI_SUCCESS || avail < 0) {
 			continue;
 		}
+		intr_avail = avail;
+
 		/*
 		 * The device error and FWQ interrupts are hard-coded to indexes
 		 * 0 and 1, respectively.  We require at least two interrupts be
 		 * available for MSI(-X) in order to cover both of those cases.
 		 */
-		if (avail >= 2 ||
-		    (avail == 1 && itype == DDI_INTR_TYPE_FIXED)) {
+		if (intr_avail >= 2 ||
+		    (intr_avail == 1 && itype == DDI_INTR_TYPE_FIXED)) {
 			break;
 		}
 	}
-	if (rc != DDI_SUCCESS || intr_avail <= 0) {
+	if (rc != DDI_SUCCESS || intr_avail == 0) {
 		cxgb_printf(sc->dip, CE_WARN,
 		    "failed to get any available interrupts: %d", rc);
 		return (rc);
 	}
 	iaq->intr_type = itype;
-	iaq->intr_avail = intr_avail;
 
 	/* TODO: clean up? */
 	if (t4_intr_count_clamp != 0) {
-		iaq->intr_count = MIN(iaq->intr_count, t4_intr_count_clamp);
+		intr_avail = MIN(intr_avail, t4_intr_count_clamp);
 	}
 
-	for (uint_t i = 0; i < sc->params.nports; i++) {
-		if (t4_port_is_10xg(sc->port[i])) {
-			iaq->port_xg++;
-		} else {
-			iaq->port_1g++;
-		}
-	}
-	const uint_t port_total = iaq->port_1g + iaq->port_xg;
+	const uint_t port_count = sc->params.nports;
 
 	iaq->intr_count = intr_avail;
+	iaq->intr_per_port = 0;
+	/* One shared IQ for the FWQ */
+	iaq->shared_iqs = 1;
+
 	if (intr_avail == 1) {
 		iaq->intr_plan = TIP_SINGLE;
 	} else if (intr_avail == 2) {
 		iaq->intr_plan = TIP_ERR_QUEUES;
 	} else if (intr_avail == 3) {
 		iaq->intr_plan = TIP_ERR_FWQ_QUEUES;
-	} else if ((port_total + 2) > intr_avail) {
+	} else if ((port_count + 2) > intr_avail) {
 		/*
 		 * Too many ports to do intr-per-port, so fall back to a single
 		 * interrupt for all those queues.
@@ -1706,8 +1699,8 @@ t4_cfg_intrs_queues(struct adapter *sc)
 		iaq->intr_count = 3;
 	} else {
 		iaq->intr_plan = TIP_PER_PORT;
-		const uint_t per_port = (intr_avail - 2) / port_total;
-		iaq->intr_count = 2 + (port_total * per_port);
+		const uint_t per_port = (intr_avail - 2) / port_count;
+		iaq->intr_count = 2 + (port_count * per_port);
 		iaq->intr_per_port = per_port;
 	}
 
@@ -1719,13 +1712,7 @@ t4_cfg_intrs_queues(struct adapter *sc)
 		return (DDI_FAILURE);
 	}
 
-	/*
-	 * Use one IQ for the FWQ.  Its events are posted directly to the queue,
-	 * rather than into freelist entries, so it does not require a
-	 * corresponding EQ.
-	 */
-	const uint_t port_iqs = pfres->niqflint - 1;
-
+	const uint_t port_iqs = pfres->niqflint - iaq->shared_iqs;
 	/*
 	 * Every RX queue needs an IQ capable of interrupts (for the receive
 	 * notifications) as well as an EQ (for posting the freelist entries to
@@ -1736,11 +1723,11 @@ t4_cfg_intrs_queues(struct adapter *sc)
 	/* Every TX queue needs an ethernet-capable EQ. */
 	const uint_t max_txq = MIN(pfres->nethctrl, pfres->neq / 2);
 
-	if ((max_rxq / port_total) == 0) {
+	if ((max_rxq / port_count) == 0) {
 		cxgb_printf(sc->dip, CE_WARN,
 		    "inadequate RX queue resources available");
 		return (DDI_FAILURE);
-	} else if ((max_txq / port_total) == 0) {
+	} else if ((max_txq / port_count) == 0) {
 		cxgb_printf(sc->dip, CE_WARN,
 		    "inadequate TX queue resources available");
 		return (DDI_FAILURE);
@@ -1757,6 +1744,42 @@ t4_cfg_intrs_queues(struct adapter *sc)
 		iaq->port_max_rxq = 1;
 		iaq->port_max_txq = 1;
 	}
+
+	VERIFY(iaq->intr_count != 0);
+	VERIFY(iaq->port_max_rxq != 0);
+	VERIFY(iaq->port_max_txq != 0);
+	VERIFY(iaq->shared_iqs != 0);
+
+	uint_t rxq_idx = 0, txq_idx = 0;
+	for (uint_t i = 0; i < port_count; i++) {
+		struct port_info *pi = sc->port[i];
+
+		pi->rxq_count = pi->txq_count = 1;
+		const t4_port_speed_t speed = t4_port_speed(pi);
+		for (uint_t j = 0; j < ARRAY_SIZE(t4_queue_counts); j++) {
+			if (speed >= t4_queue_counts[j].tqc_speed) {
+				pi->rxq_count =
+				    t4_queue_counts[j].tqc_rxq_count;
+				pi->txq_count =
+				    t4_queue_counts[j].tqc_txq_count;
+				break;
+			}
+		}
+		/* Clamp to per-port maximums */
+		pi->rxq_count = MIN(pi->rxq_count, iaq->port_max_rxq);
+		pi->txq_count = MIN(pi->rxq_count, iaq->port_max_txq);
+
+		pi->rxq_start = rxq_idx;
+		pi->txq_start = txq_idx;
+		rxq_idx += pi->rxq_count;
+		txq_idx += pi->txq_count;
+	}
+
+	cxgb_printf(sc->dip, CE_NOTE, "(%u rxq, %u txq total) %u %s.",
+	    rxq_idx, txq_idx, iaq->intr_count,
+	    iaq->intr_type == DDI_INTR_TYPE_MSIX ? "MSI-X interrupts" :
+	    iaq->intr_type == DDI_INTR_TYPE_MSI ? "MSI interrupts" :
+	    "fixed interrupt");
 
 	return (DDI_SUCCESS);
 }
@@ -1871,6 +1894,46 @@ done:
 	return (rc);
 }
 
+struct t4_port_speed_def {
+	uint32_t	tpsd_cap;
+	t4_port_speed_t	tpsd_speed;
+	const char	*tpsd_name;
+};
+#define	T4_PORT_SPEED_DEF(speed)			\
+{							\
+	.tpsd_cap = FW_PORT_CAP32_SPEED_ ## speed,	\
+	.tpsd_speed = TPS_ ## speed,			\
+	.tpsd_name = #speed,				\
+}
+
+static const struct t4_port_speed_def t4_port_speeds[] = {
+	T4_PORT_SPEED_DEF(400G),
+	T4_PORT_SPEED_DEF(200G),
+	T4_PORT_SPEED_DEF(100G),
+	T4_PORT_SPEED_DEF(50G),
+	T4_PORT_SPEED_DEF(40G),
+	T4_PORT_SPEED_DEF(25G),
+	T4_PORT_SPEED_DEF(10G),
+	T4_PORT_SPEED_DEF(1G),
+};
+
+
+static t4_port_speed_t
+t4_port_speed(const struct port_info *pi)
+{
+	ASSERT(pi != NULL);
+
+	const uint32_t pcap = pi->link_cfg.pcaps;
+	for (uint_t i = 0; i < ARRAY_SIZE(t4_port_speeds); i++) {
+		if (t4_port_speeds[i].tpsd_cap & pcap) {
+			return (t4_port_speeds[i].tpsd_speed);
+		}
+	}
+
+	/* Fall back to 1G for unknown speeds */
+	return (TPS_1G);
+}
+
 static const char *
 t4_port_speed_name(const struct port_info *pi)
 {
@@ -1878,20 +1941,14 @@ t4_port_speed_name(const struct port_info *pi)
 		return ("-");
 	}
 
-	const uint32_t pcaps = pi->link_cfg.pcaps;
-	if (pcaps & FW_PORT_CAP32_SPEED_100G) {
-		return ("100G");
-	} else if (pcaps & FW_PORT_CAP32_SPEED_50G) {
-		return ("50G");
-	} else if (pcaps & FW_PORT_CAP32_SPEED_40G) {
-		return ("40G");
-	} else if (pcaps & FW_PORT_CAP32_SPEED_25G) {
-		return ("25G");
-	} else if (pcaps & FW_PORT_CAP32_SPEED_10G) {
-		return ("10G");
-	} else {
-		return ("1G");
+	const uint32_t pcap = pi->link_cfg.pcaps;
+	for (uint_t i = 0; i < ARRAY_SIZE(t4_port_speeds); i++) {
+		if (t4_port_speeds[i].tpsd_cap & pcap) {
+			return (t4_port_speeds[i].tpsd_name);
+		}
 	}
+
+	return ("-");
 }
 
 #define	KS_INIT_U64(kstatp,  n)	\
@@ -2179,13 +2236,13 @@ t4_port_full_init(struct port_info *pi)
 	/*
 	 * Setup RSS for this port.
 	 */
-	rss = kmem_zalloc(pi->nrxq * sizeof (*rss), KM_SLEEP);
+	rss = kmem_zalloc(pi->rxq_count * sizeof (*rss), KM_SLEEP);
 	for_each_rxq(pi, i, rxq) {
 		rss[i] = rxq->iq.abs_id;
 	}
 	rc = -t4_config_rss_range(sc, sc->mbox, pi->viid, 0,
-	    pi->rss_size, rss, pi->nrxq);
-	kmem_free(rss, pi->nrxq * sizeof (*rss));
+	    pi->rss_size, rss, pi->rxq_count);
+	kmem_free(rss, pi->rxq_count * sizeof (*rss));
 	if (rc != 0) {
 		cxgb_printf(pi->dip, CE_WARN, "rss_config failed: %d", rc);
 		goto done;

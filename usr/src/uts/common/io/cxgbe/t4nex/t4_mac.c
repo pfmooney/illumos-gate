@@ -856,7 +856,7 @@ t4_fill_group(void *arg, mac_ring_type_t rtype, const int rg_index,
 		infop->mgi_stop = NULL;
 		infop->mgi_addmac = t4_addmac;
 		infop->mgi_remmac = t4_remmac;
-		infop->mgi_count = pi->nrxq;
+		infop->mgi_count = pi->rxq_count;
 		break;
 	}
 	case MAC_RING_TYPE_TX:
@@ -998,10 +998,10 @@ t4_fill_ring(void *arg, mac_ring_type_t rtype, const int group_index,
 	switch (rtype) {
 	case MAC_RING_TYPE_RX: {
 		struct sge_rxq *rxq =
-		    &pi->adapter->sge.rxq[pi->first_rxq + ring_index];
+		    &pi->adapter->sge.rxq[pi->rxq_start + ring_index];
 		mac_intr_t *mintr = &infop->mri_intr;
 
-		ASSERT3S(ring_index, <, pi->nrxq);
+		ASSERT3S(ring_index, <, pi->rxq_count);
 
 		rxq->ring_handle = rh;
 
@@ -1019,9 +1019,9 @@ t4_fill_ring(void *arg, mac_ring_type_t rtype, const int group_index,
 	}
 	case MAC_RING_TYPE_TX: {
 		struct sge_txq *txq =
-		    &pi->adapter->sge.txq[pi->first_txq + ring_index];
+		    &pi->adapter->sge.txq[pi->txq_start + ring_index];
 
-		ASSERT3S(ring_index, <, pi->ntxq);
+		ASSERT3S(ring_index, <, pi->txq_count);
 
 		txq->ring_handle = rh;
 
@@ -1167,7 +1167,7 @@ t4_mc_getcapab(void *arg, mac_capab_t cap, void *data)
 		switch (cap_rings->mr_type) {
 		case MAC_RING_TYPE_RX:
 			cap_rings->mr_group_type = MAC_GROUP_TYPE_STATIC;
-			cap_rings->mr_rnum = pi->nrxq;
+			cap_rings->mr_rnum = pi->rxq_count;
 			cap_rings->mr_gnum = 1;
 			cap_rings->mr_rget = t4_fill_ring;
 			cap_rings->mr_gget = t4_fill_group;
@@ -1176,7 +1176,7 @@ t4_mc_getcapab(void *arg, mac_capab_t cap, void *data)
 			break;
 		case MAC_RING_TYPE_TX:
 			cap_rings->mr_group_type = MAC_GROUP_TYPE_STATIC;
-			cap_rings->mr_rnum = pi->ntxq;
+			cap_rings->mr_rnum = pi->txq_count;
 			cap_rings->mr_gnum = 0;
 			cap_rings->mr_rget = t4_fill_ring;
 			cap_rings->mr_gget = NULL;

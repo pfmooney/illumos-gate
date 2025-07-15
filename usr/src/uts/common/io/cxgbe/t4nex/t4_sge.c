@@ -3140,10 +3140,10 @@ t4_sge_egr_update(struct sge_iq *iq, const struct rss_header *rss)
  */
 struct cxgbe_port_config_kstats {
 	kstat_named_t idx;
-	kstat_named_t nrxq;
-	kstat_named_t ntxq;
-	kstat_named_t first_rxq;
-	kstat_named_t first_txq;
+	kstat_named_t rxq_count;
+	kstat_named_t txq_count;
+	kstat_named_t rxq_start;
+	kstat_named_t txq_start;
 	kstat_named_t controller;
 	kstat_named_t factory_mac_address;
 };
@@ -3187,18 +3187,18 @@ setup_port_config_kstats(struct port_info *pi)
 	kstatp = (struct cxgbe_port_config_kstats *)ksp->ks_data;
 
 	KS_UINIT(idx);
-	KS_UINIT(nrxq);
-	KS_UINIT(ntxq);
-	KS_UINIT(first_rxq);
-	KS_UINIT(first_txq);
+	KS_UINIT(rxq_count);
+	KS_UINIT(txq_count);
+	KS_UINIT(rxq_start);
+	KS_UINIT(txq_start);
 	KS_CINIT(controller);
 	KS_CINIT(factory_mac_address);
 
 	KS_U_SET(idx, pi->port_id);
-	KS_U_SET(nrxq, pi->nrxq);
-	KS_U_SET(ntxq, pi->ntxq);
-	KS_U_SET(first_rxq, pi->first_rxq);
-	KS_U_SET(first_txq, pi->first_txq);
+	KS_U_SET(rxq_count, pi->rxq_count);
+	KS_U_SET(txq_count, pi->txq_count);
+	KS_U_SET(rxq_start, pi->rxq_start);
+	KS_U_SET(txq_start, pi->txq_start);
 	KS_C_SET(controller, "%s%d", ddi_driver_name(pdip),
 	    ddi_get_instance(pdip));
 	KS_C_SET(factory_mac_address, "%02X%02X%02X%02X%02X%02X",

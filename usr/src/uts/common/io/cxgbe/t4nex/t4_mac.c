@@ -712,11 +712,7 @@ t4_mc_start(void *arg)
 {
 	struct port_info *pi = arg;
 
-	ADAPTER_LOCK(pi->adapter);
-	const int rc = t4_init_synchronized(pi);
-	ADAPTER_UNLOCK(pi->adapter);
-
-	return (rc);
+	return (t4_init_synchronized(pi));
 }
 
 static void
@@ -724,9 +720,7 @@ t4_mc_stop(void *arg)
 {
 	struct port_info *pi = arg;
 
-	ADAPTER_LOCK(pi->adapter);
 	(void) t4_uninit_synchronized(pi);
-	ADAPTER_UNLOCK(pi->adapter);
 }
 
 static int
@@ -734,12 +728,11 @@ t4_mc_setpromisc(void *arg, boolean_t on)
 {
 	struct port_info *pi = arg;
 	struct adapter *sc = pi->adapter;
-	int rc;
 
-	ADAPTER_LOCK(sc);
-	rc = -t4_set_rxmode(sc, sc->mbox, pi->viid, -1, on ? 1 : 0, -1, -1, -1,
-	    false);
-	ADAPTER_UNLOCK(sc);
+	PORT_LOCK(pi);
+	const int rc = -t4_set_rxmode(sc, sc->mbox, pi->viid, -1, on ? 1 : 0,
+	    -1, -1, -1, false);
+	PORT_UNLOCK(pi);
 
 	return (rc);
 }
@@ -766,9 +759,9 @@ t4_mc_multicst(void *arg, boolean_t add, const uint8_t *mcaddr)
 	    FW_VI_MAC_MAC_BASED_FREE));
 	bcopy(mcaddr, &c.u.exact[0].macaddr, ETHERADDRL);
 
-	ADAPTER_LOCK(sc);
+	PORT_LOCK(pi);
 	rc = -t4_wr_mbox_meat(sc, sc->mbox, &c, len16 * 16, &c, true);
-	ADAPTER_UNLOCK(sc);
+	PORT_UNLOCK(pi);
 	if (rc != 0)
 		return (rc);
 #ifdef DEBUG
@@ -796,30 +789,31 @@ t4_mc_unicst(void *arg, const uint8_t *ucaddr)
 {
 	struct port_info *pi = arg;
 	struct adapter *sc = pi->adapter;
-	int rc;
 
-	if (ucaddr == NULL)
+	if (ucaddr == NULL) {
 		return (EINVAL);
+	}
 
-	ADAPTER_LOCK(sc);
+	PORT_LOCK(pi);
 
 	/* We will support adding only one mac address */
 	if (pi->macaddr_cnt) {
-		ADAPTER_UNLOCK(sc);
+		PORT_UNLOCK(pi);
 		return (ENOSPC);
 	}
-	rc = t4_change_mac(sc, sc->mbox, pi->viid, pi->xact_addr_filt, ucaddr,
-	    true, &pi->smt_idx);
-	if (rc < 0) {
-		rc = -rc;
-	} else {
-		pi->macaddr_cnt++;
-		pi->xact_addr_filt = rc;
-		rc = 0;
-	}
-	ADAPTER_UNLOCK(sc);
 
-	return (rc);
+	const int rc = t4_change_mac(sc, sc->mbox, pi->viid, pi->xact_addr_filt,
+	    ucaddr, true, &pi->smt_idx);
+	if (rc < 0) {
+		PORT_UNLOCK(pi);
+		return (-rc);
+	}
+
+	pi->macaddr_cnt++;
+	pi->xact_addr_filt = rc;
+	PORT_UNLOCK(pi);
+
+	return (0);
 }
 
 int
@@ -833,9 +827,9 @@ t4_remmac(void *arg, const uint8_t *mac_addr)
 {
 	struct port_info *pi = arg;
 
-	ADAPTER_LOCK(pi->adapter);
+	PORT_LOCK(pi);
 	pi->macaddr_cnt--;
-	ADAPTER_UNLOCK(pi->adapter);
+	PORT_UNLOCK(pi);
 
 	return (0);
 }
@@ -1686,7 +1680,6 @@ t4_init_synchronized(struct port_info *pi)
 	struct adapter *sc = pi->adapter;
 	int rc = 0;
 
-	ADAPTER_LOCK_ASSERT_OWNED(pi->adapter);
 	ASSERT(sc->flags & TAF_INIT_DONE);
 
 	PORT_LOCK(pi);
@@ -1753,7 +1746,7 @@ t4_uninit_synchronized(struct port_info *pi)
 	struct adapter *sc = pi->adapter;
 	int rc;
 
-	ADAPTER_LOCK_ASSERT_OWNED(pi->adapter);
+	PORT_LOCK_ASSERT_NOTOWNED(pi);
 
 	PORT_LOCK(pi);
 	/*

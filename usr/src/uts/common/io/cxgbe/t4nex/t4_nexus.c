@@ -410,7 +410,7 @@ t4_devo_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	}
 
 	const struct t4_intrs_queues *iaq = &sc->intr_queue_cfg;
-	struct sge *sge = &sc->sge;
+	struct sge_info *sge = &sc->sge;
 	sge->rxq =
 	    kmem_zalloc(sge->rxq_count * sizeof (struct sge_rxq), KM_SLEEP);
 	sge->txq =
@@ -510,7 +510,7 @@ t4_devo_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 {
 	int i;
 	struct port_info *pi;
-	struct sge *s;
+	struct sge_info *s;
 
 	if (cmd != DDI_DETACH)
 		return (DDI_FAILURE);
@@ -1774,6 +1774,10 @@ t4_cfg_intrs_queues(struct adapter *sc)
 		rxq_idx += pi->rxq_count;
 		txq_idx += pi->txq_count;
 	}
+
+	struct sge_info *sge = &sc->sge;
+	sge->rxq_count = rxq_idx;
+	sge->txq_count = txq_idx;
 
 	cxgb_printf(sc->dip, CE_NOTE, "(%u rxq, %u txq total) %u %s.",
 	    rxq_idx, txq_idx, iaq->intr_count,

@@ -380,7 +380,7 @@ t4_setup_port_queues(struct port_info *pi)
 	struct driver_properties *p = &sc->props;
 
 	pi->ksp_config = setup_port_config_kstats(pi);
-	pi->ksp_info   = setup_port_info_kstats(pi);
+	pi->ksp_info = setup_port_info_kstats(pi);
 
 	for_each_rxq(pi, i, rxq) {
 		rc = t4_alloc_rxq(pi, rxq, i);

@@ -406,7 +406,7 @@ struct sge_rxq {
 	struct sge_rxq_stats stats;
 };
 
-struct sge {
+struct sge_info {
 	int fl_starve_threshold;
 	int s_qpp;
 	uint64_t dbq_timer_tick;
@@ -536,7 +536,7 @@ struct adapter {
 	kstat_t *ksp;
 	kstat_t *ksp_stat;
 
-	struct sge sge;
+	struct sge_info sge;
 
 	struct port_info *port[MAX_NPORTS];
 	uint8_t chan_map[NCHAN];
@@ -644,7 +644,11 @@ static inline void t4_mbox_list_del(struct adapter *adap,
 static inline struct t4_mbox_list *
 t4_mbox_list_first_entry(struct adapter *adap)
 {
-	return (list_head(&adap->mbox_list));
+	mutex_enter(&adap->mbox_lock);
+	t4_mbox_list *entry = list_head(&adap->mbox_list);
+	mutex_exit(&adap->mbox_lock);
+
+	return (entry);
 }
 
 static inline struct port_info *

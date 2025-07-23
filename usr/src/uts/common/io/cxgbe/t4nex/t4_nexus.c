@@ -67,31 +67,29 @@ static void *t4_soft_state;
 static kmutex_t t4_adapter_list_lock;
 static list_t t4_adapter_list;
 
-static unsigned int getpf(struct adapter *sc);
-static int prep_firmware(struct adapter *sc);
-static int upload_config_file(struct adapter *sc, uint32_t *mt, uint32_t *ma);
-static int partition_resources(struct adapter *sc);
-static int adap__pre_init_tweaks(struct adapter *sc);
-static int get_params__pre_init(struct adapter *sc);
-static int get_params__post_init(struct adapter *sc);
-static int set_params__post_init(struct adapter *);
-static void t4_setup_adapter_memwin(struct adapter *sc);
-static int validate_mt_off_len(struct adapter *, int, uint32_t, int,
-    uint32_t *);
+static uint_t t4_getpf(struct adapter *);
+static int t4_prep_firmware(struct adapter *);
+static int t4_upload_config_file(struct adapter *, uint32_t *, uint32_t *);
+static int t4_partition_resources(struct adapter *);
+static int t4_init_adap_tweaks(struct adapter *);
+static int t4_init_get_params_pre(struct adapter *);
+static int t4_init_get_params_post(struct adapter *);
+static int t4_init_set_params(struct adapter *);
+static void t4_setup_adapter_memwin(struct adapter *);
 static uint32_t t4_position_memwin(struct adapter *, int, uint32_t);
 static void t4_init_driver_props(struct adapter *);
 static int t4_cfg_intrs_queues(struct adapter *);
 static int t4_setup_intrs(struct adapter *);
-static int add_child_node(struct adapter *sc, int idx);
-static int remove_child_node(struct adapter *sc, int idx);
-static kstat_t *setup_kstats(struct adapter *sc);
-static kstat_t *setup_wc_kstats(struct adapter *);
-static int update_wc_kstats(kstat_t *, int);
+static int t4_add_child_node(struct adapter *, uint_t);
+static int t4_remove_child_node(struct adapter *, uint_t);
+static kstat_t *t4_setup_kstats(struct adapter *);
+static kstat_t *t4_setup_wc_kstats(struct adapter *);
 static int t4_port_full_uninit(struct port_info *);
 static t4_port_speed_t t4_port_speed(const struct port_info *);
 
 static int t4_temperature_read(void *, sensor_ioctl_scalar_t *);
 static int t4_voltage_read(void *, sensor_ioctl_scalar_t *);
+
 static const ksensor_ops_t t4_temp_ops = {
 	.kso_kind = ksensor_kind_temperature,
 	.kso_scalar = t4_temperature_read
@@ -205,14 +203,14 @@ t4_devo_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	list_create(&sc->sfl_list, sizeof (struct sge_fl),
 	    offsetof(struct sge_fl, node_sfl));
 	mutex_init(&sc->mbox_lock, NULL, MUTEX_DRIVER, NULL);
-	list_create(&sc->mbox_list, sizeof (struct t4_mbox_list),
-	    offsetof(struct t4_mbox_list, node));
+	list_create(&sc->mbox_list, sizeof (t4_mbox_waiter_t),
+	    offsetof(t4_mbox_waiter_t, node));
 
 	mutex_enter(&t4_adapter_list_lock);
 	list_insert_tail(&t4_adapter_list, sc);
 	mutex_exit(&t4_adapter_list_lock);
 
-	sc->pf = getpf(sc);
+	sc->pf = t4_getpf(sc);
 	if (sc->pf > 8) {
 		rc = EINVAL;
 		cxgb_printf(dip, CE_WARN,
@@ -310,15 +308,15 @@ t4_devo_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	t4_setup_adapter_memwin(sc);
 
 	/* Prepare the firmware for operation */
-	rc = prep_firmware(sc);
+	rc = t4_prep_firmware(sc);
 	if (rc != 0)
 		goto done; /* error message displayed already */
 
-	rc = adap__pre_init_tweaks(sc);
+	rc = t4_init_adap_tweaks(sc);
 	if (rc != 0)
 		goto done;
 
-	rc = get_params__pre_init(sc);
+	rc = t4_init_get_params_pre(sc);
 	if (rc != 0)
 		goto done; /* error message displayed already */
 
@@ -334,11 +332,11 @@ t4_devo_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		}
 	}
 
-	rc = get_params__post_init(sc);
+	rc = t4_init_get_params_post(sc);
 	if (rc != 0)
 		goto done; /* error message displayed already */
 
-	rc = set_params__post_init(sc);
+	rc = t4_init_set_params(sc);
 	if (rc != 0)
 		goto done; /* error message displayed already */
 
@@ -490,8 +488,8 @@ t4_devo_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	 */
 	t4_dump_version_info(sc);
 
-	sc->ksp = setup_kstats(sc);
-	sc->ksp_stat = setup_wc_kstats(sc);
+	sc->ksp = t4_setup_kstats(sc);
+	sc->ksp_stat = t4_setup_wc_kstats(sc);
 	sc->params.drv_memwin = MEMWIN_NIC;
 
 done:
@@ -682,43 +680,58 @@ t4_bus_ctl(dev_info_t *dip, dev_info_t *rdip, ddi_ctl_enum_t op, void *arg,
 	}
 }
 
+/* From a provided "cxgbe@0" string, parse the device number */
+static bool
+t4_parse_devnum(const char *devname, uint_t *inst_nump)
+{
+	const size_t name_sz = strlen(devname) + 1;
+	char *name_copy = i_ddi_strdup(devname, KM_SLEEP);
+
+	bool res = false;
+	char *nodename, *addrname = NULL; 
+	i_ddi_parse_name(name_copy, &nodename, &addrname, NULL);
+	if (addrname == NULL || strcmp(T4_PORT_NAME, nodename) != 0) {
+		goto done;
+	}
+
+	ulong_t num;
+	if (ddi_strtoul(addrname, NULL, 10, &num) != 0 || num > UINT_MAX) {
+		goto done;
+	}
+	*inst_nump = num;
+	res = true;
+
+done:
+	kmem_free(name_copy, name_sz);
+	return (res);
+}
+
 static int
 t4_bus_config(dev_info_t *dip, uint_t flags, ddi_bus_config_op_t op, void *arg,
     dev_info_t **cdipp)
 {
-	int instance, i;
-	struct adapter *sc;
-
-	instance = ddi_get_instance(dip);
-	sc = ddi_get_soft_state(t4_soft_state, instance);
+	struct adapter *sc =
+	    ddi_get_soft_state(t4_soft_state, ddi_get_instance(dip));
 
 	if (op == BUS_CONFIG_ONE) {
-		char *c;
+		uint_t dev_num;
 
-		/*
-		 * arg is something like "cxgb@0" where 0 is the port_id hanging
-		 * off this nexus.
-		 */
-
-		c = arg;
-		while (*(c + 1))
-			c++;
-
-		/* There should be exactly 1 digit after '@' */
-		if (*(c - 1) != '@')
+		if (!t4_parse_devnum((const char *)arg, &dev_num)) {
 			return (NDI_FAILURE);
-
-		i = *c - '0';
-
-		if (add_child_node(sc, i) != 0)
+		}
+		if (t4_add_child_node(sc, dev_num) != 0) {
 			return (NDI_FAILURE);
+		}
 
 		flags |= NDI_ONLINE_ATTACH;
 
 	} else if (op == BUS_CONFIG_ALL || op == BUS_CONFIG_DRIVER) {
+		int i;
+
 		/* Allocate and bind all child device nodes */
-		for_each_port(sc, i)
-		    (void) add_child_node(sc, i);
+		for_each_port(sc, i) {
+		    (void) t4_add_child_node(sc, (uint_t)i);
+		}
 		flags |= NDI_ONLINE_ATTACH;
 	}
 
@@ -729,38 +742,31 @@ static int
 t4_bus_unconfig(dev_info_t *dip, uint_t flags, ddi_bus_config_op_t op,
     void *arg)
 {
-	int instance, i, rc;
-	struct adapter *sc;
-
-	instance = ddi_get_instance(dip);
-	sc = ddi_get_soft_state(t4_soft_state, instance);
+	struct adapter *sc
+	    = ddi_get_soft_state(t4_soft_state, ddi_get_instance(dip));
 
 	if (op == BUS_CONFIG_ONE || op == BUS_UNCONFIG_ALL ||
 	    op == BUS_UNCONFIG_DRIVER)
 		flags |= NDI_UNCONFIG;
 
-	rc = ndi_busop_bus_unconfig(dip, flags, op, arg);
+	int rc = ndi_busop_bus_unconfig(dip, flags, op, arg);
 	if (rc != 0)
 		return (rc);
 
 	if (op == BUS_UNCONFIG_ONE) {
-		char *c;
+		uint_t dev_num;
 
-		c = arg;
-		while (*(c + 1))
-			c++;
+		if (!t4_parse_devnum((const char *)arg, &dev_num)) {
+			return (NDI_FAILURE);
+		}
 
-		if (*(c - 1) != '@')
-			return (NDI_SUCCESS);
-
-		i = *c - '0';
-
-		rc = remove_child_node(sc, i);
-
+		rc = t4_remove_child_node(sc, dev_num);
 	} else if (op == BUS_UNCONFIG_ALL || op == BUS_UNCONFIG_DRIVER) {
+		int i;
 
-		for_each_port(sc, i)
-		    (void) remove_child_node(sc, i);
+		for_each_port(sc, i) {
+		    (void) t4_remove_child_node(sc, (uint_t)i);
+		}
 	}
 
 	return (rc);
@@ -815,21 +821,19 @@ t4_cb_ioctl(dev_t dev, int cmd, intptr_t d, int mode, cred_t *credp, int *rp)
 	return (t4_ioctl(sc, cmd, data, mode));
 }
 
-static unsigned int
-getpf(struct adapter *sc)
+static uint_t
+t4_getpf(struct adapter *sc)
 {
-	int rc, *data;
-	uint_t n, pf;
+	int *data;
+	uint_t n;
 
-	rc = ddi_prop_lookup_int_array(DDI_DEV_T_ANY, sc->dip,
+	const int rc = ddi_prop_lookup_int_array(DDI_DEV_T_ANY, sc->dip,
 	    DDI_PROP_DONTPASS, "reg", &data, &n);
-	if (rc != DDI_SUCCESS) {
-		cxgb_printf(sc->dip, CE_WARN,
-		    "failed to lookup \"reg\" property: %d", rc);
-		return (0xff);
+	if (rc != DDI_SUCCESS || n < 1) {
+		return (UINT_MAX);
 	}
 
-	pf = PCI_REG_FUNC_G(data[0]);
+	const uint_t pf = PCI_REG_FUNC_G(data[0]);
 	ddi_prop_free(data);
 
 	return (pf);
@@ -840,7 +844,7 @@ getpf(struct adapter *sc)
  * become the master, and reset the device.
  */
 static int
-prep_firmware(struct adapter *sc)
+t4_prep_firmware(struct adapter *sc)
 {
 	int rc;
 	size_t fw_size;
@@ -963,7 +967,7 @@ prep_firmware(struct adapter *sc)
 	if (sc->flags & TAF_MASTER_PF) {
 		/* Handle default vs special T4 config file */
 
-		rc = partition_resources(sc);
+		rc = t4_partition_resources(sc);
 		if (rc != 0)
 			goto err;	/* error message displayed already */
 	}
@@ -999,8 +1003,8 @@ static const struct memwin t5_memwin[] = {
  * valid and lies entirely within the memtype specified.  The global address of
  * the start of the range is returned in addr.
  */
-int
-validate_mt_off_len(struct adapter *sc, int mtype, uint32_t off, int len,
+static int
+t4_validate_mt_off_len(struct adapter *sc, int mtype, uint32_t off, int len,
     uint32_t *addr)
 {
 	uint32_t em, addr_len, maddr, mlen;
@@ -1054,7 +1058,7 @@ validate_mt_off_len(struct adapter *sc, int mtype, uint32_t off, int len,
 }
 
 static void
-memwin_info(struct adapter *sc, int win, uint32_t *base, uint32_t *aperture)
+t4_memwin_info(struct adapter *sc, int win, uint32_t *base, uint32_t *aperture)
 {
 	const struct memwin *mw;
 
@@ -1074,7 +1078,7 @@ memwin_info(struct adapter *sc, int win, uint32_t *base, uint32_t *aperture)
  * Upload configuration file to card's memory.
  */
 static int
-upload_config_file(struct adapter *sc, uint32_t *mt, uint32_t *ma)
+t4_upload_config_file(struct adapter *sc, uint32_t *mt, uint32_t *ma)
 {
 	int rc = 0;
 	size_t cflen, cfbaselen;
@@ -1133,7 +1137,7 @@ upload_config_file(struct adapter *sc, uint32_t *mt, uint32_t *ma)
 		return (EFBIG);
 	}
 
-	rc = validate_mt_off_len(sc, mtype, maddr, cflen, &addr);
+	rc = t4_validate_mt_off_len(sc, mtype, maddr, cflen, &addr);
 	if (rc != 0) {
 		cxgb_printf(sc->dip, CE_WARN,
 		    "%s: addr (%d/0x%x) or len %d is not valid: %d.  "
@@ -1154,7 +1158,7 @@ upload_config_file(struct adapter *sc, uint32_t *mt, uint32_t *ma)
 	}
 	firmware_close(fw_hdl);
 
-	memwin_info(sc, 2, &mw_base, &mw_aperture);
+	t4_memwin_info(sc, 2, &mw_base, &mw_aperture);
 	while (cflen) {
 		off = t4_position_memwin(sc, 2, addr);
 		n = min(cflen, mw_aperture - off);
@@ -1175,13 +1179,13 @@ upload_config_file(struct adapter *sc, uint32_t *mt, uint32_t *ma)
  * the firmware to process it.
  */
 static int
-partition_resources(struct adapter *sc)
+t4_partition_resources(struct adapter *sc)
 {
 	int rc;
 	struct fw_caps_config_cmd caps;
 	uint32_t mtype, maddr, finicsum, cfcsum;
 
-	rc = upload_config_file(sc, &mtype, &maddr);
+	rc = t4_upload_config_file(sc, &mtype, &maddr);
 	if (rc != 0) {
 		mtype = FW_MEMTYPE_CF_FLASH;
 		maddr = t4_flash_cfg_addr(sc);
@@ -1240,7 +1244,7 @@ partition_resources(struct adapter *sc)
  * Configuration Files and hard-coded initialization ...
  */
 static int
-adap__pre_init_tweaks(struct adapter *sc)
+t4_init_adap_tweaks(struct adapter *sc)
 {
 	int rx_dma_offset = 2; /* Offset of RX packets into DMA buffers */
 
@@ -1262,7 +1266,7 @@ adap__pre_init_tweaks(struct adapter *sc)
  * t4_sge_init and t4_fw_initialize.
  */
 static int
-get_params__pre_init(struct adapter *sc)
+t4_init_get_params_pre(struct adapter *sc)
 {
 	int rc;
 	uint32_t param[2], val[2];
@@ -1331,7 +1335,7 @@ get_params__pre_init(struct adapter *sc)
  * has been initialized by the firmware at this point.
  */
 static int
-get_params__post_init(struct adapter *sc)
+t4_init_get_params_post(struct adapter *sc)
 {
 	int rc;
 	uint32_t param[4], val[4];
@@ -1403,7 +1407,7 @@ get_params__post_init(struct adapter *sc)
 }
 
 static int
-set_params__post_init(struct adapter *sc)
+t4_init_set_params(struct adapter *sc)
 {
 	uint32_t param, val;
 
@@ -1839,61 +1843,59 @@ t4_setup_intrs(struct adapter *sc)
 }
 
 static int
-add_child_node(struct adapter *sc, int idx)
+t4_add_child_node(struct adapter *sc, uint_t idx)
 {
-	int rc;
-	struct port_info *pi;
 
-	if (idx < 0 || idx >= sc->params.nports)
+	if (idx >= sc->params.nports)
 		return (EINVAL);
 
-	pi = sc->port[idx];
-	if (pi == NULL)
-		return (ENODEV);	/* t4_port_init failed earlier */
+	struct port_info *pi = sc->port[idx];
+	if (pi == NULL) {
+		/* t4_port_init failed earlier */
+		return (ENODEV);
+	}
 
 	PORT_LOCK(pi);
 	if (pi->dip != NULL) {
-		rc = 0;		/* EEXIST really, but then bus_config fails */
-		goto done;
+		PORT_UNLOCK(pi);
+		/* EEXIST really, but then bus_config fails */
+		return (0);
 	}
 
-	rc = ndi_devi_alloc(sc->dip, T4_PORT_NAME, DEVI_SID_NODEID, &pi->dip);
+	const int rc =
+	    ndi_devi_alloc(sc->dip, T4_PORT_NAME, DEVI_SID_NODEID, &pi->dip);
 	if (rc != DDI_SUCCESS || pi->dip == NULL) {
-		rc = ENOMEM;
-		goto done;
+		PORT_UNLOCK(pi);
+		return (ENOMEM);
 	}
 
 	(void) ddi_set_parent_data(pi->dip, pi);
 	(void) ndi_devi_bind_driver(pi->dip, 0);
-	rc = 0;
-done:
+
 	PORT_UNLOCK(pi);
-	return (rc);
+	return (0);
 }
 
 static int
-remove_child_node(struct adapter *sc, int idx)
+t4_remove_child_node(struct adapter *sc, uint_t idx)
 {
-	int rc;
-	struct port_info *pi;
-
-	if (idx < 0 || idx >= sc->params.nports)
+	if (idx >= sc->params.nports)
 		return (EINVAL);
 
-	pi = sc->port[idx];
+	struct port_info *pi = sc->port[idx];
 	if (pi == NULL)
 		return (ENODEV);
 
 	PORT_LOCK(pi);
 	if (pi->dip == NULL) {
-		rc = ENODEV;
-		goto done;
+		PORT_UNLOCK(pi);
+		return (ENODEV);
 	}
 
-	rc = ndi_devi_free(pi->dip);
+	const int rc = ndi_devi_free(pi->dip);
 	if (rc == 0)
 		pi->dip = NULL;
-done:
+
 	PORT_UNLOCK(pi);
 	return (rc);
 }
@@ -1980,7 +1982,7 @@ struct t4_kstats {
 };
 
 static kstat_t *
-setup_kstats(struct adapter *sc)
+t4_setup_kstats(struct adapter *sc)
 {
 	const int ndata = sizeof (struct t4_kstats) / sizeof (kstat_named_t);
 	kstat_t *ksp = kstat_create(T4_NEXUS_NAME, ddi_get_instance(sc->dip),
@@ -2045,8 +2047,28 @@ struct t4_wc_kstats {
 	kstat_named_t write_coal_success;
 	kstat_named_t write_coal_failure;
 };
+
+static int
+t4_update_wc_kstats(kstat_t *ksp, int rw)
+{
+	struct t4_wc_kstats *kstatp = (struct t4_wc_kstats *)ksp->ks_data;
+	struct adapter *sc = ksp->ks_private;
+
+	if (rw == KSTAT_WRITE)
+		return (0);
+
+	if (t4_cver_ge(sc, CHELSIO_T5)) {
+		const uint32_t wc_total = t4_read_reg(sc, A_SGE_STAT_TOTAL);
+		const uint32_t wc_failure = t4_read_reg(sc, A_SGE_STAT_MATCH);
+		KS_SET_U64(kstatp, write_coal_success, wc_total - wc_failure);
+		KS_SET_U64(kstatp, write_coal_failure, wc_failure);
+	}
+
+	return (0);
+}
+
 static kstat_t *
-setup_wc_kstats(struct adapter *sc)
+t4_setup_wc_kstats(struct adapter *sc)
 {
 	kstat_t *ksp;
 	struct t4_wc_kstats *kstatp;
@@ -2065,31 +2087,12 @@ setup_wc_kstats(struct adapter *sc)
 	KS_INIT_U64(kstatp, write_coal_success);
 	KS_INIT_U64(kstatp, write_coal_failure);
 
-	ksp->ks_update = update_wc_kstats;
+	ksp->ks_update = t4_update_wc_kstats;
 	/* Install the kstat */
 	ksp->ks_private = (void *)sc;
 	kstat_install(ksp);
 
 	return (ksp);
-}
-
-static int
-update_wc_kstats(kstat_t *ksp, int rw)
-{
-	struct t4_wc_kstats *kstatp = (struct t4_wc_kstats *)ksp->ks_data;
-	struct adapter *sc = ksp->ks_private;
-
-	if (rw == KSTAT_WRITE)
-		return (0);
-
-	if (t4_cver_ge(sc, CHELSIO_T5)) {
-		const uint32_t wc_total = t4_read_reg(sc, A_SGE_STAT_TOTAL);
-		const uint32_t wc_failure = t4_read_reg(sc, A_SGE_STAT_MATCH);
-		KS_SET_U64(kstatp, write_coal_success, wc_total - wc_failure);
-		KS_SET_U64(kstatp, write_coal_failure, wc_failure);
-	}
-
-	return (0);
 }
 
 /*
@@ -2407,6 +2410,85 @@ t4_os_set_hw_addr(struct adapter *sc, int idx, const uint8_t *hw_addr)
 	bcopy(hw_addr, sc->port[idx]->hw_addr, ETHERADDRL);
 }
 
+/* Add thread to list of consumers waiting to access adapter mailbox */
+void
+t4_mbox_waiter_add(struct adapter *sc, t4_mbox_waiter_t *ent)
+{
+	mutex_enter(&sc->mbox_lock);
+	ent->thread = curthread;
+	list_insert_tail(&sc->mbox_list, ent);
+	mutex_exit(&sc->mbox_lock);
+}
+
+/* Remove thread from list of consumers waiting to access adapter mailbox */
+void
+t4_mbox_waiter_remove(struct adapter *sc, t4_mbox_waiter_t *ent)
+{
+	ASSERT(ent->thread == curthread);
+
+	mutex_enter(&sc->mbox_lock);
+	const bool was_owner = (list_head(&sc->mbox_list) == ent);
+	list_remove(&sc->mbox_list, ent);
+	
+	if (was_owner && !list_is_empty(&sc->mbox_list)) {
+		/*
+		 * Wake the other threads waiting on the mbox as we are vacating
+		 * the "owner" slot.
+		 */
+		cv_broadcast(&sc->mbox_cv);
+	}
+	mutex_exit(&sc->mbox_lock);
+}
+
+/*
+ * Wait for the current thread, which has called t4_mbox_waiter_add(), to become
+ * the "owner" of the adapter mailbox (head of the waiter list).
+ *
+ * Returns true if current thread is the owner, else false if we slept/spun for
+ * `wait_us` and are not yet owner (and thus should recheck adapter status).
+ */
+bool
+t4_mbox_wait_owner(struct adapter *sc, uint_t wait_us, bool sleep_ok)
+{
+	mutex_enter(&sc->mbox_lock);
+	t4_mbox_waiter_t *head = list_head(&sc->mbox_list);
+	ASSERT(head != NULL);
+
+	if (head->thread == curthread) {
+		mutex_exit(&sc->mbox_lock);
+		return (true);
+	}
+
+	if (!sleep_ok) {
+		mutex_exit(&sc->mbox_lock);
+		drv_usecwait(wait_us);
+		return (false);
+	}
+
+	/*
+	 * Using a singal-aware wait would be more courteous here, but much of
+	 * the logic which ultimately accesses the device mbox is ill-equipped
+	 * to handle gracefully EINTR failures.
+	 */
+	const int res = cv_reltimedwait(&sc->mbox_cv, &sc->mbox_lock,
+	    USEC_TO_TICK(wait_us), TR_MICROSEC);
+	if (res > 0) {
+		head = list_head(&sc->mbox_list);
+		ASSERT(head != NULL);
+		if (head->thread == curthread) {
+			/*
+			 * CV was signaled and this thread now occupies the head
+			 * of the list (indicating mbox ownership
+			 */
+			mutex_exit(&sc->mbox_lock);
+			return (true);
+		}
+	}
+	mutex_exit(&sc->mbox_lock);
+	return (false);
+}
+
+
 uint32_t
 t4_read_reg(struct adapter *sc, uint32_t reg)
 {
@@ -2447,12 +2529,10 @@ t4_sensor_read(struct adapter *sc, uint32_t diag, uint32_t *valp)
 	int rc;
 	uint32_t param, val;
 
-	ADAPTER_LOCK(sc);
 	param = V_FW_PARAMS_MNEM(FW_PARAMS_MNEM_DEV) |
 	    V_FW_PARAMS_PARAM_X(FW_PARAMS_PARAM_DEV_DIAG) |
 	    V_FW_PARAMS_PARAM_Y(diag);
 	rc = -t4_query_params(sc, sc->mbox, sc->pf, 0, 1, &param, &val);
-	ADAPTER_UNLOCK(sc);
 
 	if (rc != 0) {
 		return (rc);

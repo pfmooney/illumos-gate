@@ -1072,7 +1072,6 @@ t4_mc_transceiver_read(void *arg, uint_t id, uint_t page, void *bp,
 	if (nbytes > 256 || offset >= 256 || (offset + nbytes > 256))
 		return (EINVAL);
 
-	ADAPTER_LOCK(sc);
 	/*
 	 * Firmware has a maximum size that we can read. Don't read more than it
 	 * allows.
@@ -1087,7 +1086,6 @@ t4_mc_transceiver_read(void *arg, uint_t id, uint_t page, void *bp,
 		offset += toread;
 		bp = (void *)((uintptr_t)bp + toread);
 	}
-	ADAPTER_UNLOCK(sc);
 
 	if (rc == 0)
 		*nread = nbytes;
@@ -1116,10 +1114,7 @@ t4_port_led_set(void *arg, mac_led_mode_t mode, uint_t flags)
 		return (ENOTSUP);
 	}
 
-	ADAPTER_LOCK(sc);
 	rc = -t4_identify_port(sc, sc->mbox, pi->viid, val);
-	ADAPTER_UNLOCK(sc);
-
 	return (rc);
 }
 
@@ -1418,10 +1413,8 @@ t4_mc_setprop(void *arg, const char *name, mac_prop_id_t id, uint_t size,
 
 	if ((pi->flags & TPF_OPEN) != 0) {
 		if (relink != 0) {
-			ADAPTER_LOCK(sc);
 			rc = -t4_link_l1cfg(sc, sc->mbox, pi->tx_chan, lc,
 			    new_caps);
-			ADAPTER_UNLOCK(sc);
 			if (rc != 0) {
 				cxgb_printf(pi->dip, CE_WARN,
 				    "%s link config failed: %d", __func__, rc);
@@ -1430,10 +1423,8 @@ t4_mc_setprop(void *arg, const char *name, mac_prop_id_t id, uint_t size,
 		}
 
 		if (rx_mode != 0) {
-			ADAPTER_LOCK(sc);
 			rc = -t4_set_rxmode(sc, sc->mbox, pi->viid, v32, -1,
 			    -1, -1, -1, false);
-			ADAPTER_UNLOCK(sc);
 			if (rc != 0) {
 				cxgb_printf(pi->dip, CE_WARN,
 				    "set_rxmode failed: %d", rc);
@@ -2115,7 +2106,6 @@ t4_setprop_priv(struct port_info *pi, const char *name, const void *val)
 	if (update_link_cfg) {
 		int rc = 0;
 
-		ADAPTER_LOCK(pi->adapter);
 		PORT_LOCK(pi);
 		t4_link_set_pause(pi, fc, &new_caps);
 		if ((pi->flags & TPF_OPEN) != 0) {
@@ -2132,7 +2122,6 @@ t4_setprop_priv(struct port_info *pi, const char *name, const void *val)
 			lc->admin_caps = new_caps;
 		}
 		PORT_UNLOCK(pi);
-		ADAPTER_UNLOCK(pi->adapter);
 		return (rc);
 	}
 

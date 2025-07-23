@@ -463,9 +463,10 @@ struct driver_properties {
 	bool t4_fw_install;
 };
 
-struct t4_mbox_list {
+typedef struct t4_mbox_waiter {
 	list_node_t node;
-};
+	kthread_t *thread;
+} t4_mbox_waiter_t;
 
 typedef enum t4_adapter_flags {
 	/* Initialization progress status bits */
@@ -565,6 +566,7 @@ struct adapter {
 
 	/* support for single-threading access to adapter mailbox registers */
 	kmutex_t mbox_lock;
+	kcondvar_t mbox_cv;
 	list_t mbox_list;
 };
 
@@ -572,11 +574,6 @@ struct memwin {
 	uint32_t base;
 	uint32_t aperture;
 };
-
-#define	ADAPTER_LOCK(sc)		mutex_enter(&(sc)->lock)
-#define	ADAPTER_UNLOCK(sc)		mutex_exit(&(sc)->lock)
-#define	ADAPTER_LOCK_ASSERT_OWNED(sc)	ASSERT(mutex_owned(&(sc)->lock))
-#define	ADAPTER_LOCK_ASSERT_NOTOWNED(sc) ASSERT(!mutex_owned(&(sc)->lock))
 
 #define	PORT_LOCK(pi)			mutex_enter(&(pi)->lock)
 #define	PORT_UNLOCK(pi)			mutex_exit(&(pi)->lock)
@@ -625,31 +622,6 @@ struct memwin {
 /* One for errors, one for firmware events */
 #define	T4_EXTRA_INTR 2
 
-static inline void t4_mbox_list_add(struct adapter *adap,
-    struct t4_mbox_list *entry)
-{
-	mutex_enter(&adap->mbox_lock);
-	list_insert_tail(&adap->mbox_list, entry);
-	mutex_exit(&adap->mbox_lock);
-}
-
-static inline void t4_mbox_list_del(struct adapter *adap,
-    struct t4_mbox_list *entry)
-{
-	mutex_enter(&adap->mbox_lock);
-	list_remove(&adap->mbox_list, entry);
-	mutex_exit(&adap->mbox_lock);
-}
-
-static inline struct t4_mbox_list *
-t4_mbox_list_first_entry(struct adapter *adap)
-{
-	mutex_enter(&adap->mbox_lock);
-	t4_mbox_list *entry = list_head(&adap->mbox_list);
-	mutex_exit(&adap->mbox_lock);
-
-	return (entry);
-}
 
 static inline struct port_info *
 adap2pinfo(struct adapter *sc, int idx)
@@ -678,7 +650,7 @@ t4_port_is_10xg(const struct port_info *pi)
 
 static inline unsigned int t4_use_ldst(struct adapter *adap)
 {
-	return (adap->flags & FW_OK);
+	return (adap->flags & TAF_FW_OK);
 }
 
 static inline void t4_db_full(struct adapter *adap) {}
@@ -707,6 +679,10 @@ uint32_t t4_read_reg(struct adapter *, uint32_t);
 void t4_write_reg(struct adapter *, uint32_t, uint32_t);
 uint64_t t4_read_reg64(struct adapter *, uint32_t);
 void t4_write_reg64(struct adapter *, uint32_t, uint64_t);
+
+void t4_mbox_waiter_add(struct adapter *, t4_mbox_waiter_t *);
+void t4_mbox_waiter_remove(struct adapter *, t4_mbox_waiter_t *);
+bool t4_mbox_wait_owner(struct adapter *, uint_t, bool);
 
 /* t4_debug.c */
 void t4_debug_init(void);

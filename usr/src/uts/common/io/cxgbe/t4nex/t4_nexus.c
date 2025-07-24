@@ -979,6 +979,11 @@ err:
 
 }
 
+struct memwin {
+	uint32_t base;
+	uint32_t aperture;
+};
+
 static const struct memwin t4_memwin[] = {
 	{ MEMWIN0_BASE, MEMWIN0_APERTURE },
 	{ MEMWIN1_BASE, MEMWIN1_APERTURE },

@@ -864,10 +864,12 @@ static int
 t4_ring_start(mac_ring_driver_t rh, uint64_t mr_gen_num)
 {
 	struct sge_rxq *rxq = (struct sge_rxq *)rh;
+	struct sge_iq *iq = &rxq->iq;
 
-	RXQ_LOCK(rxq);
+	IQ_LOCK(iq);
 	rxq->ring_gen_num = mr_gen_num;
-	RXQ_UNLOCK(rxq);
+	IQ_UNLOCK(iq);
+
 	return (0);
 }
 

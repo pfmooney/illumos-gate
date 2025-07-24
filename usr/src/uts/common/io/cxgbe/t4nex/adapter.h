@@ -570,11 +570,6 @@ struct adapter {
 	list_t mbox_list;
 };
 
-struct memwin {
-	uint32_t base;
-	uint32_t aperture;
-};
-
 #define	PORT_LOCK(pi)			mutex_enter(&(pi)->lock)
 #define	PORT_UNLOCK(pi)			mutex_exit(&(pi)->lock)
 #define	PORT_LOCK_ASSERT_OWNED(pi)	ASSERT(mutex_owned(&(pi)->lock))
@@ -589,16 +584,6 @@ struct memwin {
 #define	FL_UNLOCK(fl)			mutex_exit(&(fl)->eq.lock)
 #define	FL_LOCK_ASSERT_OWNED(fl)	ASSERT(mutex_owned(&(fl)->eq.lock))
 #define	FL_LOCK_ASSERT_NOTOWNED(fl)	ASSERT(!mutex_owned(&(fl)->eq.lock))
-
-#define	RXQ_LOCK(rxq)			IQ_LOCK(&(rxq)->iq)
-#define	RXQ_UNLOCK(rxq)			IQ_UNLOCK(&(rxq)->iq)
-#define	RXQ_LOCK_ASSERT_OWNED(rxq)	IQ_LOCK_ASSERT_OWNED(&(rxq)->iq)
-#define	RXQ_LOCK_ASSERT_NOTOWNED(rxq)	IQ_LOCK_ASSERT_NOTOWNED(&(rxq)->iq)
-
-#define	RXQ_FL_LOCK(rxq)		FL_LOCK(&(rxq)->fl)
-#define	RXQ_FL_UNLOCK(rxq)		FL_UNLOCK(&(rxq)->fl)
-#define	RXQ_FL_LOCK_ASSERT_OWNED(rxq)	FL_LOCK_ASSERT_OWNED(&(rxq)->fl)
-#define	RXQ_FL_LOCK_ASSERT_NOTOWNED(rxq) FL_LOCK_ASSERT_NOTOWNED(&(rxq)->fl)
 
 #define	EQ_LOCK(eq)			mutex_enter(&(eq)->lock)
 #define	EQ_UNLOCK(eq)			mutex_exit(&(eq)->lock)
@@ -616,8 +601,6 @@ struct memwin {
 #define	for_each_rxq(pi, iter, rxq) \
 	rxq = &pi->adapter->sge.rxq[pi->rxq_start]; \
 	for (iter = 0; iter < pi->rxq_count; ++iter, ++rxq)
-
-#define	NFIQ(sc) ((sc)->intr_count > 1 ? (sc)->intr_count - 1 : 1)
 
 /* One for errors, one for firmware events */
 #define	T4_EXTRA_INTR 2

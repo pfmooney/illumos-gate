@@ -2109,7 +2109,7 @@ t4_setprop_priv(struct port_info *pi, const char *name, const void *val)
 		int rc = 0;
 
 		PORT_LOCK(pi);
-		t4_link_set_pause(pi, fc, &new_caps);
+		(void) t4_link_set_pause(pi, fc, &new_caps);
 		if ((pi->flags & TPF_OPEN) != 0) {
 			rc = -t4_link_l1cfg(sc, sc->mbox, pi->tx_chan, lc,
 			    new_caps);

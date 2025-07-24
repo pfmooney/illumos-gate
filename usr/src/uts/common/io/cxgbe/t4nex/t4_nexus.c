@@ -871,7 +871,7 @@ t4_prep_firmware(struct adapter *sc)
 		sc->flags |= TAF_MASTER_PF;
 
 	/* We may need FW version info for later reporting */
-	t4_get_version_info(sc);
+	(void) t4_get_version_info(sc);
 
 	switch (CHELSIO_CHIP_VERSION(sc->params.chip)) {
 	case CHELSIO_T4:
@@ -898,7 +898,7 @@ t4_prep_firmware(struct adapter *sc)
 	if (fw_size < sizeof (struct fw_hdr)) {
 		cxgb_printf(sc->dip, CE_WARN, "%s is too small (%ld bytes)\n",
 		    fw_file, fw_size);
-		firmware_close(fw_hdl);
+		(void) firmware_close(fw_hdl);
 		return (EINVAL);
 	}
 
@@ -906,7 +906,7 @@ t4_prep_firmware(struct adapter *sc)
 		cxgb_printf(sc->dip, CE_WARN,
 		    "%s is too large (%ld bytes, max allowed is %ld)\n",
 		    fw_file, fw_size, FLASH_FW_MAX_SIZE);
-		firmware_close(fw_hdl);
+		(void) firmware_close(fw_hdl);
 		return (EFBIG);
 	}
 
@@ -914,11 +914,11 @@ t4_prep_firmware(struct adapter *sc)
 	if (firmware_read(fw_hdl, 0, fw_data, fw_size) != 0) {
 		cxgb_printf(sc->dip, CE_WARN, "Failed to read from %s\n",
 		    fw_file);
-		firmware_close(fw_hdl);
+		(void) firmware_close(fw_hdl);
 		kmem_free(fw_data, fw_size);
 		return (EINVAL);
 	}
-	firmware_close(fw_hdl);
+	(void) firmware_close(fw_hdl);
 
 	bzero(fw_info, sizeof (*fw_info));
 	fw_info->chip = CHELSIO_CHIP_VERSION(sc->params.chip);
@@ -1138,7 +1138,7 @@ t4_upload_config_file(struct adapter *sc, uint32_t *mt, uint32_t *ma)
 		cxgb_printf(sc->dip, CE_WARN,
 		    "config file too long (%d, max allowed is %d).  ",
 		    cflen, FLASH_CFG_MAX_SIZE);
-		firmware_close(fw_hdl);
+		(void) firmware_close(fw_hdl);
 		return (EFBIG);
 	}
 
@@ -1148,7 +1148,7 @@ t4_upload_config_file(struct adapter *sc, uint32_t *mt, uint32_t *ma)
 		    "%s: addr (%d/0x%x) or len %d is not valid: %d.  "
 		    "Will try to use the config on the card, if any.\n",
 		    __func__, mtype, maddr, cflen, rc);
-		firmware_close(fw_hdl);
+		(void) firmware_close(fw_hdl);
 		return (EFAULT);
 	}
 
@@ -1157,11 +1157,11 @@ t4_upload_config_file(struct adapter *sc, uint32_t *mt, uint32_t *ma)
 	if (firmware_read(fw_hdl, 0, cfdata, cflen) != 0) {
 		cxgb_printf(sc->dip, CE_WARN, "Failed to read from %s\n",
 		    cfg_file);
-		firmware_close(fw_hdl);
+		(void) firmware_close(fw_hdl);
 		kmem_free(cfbase, cfbaselen);
 		return (EINVAL);
 	}
-	firmware_close(fw_hdl);
+	(void) firmware_close(fw_hdl);
 
 	t4_memwin_info(sc, 2, &mw_base, &mw_aperture);
 	while (cflen) {
@@ -2024,9 +2024,9 @@ t4_setup_kstats(struct adapter *sc)
 	KS_SET_CHAR(kstatp, driver_version, DRV_VERSION);
 
 	const struct vpd_params *vpd = &sc->params.vpd;
-	KS_SET_CHAR(kstatp, serial_number, "%s", vpd->sn);
-	KS_SET_CHAR(kstatp, ec_level, "%s", vpd->ec);
-	KS_SET_CHAR(kstatp, id, "%s", vpd->id);
+	kstat_named_setstr(&kstatp->serial_number, (const char *)vpd->sn);
+	kstat_named_setstr(&kstatp->ec_level, (const char *)vpd->ec);
+	kstat_named_setstr(&kstatp->id, (const char *)vpd->id);
 	KS_SET_U64(kstatp, core_clock, vpd->cclk);
 	KS_SET_U64(kstatp, port_cnt, sc->params.nports);
 

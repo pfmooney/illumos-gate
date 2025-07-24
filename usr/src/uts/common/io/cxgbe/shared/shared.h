@@ -51,7 +51,7 @@
 #define	CH_DBG(sc, category, fmt, ...)		do {} while (0)
 #endif
 
-extern int cxgb_printf(dev_info_t *dip, int level, char *f, ...);
+extern void cxgb_printf(dev_info_t *dip, int level, char *f, ...);
 
 /* Attach/detach logic used by cxgbe, calling into t4nex */
 struct port_info;

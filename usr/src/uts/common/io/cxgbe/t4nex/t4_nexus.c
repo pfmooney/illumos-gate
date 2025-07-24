@@ -84,7 +84,7 @@ static int t4_add_child_node(struct adapter *, uint_t);
 static int t4_remove_child_node(struct adapter *, uint_t);
 static kstat_t *t4_setup_kstats(struct adapter *);
 static kstat_t *t4_setup_wc_kstats(struct adapter *);
-static int t4_port_full_uninit(struct port_info *);
+static void t4_port_full_uninit(struct port_info *);
 static t4_port_speed_t t4_port_speed(const struct port_info *);
 
 static int t4_temperature_read(void *, sensor_ioctl_scalar_t *);
@@ -525,7 +525,7 @@ t4_devo_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 		for_each_port(sc, i) {
 			pi = sc->port[i];
 			if (pi && pi->flags & TPF_INIT_DONE)
-				(void) t4_port_full_uninit(pi);
+				t4_port_full_uninit(pi);
 		}
 
 		if (sc->intr_cap & DDI_INTR_FLAG_BLOCK) {
@@ -2236,23 +2236,18 @@ int
 t4_port_full_init(struct port_info *pi)
 {
 	struct adapter *sc = pi->adapter;
-	uint16_t *rss;
 	struct sge_rxq *rxq;
 	int rc, i;
 
 	ASSERT((pi->flags & TPF_INIT_DONE) == 0);
 
-	/*
-	 * Allocate tx/rx/fl queues for this port.
-	 */
-	rc = t4_setup_port_queues(pi);
-	if (rc != 0)
-		goto done;	/* error message displayed already */
+	/* Allocate TX/RX/FL queues for this port. */
+	if ((rc = t4_setup_port_queues(pi)) != 0) {
+		goto done;
+	}
 
-	/*
-	 * Setup RSS for this port.
-	 */
-	rss = kmem_zalloc(pi->rxq_count * sizeof (*rss), KM_SLEEP);
+	/* Setup RSS for this port. */
+	uint16_t *rss = kmem_zalloc(pi->rxq_count * sizeof (*rss), KM_SLEEP);
 	for_each_rxq(pi, i, rxq) {
 		rss[i] = rxq->iq.abs_id;
 	}
@@ -2264,15 +2259,19 @@ t4_port_full_init(struct port_info *pi)
 		goto done;
 	}
 
-	/*
-	 * Initialize our per-port FEC kstats.
-	 */
+	/* Initialize our per-port FEC kstats. */
 	pi->ksp_fec = t4_init_fec_kstats(pi);
 
 	pi->flags |= TPF_INIT_DONE;
+
 done:
-	if (rc != 0)
-		(void) t4_port_full_uninit(pi);
+	if (rc != 0) {
+		/*
+		 * Clean up any state resulting which may be lingering due to
+		 * failure part way through initialization.
+		 */
+		t4_port_full_uninit(pi);
+	}
 
 	return (rc);
 }
@@ -2280,20 +2279,15 @@ done:
 /*
  * Idempotent.
  */
-static int
+static void
 t4_port_full_uninit(struct port_info *pi)
 {
-
-	ASSERT(pi->flags & TPF_INIT_DONE);
-
 	if (pi->ksp_fec != NULL) {
 		kstat_delete(pi->ksp_fec);
 		pi->ksp_fec = NULL;
 	}
-	(void) t4_teardown_port_queues(pi);
+	t4_teardown_port_queues(pi);
 	pi->flags &= ~TPF_INIT_DONE;
-
-	return (0);
 }
 
 void

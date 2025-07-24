@@ -672,11 +672,11 @@ void t4_debug_init(void);
 void t4_debug_fini(void);
 
 /* t4_sge.c */
-void t4_sge_init(struct adapter *sc);
+void t4_sge_init(struct adapter *);
 int t4_alloc_fwq(struct adapter *);
 void t4_free_fwq(struct adapter *);
-int t4_setup_port_queues(struct port_info *pi);
-int t4_teardown_port_queues(struct port_info *pi);
+int t4_setup_port_queues(struct port_info *);
+void t4_teardown_port_queues(struct port_info *);
 uint_t t4_intr_all(caddr_t, caddr_t);
 uint_t t4_intr_err(caddr_t, caddr_t);
 uint_t t4_intr_fwq(caddr_t, caddr_t);
@@ -685,7 +685,6 @@ uint_t t4_intr_port_queues(caddr_t, caddr_t);
 void t4_iq_gts_update(struct sge_iq *, t4_intr_config_t, uint16_t);
 void t4_iq_update_intr_cfg(struct sge_iq *, uint8_t, int8_t);
 void t4_eq_update_dbq_timer(struct sge_eq *, struct port_info *);
-int t4_mgmt_tx(struct adapter *sc, mblk_t *m);
 
 mblk_t *t4_eth_tx(void *, mblk_t *);
 int t4_service_iq(struct sge_iq *, uint_t, struct t4_poll_req *);

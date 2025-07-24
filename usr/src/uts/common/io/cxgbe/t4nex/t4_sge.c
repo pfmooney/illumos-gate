@@ -370,10 +370,17 @@ t4_rxq_intr_assign(struct port_info *pi, uint_t iq_idx,
 	}
 }
 
+/*
+ * Setup port kstats and queues.
+ *
+ * If this fails (emitting a non-0 return code), it is expected that a
+ * subsequent call to t4_teardown_port_queues() will be made by the consumer to
+ * clean up any state which was partially allocated here.
+ */
 int
 t4_setup_port_queues(struct port_info *pi)
 {
-	int rc = 0, i;
+	int rc, i;
 	struct sge_rxq *rxq;
 	struct sge_txq *txq;
 	struct adapter *sc = pi->adapter;
@@ -385,7 +392,6 @@ t4_setup_port_queues(struct port_info *pi)
 	for_each_rxq(pi, i, rxq) {
 		rc = t4_alloc_rxq(pi, rxq, i);
 		if (rc != 0) {
-			(void) t4_teardown_port_queues(pi);
 			return (rc);
 		}
 	}
@@ -399,7 +405,6 @@ t4_setup_port_queues(struct port_info *pi)
 		txq->eq.iqid = sc->sge.fwq.cntxt_id;
 
 		if ((rc = t4_alloc_txq(pi, txq, i)) != 0) {
-			(void) t4_teardown_port_queues(pi);
 			return (rc);
 		}
 	}
@@ -410,7 +415,7 @@ t4_setup_port_queues(struct port_info *pi)
 /*
  * Idempotent
  */
-int
+void
 t4_teardown_port_queues(struct port_info *pi)
 {
 	int i;
@@ -443,8 +448,6 @@ t4_teardown_port_queues(struct port_info *pi)
 		if (rxq->iq.flags & IQ_INTR)
 			t4_free_rxq(pi, rxq);
 	}
-
-	return (0);
 }
 
 /*

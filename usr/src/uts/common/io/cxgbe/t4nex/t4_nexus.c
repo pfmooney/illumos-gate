@@ -1803,6 +1803,7 @@ t4_setup_intrs(struct adapter *sc)
 	const struct t4_intrs_queues *iaq = &sc->intr_queue_cfg;
 	const uint_t intr_count = iaq->intr_count;
 	const int intr_type = iaq->intr_type;
+	struct sge_iq *fwq = &sc->sge.fwq;
 
 	int i = 0;
 	int rc = ddi_intr_alloc(sc->dip, sc->intr_handle, intr_type, 0,
@@ -1816,11 +1817,19 @@ t4_setup_intrs(struct adapter *sc)
 	ASSERT3U(intr_count, ==, i); /* allocation was STRICT */
 	(void) ddi_intr_get_cap(sc->intr_handle[0], &sc->intr_cap);
 	(void) ddi_intr_get_pri(sc->intr_handle[0], &sc->intr_pri);
+
+	/*
+	 * Save for the override for TIP_SINGLE, the FWQ occupies the idx=1
+	 * interrupt.
+	 */
+	fwq->intr_idx = 1;
+
 	switch (iaq->intr_plan) {
 	case TIP_SINGLE:
 		ASSERT3U(intr_count, ==, 1);
 		(void) ddi_intr_add_handler(sc->intr_handle[0], t4_intr_all, sc,
 		    NULL);
+		fwq->intr_idx = 0;
 		break;
 	case TIP_ERR_QUEUES:
 		ASSERT3U(intr_count, ==, 2);

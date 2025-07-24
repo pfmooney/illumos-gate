@@ -1025,8 +1025,8 @@ t4_alloc_iq(struct port_info *pi, const struct t4_iq_params *tip,
 		    FW_LEN16(struct fw_iq_cmd)),
 		.type_to_iqandstindex = BE_32(
 		    /* Special handling for firmware event queue */
-		    is_fwq ? F_FW_IQ_CMD_IQASYNCH : 0 |
-		    intr_fwd ? 0 : F_FW_IQ_CMD_IQANDST |
+		    (is_fwq ? F_FW_IQ_CMD_IQASYNCH : 0) |
+		    (intr_fwd ? 0 : F_FW_IQ_CMD_IQANDST) |
 		    V_FW_IQ_CMD_IQANDSTINDEX(intr_idx) |
 		    V_FW_IQ_CMD_TYPE(FW_IQ_TYPE_FL_INT_CAP) |
 		    V_FW_IQ_CMD_VIID(pi->viid) |

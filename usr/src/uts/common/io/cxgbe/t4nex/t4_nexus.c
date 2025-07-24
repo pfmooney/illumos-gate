@@ -1966,9 +1966,13 @@ t4_port_speed_name(const struct port_info *pi)
 	kstat_named_init(&kstatp->n, #n, KSTAT_DATA_UINT64)
 #define	KS_INIT_CHAR(kstatp, n)	\
 	kstat_named_init(&kstatp->n, #n, KSTAT_DATA_CHAR)
+#define	KS_INIT_STR(kstatp, n)	\
+	kstat_named_init(&kstatp->n, #n, KSTAT_DATA_STRING)
 #define	KS_SET_U64(kstatp, n, v)	kstatp->n.value.ul = (v)
 #define	KS_SET_CHAR(kstatp, n, ...)	\
 	(void) snprintf(kstatp->n.value.c, 16,  __VA_ARGS__)
+#define	KS_SET_STR(kstatp, n, v)	\
+	kstat_named_setstr(&kstatp->n, v)
 
 /*
  * t4nex:X:config
@@ -2003,9 +2007,9 @@ t4_setup_kstats(struct adapter *sc)
 	KS_INIT_CHAR(kstatp, fw_vers);
 	KS_INIT_CHAR(kstatp, tp_vers);
 	KS_INIT_CHAR(kstatp, driver_version);
-	KS_INIT_CHAR(kstatp, serial_number);
-	KS_INIT_CHAR(kstatp, ec_level);
-	KS_INIT_CHAR(kstatp, id);
+	KS_INIT_STR(kstatp, serial_number);
+	KS_INIT_STR(kstatp, ec_level);
+	KS_INIT_STR(kstatp, id);
 	KS_INIT_U64(kstatp, core_clock);
 	KS_INIT_U64(kstatp, port_cnt);
 	KS_INIT_CHAR(kstatp, port_type);
@@ -2024,9 +2028,9 @@ t4_setup_kstats(struct adapter *sc)
 	KS_SET_CHAR(kstatp, driver_version, DRV_VERSION);
 
 	const struct vpd_params *vpd = &sc->params.vpd;
-	kstat_named_setstr(&kstatp->serial_number, (const char *)vpd->sn);
-	kstat_named_setstr(&kstatp->ec_level, (const char *)vpd->ec);
-	kstat_named_setstr(&kstatp->id, (const char *)vpd->id);
+	KS_SET_STR(kstatp, serial_number, (const char *)vpd->sn);
+	KS_SET_STR(kstatp, ec_level, (const char *)vpd->ec);
+	KS_SET_STR(kstatp, id, (const char *)vpd->id);
 	KS_SET_U64(kstatp, core_clock, vpd->cclk);
 	KS_SET_U64(kstatp, port_cnt, sc->params.nports);
 

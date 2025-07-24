@@ -488,12 +488,8 @@ int t4_wr_mbox_meat_timeout(struct adapter *adap, int mbox, const void *cmd,
 			return ret;
 		}
 
-		ret = t4_mbox_wait_owner(adap, MBOX_CMD_DELAY, sleep_ok);
-		if (ret == 0) {
+		if (t4_mbox_wait_owner(adap, MBOX_CMD_DELAY, sleep_ok)) {
 			break;
-		} else if (ret < 0) {
-			t4_mbox_waiter_remove(adap, &entry);
-			return (ret);
 		}
 	}
 #ifdef T4_OS_LOG_MBOX_CMDS

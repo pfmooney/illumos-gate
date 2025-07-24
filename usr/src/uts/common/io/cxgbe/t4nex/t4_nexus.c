@@ -688,7 +688,7 @@ t4_parse_devnum(const char *devname, uint_t *inst_nump)
 	char *name_copy = i_ddi_strdup(devname, KM_SLEEP);
 
 	bool res = false;
-	char *nodename, *addrname = NULL; 
+	char *nodename, *addrname = NULL;
 	i_ddi_parse_name(name_copy, &nodename, &addrname, NULL);
 	if (addrname == NULL || strcmp(T4_PORT_NAME, nodename) != 0) {
 		goto done;
@@ -730,7 +730,7 @@ t4_bus_config(dev_info_t *dip, uint_t flags, ddi_bus_config_op_t op, void *arg,
 
 		/* Allocate and bind all child device nodes */
 		for_each_port(sc, i) {
-		    (void) t4_add_child_node(sc, (uint_t)i);
+			(void) t4_add_child_node(sc, (uint_t)i);
 		}
 		flags |= NDI_ONLINE_ATTACH;
 	}
@@ -765,7 +765,7 @@ t4_bus_unconfig(dev_info_t *dip, uint_t flags, ddi_bus_config_op_t op,
 		int i;
 
 		for_each_port(sc, i) {
-		    (void) t4_remove_child_node(sc, (uint_t)i);
+			(void) t4_remove_child_node(sc, (uint_t)i);
 		}
 	}
 
@@ -2145,17 +2145,17 @@ t4_update_fec_kstats(kstat_t *ksp, int rw)
 	/*
 	 * First go ahead and gather RS related stats.
 	 */
-	fec->rs_corr.value.ui64 += 
+	fec->rs_corr.value.ui64 +=
 	    t4_read_fec_pair(pi, T6_RS_FEC_CCW_LO, T6_RS_FEC_CCW_HI);
-	fec->rs_uncorr.value.ui64 += 
+	fec->rs_uncorr.value.ui64 +=
 	    t4_read_fec_pair(pi, T6_RS_FEC_NCCW_LO, T6_RS_FEC_NCCW_HI);
-	fec->rs_sym0_corr.value.ui64 += 
+	fec->rs_sym0_corr.value.ui64 +=
 	    t4_read_fec_pair(pi, T6_RS_FEC_SYMERR0_LO, T6_RS_FEC_SYMERR0_HI);
-	fec->rs_sym1_corr.value.ui64 += 
+	fec->rs_sym1_corr.value.ui64 +=
 	    t4_read_fec_pair(pi, T6_RS_FEC_SYMERR1_LO, T6_RS_FEC_SYMERR1_HI);
-	fec->rs_sym2_corr.value.ui64 += 
+	fec->rs_sym2_corr.value.ui64 +=
 	    t4_read_fec_pair(pi, T6_RS_FEC_SYMERR2_LO, T6_RS_FEC_SYMERR2_HI);
-	fec->rs_sym3_corr.value.ui64 += 
+	fec->rs_sym3_corr.value.ui64 +=
 	    t4_read_fec_pair(pi, T6_RS_FEC_SYMERR3_LO, T6_RS_FEC_SYMERR3_HI);
 
 	/*
@@ -2429,7 +2429,7 @@ t4_mbox_waiter_remove(struct adapter *sc, t4_mbox_waiter_t *ent)
 	mutex_enter(&sc->mbox_lock);
 	const bool was_owner = (list_head(&sc->mbox_list) == ent);
 	list_remove(&sc->mbox_list, ent);
-	
+
 	if (was_owner && !list_is_empty(&sc->mbox_list)) {
 		/*
 		 * Wake the other threads waiting on the mbox as we are vacating

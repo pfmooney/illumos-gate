@@ -761,7 +761,7 @@ repeat:
 
 bail:
 	/* Dispatch any forwarded interrupts processed from the IQ */
-	for (struct sge_iq *intr_iq = list_head(&iql_fwd); intr_iq != NULL;) {
+	for (struct sge_iq *intr_iq = list_head(&iql_fwd); intr_iq != NULL; ) {
 		const int intr_rc =
 		    t4_service_iq(intr_iq, intr_iq->qsize / 8, NULL);
 
@@ -1285,14 +1285,14 @@ t4_free_rxq(struct port_info *pi, struct sge_rxq *rxq)
 		rxq->ksp = NULL;
 	}
 
-	t4_free_iq(pi, &rxq->iq);;
+	t4_free_iq(pi, &rxq->iq);
 }
 
 static int
 t4_alloc_eq_base(struct port_info *pi, struct sge_eq *eq, t4_eq_type_t eqtype)
 {
 	struct adapter *sc = pi->adapter;
-	
+
 	ASSERT0(eq->flags);
 
 	size_t esize;

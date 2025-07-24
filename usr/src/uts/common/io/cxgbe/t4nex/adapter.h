@@ -127,9 +127,9 @@ struct port_info {
 	u8 smt_idx;
 
 	/* Mirroring bits utilized by common code (unused by our driver) */
-	 u16 viid_mirror;
-	 u8 vivld_mirror;
-	 u8 vin_mirror;
+	u16 viid_mirror;
+	u8 vivld_mirror;
+	u8 vin_mirror;
 };
 
 struct fl_sdesc {

@@ -1247,6 +1247,14 @@ t4_alloc_fwq(struct adapter *sc)
 		return (rc);
 	}
 
+	/*
+	 * Unlike port-associated IQs, the FWQ should be enabled for the
+	 * lifespace of the device.
+	 */
+	IQ_LOCK(fwq);
+	fwq->flags |= IQ_ENABLED;
+	IQ_UNLOCK(fwq);
+
 	return (0);
 }
 

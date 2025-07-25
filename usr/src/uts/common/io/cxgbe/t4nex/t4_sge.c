@@ -1336,10 +1336,12 @@ t4_alloc_eq_base(struct port_info *pi, struct sge_eq *eq, t4_eq_type_t eqtype)
 		 * this into account.
 		 */
 		eq->cap *= FL_BUF_PER_BLOCK;
+		eq->spg = NULL;
+	} else {
+		eq->spg = t4_eq_txd(eq, eq->cap);
 	}
 	eq->avail = eq->cap - 1;	/* one less to avoid cidx = pidx */
 	eq->pidx = eq->cidx = 0;
-	eq->spg = t4_eq_txd(eq, eq->cap);
 
 	return (0);
 }

@@ -1160,6 +1160,7 @@ t4_alloc_iq(struct port_info *pi, const struct t4_iq_params *tip,
 	}
 
 	/* Enable IQ interrupts */
+	iq->flags |= IQ_ENABLED;
 	t4_iq_gts_update(iq, iq->intr_params, 0);
 
 	return (0);
@@ -1248,14 +1249,6 @@ t4_alloc_fwq(struct adapter *sc)
 		    "failed to create firmware event queue: %d.", rc);
 		return (rc);
 	}
-
-	/*
-	 * Unlike port-associated IQs, the FWQ should be enabled for the
-	 * lifespace of the device.
-	 */
-	IQ_LOCK(fwq);
-	fwq->flags |= IQ_ENABLED;
-	IQ_UNLOCK(fwq);
 
 	return (0);
 }

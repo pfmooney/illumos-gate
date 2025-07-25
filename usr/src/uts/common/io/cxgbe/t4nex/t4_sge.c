@@ -1268,6 +1268,7 @@ t4_alloc_rxq(struct port_info *pi, struct sge_rxq *rxq, int i)
 		.tip_pktc_idx	= pi->pktc_idx,
 		.tip_qsize	= sc->props.qsize_rxq,
 		.tip_esize	= RX_IQ_ESIZE,
+		.tip_fl_qsize	= sc->props.qsize_rxq / 8,
 		.tip_cong_chan	= t4_get_tp_ch_map(sc, pi->tx_chan),
 	};
 	t4_rxq_intr_assign(pi, i, &iqp);

@@ -119,10 +119,10 @@ static inline bool is_new_response(const struct sge_iq *iq,
     struct rsp_ctrl **ctrl);
 static inline bool t4_get_new_rsp(const struct sge_iq *, struct rsp_ctrl *);
 static inline void iq_next(struct sge_iq *iq);
-static bool t4_refill_fl(struct sge_fl *, uint_t);
+static bool t4_fl_refill(struct sge_fl *, uint_t);
 static void t4_sfl_enqueue(struct adapter *, struct sge_fl *);
 static void t4_sfl_process(void *);
-static void free_fl_bufs(struct sge_fl *fl);
+static void t4_fl_free_bufs(struct sge_fl *fl);
 static mblk_t *t4_get_fl_payload(struct sge_fl *, uint32_t, uint_t *);
 static int get_frame_txinfo(struct sge_txq *txq, mblk_t **fp,
     struct txinfo *txinfo, int sgl_only);
@@ -161,7 +161,7 @@ static int t4_handle_cpl_msg(struct sge_iq *, const struct rss_header *,
 static int t4_handle_fw_msg(struct sge_iq *, const struct rss_header *);
 
 static kmem_cache_t *rxbuf_cache_create(struct rxbuf_cache_params *);
-static struct rxbuf *rxbuf_alloc(kmem_cache_t *, int, uint_t);
+static struct rxbuf *rxbuf_alloc(kmem_cache_t *, int);
 static void rxbuf_free(struct rxbuf *);
 static int rxbuf_ctor(void *, void *, int);
 static void rxbuf_dtor(void *, void *);
@@ -188,14 +188,17 @@ t4_eqmap_slot(struct adapter *sc, uint_t cntxt_id)
 	return (&sc->sge.eqmap[idx]);
 }
 
-/* Get address for tx descriptor (8 x 8 byte flits) for index in EQ */
+/*
+ * Get address for descriptor (assuming 8 x 8 byte size) in EQ ring for a
+ * provided index.
+ */
 static inline void *
-t4_eq_txd(struct sge_eq *eq, uint_t idx)
+t4_eq_desc(struct sge_eq *eq, uint_t idx)
 {
 	ASSERT3U(idx, <, eq->qsize);
 
-	struct tx_desc *txd = eq->desc;
-	return (&txd[idx]);
+	uint64_t *descs = eq->desc;
+	return (&descs[idx * 8]);
 }
 
 static inline struct sge_rxq *
@@ -608,7 +611,7 @@ t4_fl_periodic_refill(struct sge_fl *fl, uint_t bufs_used)
 	if (bufs_used != 0) {
 		FL_LOCK(fl);
 		fl->needed += bufs_used;
-		starved = t4_refill_fl(fl, fl->eq.cap / 8);
+		starved = t4_fl_refill(fl, fl->eq.cap);
 		FL_UNLOCK(fl);
 	}
 
@@ -1127,12 +1130,13 @@ t4_alloc_iq(struct port_info *pi, const struct t4_iq_params *tip,
 
 		fl->copy_threshold = rx_copy_threshold;
 
-		fl->sdesc = kmem_zalloc(sizeof (struct fl_sdesc) * eq->cap,
-		    KM_SLEEP);
+		const size_t sdesc_sz =
+		    eq->cap * FL_BUF_PER_BLOCK * sizeof (struct fl_sdesc);
+		fl->sdesc = kmem_zalloc(sdesc_sz, KM_SLEEP);
 		eq->flags |= EQ_ALLOC_DESC;
 
 		FL_LOCK(fl);
-		(void) t4_refill_fl(fl, fl->lowat);
+		(void) t4_fl_refill(fl, fl->lowat);
 		FL_UNLOCK(fl);
 	}
 
@@ -1217,11 +1221,13 @@ t4_free_iq(struct port_info *pi, struct sge_iq *iq)
 	if (fl != NULL) {
 		if (eq->flags & EQ_ALLOC_DESC) {
 			FL_LOCK(fl);
-			free_fl_bufs(fl);
+			t4_fl_free_bufs(fl);
 			FL_UNLOCK(fl);
 
-			kmem_free(fl->sdesc, sizeof (struct fl_sdesc) *
-			    eq->cap);
+			const size_t sdesc_sz =
+			    eq->cap * FL_BUF_PER_BLOCK *
+			    sizeof (struct fl_sdesc);
+			kmem_free(fl->sdesc, sdesc_sz);
 			fl->sdesc = NULL;
 
 			eq->flags &= ~EQ_ALLOC_DESC;
@@ -1333,24 +1339,9 @@ t4_alloc_eq_base(struct port_info *pi, struct sge_eq *eq, t4_eq_type_t eqtype)
 	eq->flags |= EQ_ALLOC_HOST;
 
 	eq->cap = eq->qsize - (sc->sge.stat_len / esize);
-	if (eqtype == TET_FREELIST) {
-		/*
-		 * While the entry size for freelists reflects what the adapter
-		 * is expecting: that freelist pointers are provided to it in
-		 * 64-byte (8 x 64-bit pointers) blocks, our handling of the
-		 * entries themselves are single pointers at a time.
-		 *
-		 * As such, the capacity reflects the count of 64-bit pointer
-		 * entries.  The logic for ringing the freelist doorbell takes
-		 * this into account.
-		 */
-		eq->cap *= FL_BUF_PER_BLOCK;
-		eq->spg = NULL;
-	} else {
-		eq->spg = t4_eq_txd(eq, eq->cap);
-	}
 	eq->avail = eq->cap - 1;	/* one less to avoid cidx = pidx */
 	eq->pidx = eq->cidx = 0;
+	eq->spg = t4_eq_desc(eq, eq->cap);
 
 	return (0);
 }
@@ -1750,6 +1741,42 @@ iq_next(struct sge_iq *iq)
 	}
 }
 
+static inline bool
+t4_fl_running_low(const struct sge_fl *fl)
+{
+	const uint_t buf_cap = fl->eq.cap * FL_BUF_PER_BLOCK;
+	return ((buf_cap - fl->needed) <= fl->lowat);
+}
+
+static inline bool
+t4_fl_not_running_low(const struct sge_fl *fl)
+{
+	const uint_t buf_cap = fl->eq.cap * FL_BUF_PER_BLOCK;
+	return ((buf_cap - fl->needed) >= (2 * fl->lowat));
+}
+
+static bool
+t4_fl_update_consumed(struct sge_fl *fl)
+{
+	struct sge_eq *eq = &fl->eq;
+
+	EQ_LOCK_ASSERT_OWNED(eq);
+
+	const uint_t cur_cidx = BE_16(eq->spg->cidx);
+	const uint_t consumed_since = (cur_cidx >= eq->cidx) ?
+	    (cur_cidx - eq->cidx) : (cur_cidx + eq->cap - eq->cidx);
+
+	if (consumed_since != 0) {
+		eq->avail += consumed_since;
+		eq->cidx += consumed_since;
+
+		if (eq->cidx >= eq->cap) {
+			eq->cidx -= eq->cap;
+		}
+	}
+	return (eq->avail != 0);
+}
+
 /*
  * Fill up the freelist by upto nbufs and maybe ring its doorbell.
  *
@@ -1757,17 +1784,19 @@ iq_next(struct sge_iq *iq)
  * freelists.
  */
 static bool
-t4_refill_fl(struct sge_fl *fl, uint_t nbufs)
+t4_fl_refill(struct sge_fl *fl, uint_t nbufs)
 {
 	struct adapter *sc = fl->iq->adapter;
 	struct sge_eq *eq = &fl->eq;
-	uint64_t *d = t4_eq_txd(eq, eq->pidx);
-	struct fl_sdesc *sd = &fl->sdesc[eq->pidx];
 
-	FL_LOCK_ASSERT_OWNED(fl);
+	EQ_LOCK_ASSERT_OWNED(eq);
 
 	nbufs = MIN(nbufs, fl->needed);
-	while (nbufs--) {
+	while (nbufs != 0 && t4_fl_update_consumed(fl)) {
+		struct fl_desc *fld = t4_eq_desc(eq, eq->pidx);
+		struct fl_sdesc *sd =
+		    &fl->sdesc[(eq->pidx * FL_BUF_PER_BLOCK) + fl->desc_idx];
+
 		if (sd->rxb != NULL) {
 			if (sd->rxb->ref_cnt == 1) {
 				/*
@@ -1787,9 +1816,8 @@ t4_refill_fl(struct sge_fl *fl, uint_t nbufs)
 				 * Either way the bus address in the descriptor
 				 * ring is already valid.
 				 */
-				ASSERT(*d == cpu_to_be64(sd->rxb->ba));
-				d++;
-				goto recycled;
+				ASSERT3U(fld->dptr[fl->desc_idx], ==,
+				    BE_64(sd->rxb->ba));
 			} else {
 				/*
 				 * Buffer still in use and we need a
@@ -1797,29 +1825,40 @@ t4_refill_fl(struct sge_fl *fl, uint_t nbufs)
 				 * on the existing buffer.
 				 */
 				rxbuf_free(sd->rxb);
+				sd->rxb = NULL;
 			}
 		}
 
-		sd->rxb = rxbuf_alloc(sc->sge.rxbuf_cache, KM_NOSLEEP, 1);
-		if (sd->rxb == NULL)
-			break;
-		*d++ = cpu_to_be64(sd->rxb->ba);
+		if (sd->rxb == NULL) {
+			sd->rxb = rxbuf_alloc(sc->sge.rxbuf_cache, KM_NOSLEEP);
+			if (sd->rxb == NULL)
+				break;
+		}
+		fld->dptr[fl->desc_idx] = BE_64(sd->rxb->ba);
 
-recycled:
-		eq->pending++;
-		sd++;
+		nbufs--;
 		fl->needed--;
-		if (++eq->pidx == eq->cap) {
-			eq->pidx = 0;
-			sd = fl->sdesc;
-			d = t4_eq_txd(eq, 0);
+		fl->desc_idx++;
+		if (fl->desc_idx == FL_BUF_PER_BLOCK) {
+			/*
+			 * An 8-entry block was filled, so it can be considered
+			 * available to be posted to the device.
+			 */
+			fl->desc_idx = 0;
+			eq->pending++;
+			eq->avail--;
+			eq->pidx++;
+			if (eq->pidx == eq->cap) {
+				eq->pidx = 0;
+			}
 		}
 	}
 
-	if (eq->pending >= 8)
+	if (eq->pending != 0) {
 		t4_fl_ring_db(fl);
+	}
 
-	return (FL_RUNNING_LOW(fl) && !(fl->flags & FL_STARVING));
+	return (t4_fl_running_low(fl) && !(fl->flags & FL_STARVING));
 }
 
 static clock_t t4_sfl_period_us = 100000;
@@ -1848,8 +1887,8 @@ t4_sfl_process(void *arg)
 		struct sge_fl *next = list_next(&sc->sfl_list, fl);
 
 		FL_LOCK(fl);
-		(void) t4_refill_fl(fl, 64);
-		if (FL_NOT_RUNNING_LOW(fl) || fl->flags & FL_DOOMED) {
+		(void) t4_fl_refill(fl, 64);
+		if (t4_fl_not_running_low(fl) || fl->flags & FL_DOOMED) {
 			list_remove(&sc->sfl_list, fl);
 			fl->flags &= ~FL_STARVING;
 		}
@@ -1882,16 +1921,14 @@ t4_sfl_enqueue(struct adapter *sc, struct sge_fl *fl)
 }
 
 static void
-free_fl_bufs(struct sge_fl *fl)
+t4_fl_free_bufs(struct sge_fl *fl)
 {
 	struct sge_eq *eq = &fl->eq;
-	struct fl_sdesc *sd;
-	unsigned int i;
 
-	FL_LOCK_ASSERT_OWNED(fl);
+	EQ_LOCK_ASSERT_OWNED(eq);
 
-	for (i = 0; i < eq->cap; i++) {
-		sd = &fl->sdesc[i];
+	for (uint_t i = 0; i < eq->cap * FL_BUF_PER_BLOCK; i++) {
+		struct fl_sdesc *sd = &fl->sdesc[i];
 
 		if (sd->rxb != NULL) {
 			rxbuf_free(sd->rxb);
@@ -2363,7 +2400,7 @@ add_to_txpkts(struct sge_txq *txq, struct txpkts *txpkts, mblk_t *m,
 	/*
 	 * Start a fresh coalesced tx WR with m as the first frame in it.
 	 */
-	struct tx_desc *txds = t4_eq_txd(eq, eq->pidx);
+	struct tx_desc *txds = t4_eq_desc(eq, eq->pidx);
 	txpkts->tail = m;
 	txpkts->npkt = 1;
 	txpkts->nflits = flits;
@@ -2421,7 +2458,7 @@ write_txpkts_wr(struct sge_txq *txq, struct txpkts *txpkts)
 		.npkt = txpkts->npkt,
 		.type = 0,
 	};
-	bcopy(&wr, t4_eq_txd(eq, eq->pidx), sizeof (wr));
+	bcopy(&wr, t4_eq_desc(eq, eq->pidx), sizeof (wr));
 
 	/* Everything else already written */
 
@@ -2583,7 +2620,7 @@ write_txpkt_wr(struct port_info *pi, struct sge_txq *txq, mblk_t *m,
 		return (ENOMEM);
 
 	/* Firmware work request header */
-	struct fw_eth_tx_pkt_wr *wr = t4_eq_txd(eq, eq->pidx);
+	struct fw_eth_tx_pkt_wr *wr = t4_eq_desc(eq, eq->pidx);
 	wr->op_immdlen = cpu_to_be32(V_FW_WR_OP(FW_ETH_TX_PKT_WR) |
 	    V_FW_WR_IMMDLEN(ctrl));
 	ctrl = V_FW_WR_LEN16(howmany(nflits, 2));
@@ -2715,7 +2752,7 @@ t4_write_flush_wr(struct sge_txq *txq)
 		    V_FW_WR_LEN16(sizeof (struct fw_eq_flush_wr) / 16) |
 		    F_FW_WR_EQUEQ | F_FW_WR_EQUIQ),
 	};
-	*(struct fw_eq_flush_wr *)t4_eq_txd(eq, eq->pidx) = wr;
+	*(struct fw_eq_flush_wr *)t4_eq_desc(eq, eq->pidx) = wr;
 
 	const struct tx_sdesc txsd = {
 		.m = NULL,
@@ -2886,7 +2923,7 @@ t4_tx_ring_db(struct sge_txq *txq)
 
 			const uint_t desc_idx =
 			    eq->pidx != 0 ? eq->pidx - 1 : eq->cap - 1;
-			uint64_t *src = t4_eq_txd(eq, desc_idx);
+			uint64_t *src = t4_eq_desc(eq, desc_idx);
 			uint64_t *dst =  (uint64_t *)(eq->udb + UDBS_WR_OFFSET);
 
 			/* Copy the 8 flits of the TX descriptor to the DB */
@@ -3043,29 +3080,18 @@ t4_handle_fw_msg(struct sge_iq *iq, const struct rss_header *rss)
 	}
 }
 
-/* Freelist entries are delivered in blocks of 8 to the device */
-#define	FL_DESC_BLOCK(idx)	((idx) / FL_BUF_PER_BLOCK)
-
 static void
 t4_fl_ring_db(struct sge_fl *fl)
 {
 	struct adapter *sc = fl->iq->adapter;
 	struct sge_eq *eq = &fl->eq;
 
-	uint_t ndesc = FL_DESC_BLOCK(eq->pending);
-	/* Hold back one credit if pidx = cidx */
-	if (FL_DESC_BLOCK(eq->pidx) == FL_DESC_BLOCK(eq->cidx)) {
-		if (ndesc <= 1) {
-			return;
-		}
-		ndesc--;
-	}
+	EQ_LOCK_ASSERT_OWNED(eq);
 
 	if (eq->pidx < eq->pending) {
 		/* Wrap-around means two intervals to be synced */
-		const uint_t desc_start =
-		    FL_DESC_BLOCK(eq->pidx + eq->cap - eq->pending);
-		const uint_t desc_last = FL_DESC_BLOCK(eq->pidx);
+		const uint_t desc_start = eq->pidx + eq->cap - eq->pending;
+		const uint_t desc_last = eq->pidx;
 
 		(void) ddi_dma_sync(eq->desc_dhdl, desc_start * RX_FL_ESIZE, 0,
 		    DDI_DMA_SYNC_FORDEV);
@@ -3075,17 +3101,19 @@ t4_fl_ring_db(struct sge_fl *fl)
 			    RX_FL_ESIZE, DDI_DMA_SYNC_FORDEV);
 		}
 	} else {
-		const uint_t desc_start = FL_DESC_BLOCK(eq->pidx - eq->pending);
+		const uint_t desc_start = eq->pidx - eq->pending;
 		(void) ddi_dma_sync(eq->desc_dhdl, desc_start * RX_FL_ESIZE,
-		    ndesc * RX_FL_ESIZE, DDI_DMA_SYNC_FORDEV);
+		    eq->pending * RX_FL_ESIZE, DDI_DMA_SYNC_FORDEV);
 	}
 
 	membar_producer();
 
 	t4_write_reg(sc, MYPF_REG(A_SGE_PF_KDOORBELL),
-	    sc->params.arch.sge_fl_db | V_QID(eq->cntxt_id) | V_PIDX(ndesc));
+	    sc->params.arch.sge_fl_db |
+	    V_QID(eq->cntxt_id) |
+	    V_PIDX(eq->pending));
 
-	eq->pending -= ndesc * FL_BUF_PER_BLOCK;
+	eq->pending = 0;
 }
 
 static void
@@ -3500,20 +3528,14 @@ rxbuf_cache_create(struct rxbuf_cache_params *p)
 	    rxbuf_ctor, rxbuf_dtor, NULL, p, NULL, 0);
 }
 
-/*
- * If ref_cnt is more than 1 then those many calls to rxbuf_free will
- * have to be made before the rxb is released back to the kmem_cache.
- */
 static struct rxbuf *
-rxbuf_alloc(kmem_cache_t *cache, int kmflags, uint_t ref_cnt)
+rxbuf_alloc(kmem_cache_t *cache, int kmflags)
 {
 	struct rxbuf *rxb;
 
-	ASSERT(ref_cnt > 0);
-
 	rxb = kmem_cache_alloc(cache, kmflags);
 	if (rxb != NULL) {
-		rxb->ref_cnt = ref_cnt;
+		rxb->ref_cnt = 1;
 		rxb->cache = cache;
 	}
 

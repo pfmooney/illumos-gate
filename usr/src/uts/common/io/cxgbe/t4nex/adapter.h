@@ -132,6 +132,10 @@ struct port_info {
 	u8 vin_mirror;
 };
 
+struct fl_desc {
+	__be64 dptr[FL_BUF_PER_BLOCK];
+};
+
 struct fl_sdesc {
 	struct rxbuf *rxb;
 };
@@ -316,6 +320,12 @@ struct sge_fl_stats {
 
 struct sge_fl {
 	struct sge_eq eq;
+
+	/*
+	 * Index at which new buffers are to be placed in the FL descriptor
+	 * which is currently being produced for the device.
+	 */
+	uint_t desc_idx;
 
 	t4_fl_flags_t flags;
 	struct sge_iq *iq;	/* IQ which this FL is associated with */
@@ -580,15 +590,14 @@ struct adapter {
 #define	IQ_LOCK_ASSERT_OWNED(iq)	ASSERT(mutex_owned(&(iq)->lock))
 #define	IQ_LOCK_ASSERT_NOTOWNED(iq)	ASSERT(!mutex_owned(&(iq)->lock))
 
-#define	FL_LOCK(fl)			mutex_enter(&(fl)->eq.lock)
-#define	FL_UNLOCK(fl)			mutex_exit(&(fl)->eq.lock)
-#define	FL_LOCK_ASSERT_OWNED(fl)	ASSERT(mutex_owned(&(fl)->eq.lock))
-#define	FL_LOCK_ASSERT_NOTOWNED(fl)	ASSERT(!mutex_owned(&(fl)->eq.lock))
-
 #define	EQ_LOCK(eq)			mutex_enter(&(eq)->lock)
 #define	EQ_UNLOCK(eq)			mutex_exit(&(eq)->lock)
 #define	EQ_LOCK_ASSERT_OWNED(eq)	ASSERT(mutex_owned(&(eq)->lock))
 #define	EQ_LOCK_ASSERT_NOTOWNED(eq)	ASSERT(!mutex_owned(&(eq)->lock))
+
+/* Freelist state is protected by its EQ lock */
+#define	FL_LOCK(fl)			EQ_LOCK(&(fl)->eq)
+#define	FL_UNLOCK(fl)			EQ_UNLOCK(&(fl)->eq)
 
 #define	TXQ_LOCK(txq)			EQ_LOCK(&(txq)->eq)
 #define	TXQ_UNLOCK(txq)			EQ_UNLOCK(&(txq)->eq)

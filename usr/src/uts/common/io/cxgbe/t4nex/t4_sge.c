@@ -775,7 +775,9 @@ bail:
 		 * entries remaining to process _and_ we are not bailing out of
 		 * processing the IQ from which the interrupt event was sourced.
 		 */
-		if (intr_rc == 0 || rc != 0) {
+		const bool iq_over_budget =
+		    (intr_rc == EINPROGRESS || intr_rc == ENOSPC);
+		if (!iq_over_budget || rc != 0) {
 			list_remove(&iql_fwd, intr_iq);
 		}
 		intr_iq = next;

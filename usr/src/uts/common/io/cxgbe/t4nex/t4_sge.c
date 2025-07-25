@@ -1173,6 +1173,12 @@ t4_free_iq(struct port_info *pi, struct sge_iq *iq)
 	struct sge_fl *fl = iq->fl;
 	struct sge_eq *eq = fl != NULL ? &fl->eq : NULL;
 
+	/*
+	 * The onus is placed on the caller to ensure that no further activity
+	 * will occur on this IQ.
+	 */
+	iq->flags &= ~IQ_ENABLED;
+
 	if (iq->flags & IQ_ALLOC_DEV) {
 		/*
 		 * Device-side resources of freelists are allocated in concert

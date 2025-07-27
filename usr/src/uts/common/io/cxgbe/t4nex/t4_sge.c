@@ -750,7 +750,9 @@ repeat:
 
 		if (ndescs == limit) {
 			t4_iq_gts_incr(iq, ndescs);
-			(void) t4_fl_periodic_refill(fl);
+			if (fl != NULL) {
+				(void) t4_fl_periodic_refill(fl);
+			}
 
 			ndescs = 0;
 
@@ -809,7 +811,7 @@ bail:
 		}
 	}
 
-	if (t4_fl_periodic_refill(fl)) {
+	if (fl != NULL && t4_fl_periodic_refill(fl)) {
 		t4_sfl_enqueue(sc, fl);
 	}
 	return (rc);

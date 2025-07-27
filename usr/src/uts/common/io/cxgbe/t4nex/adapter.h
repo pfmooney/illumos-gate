@@ -325,7 +325,8 @@ struct sge_fl {
 	 * Index at which new buffers are to be placed in the FL descriptor
 	 * which is currently being produced for the device.
 	 */
-	uint_t desc_idx;
+	uint8_t cidx_sdesc;
+	uint8_t pidx_sdesc;
 
 	t4_fl_flags_t flags;
 	struct sge_iq *iq;	/* IQ which this FL is associated with */

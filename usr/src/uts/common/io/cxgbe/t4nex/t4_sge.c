@@ -69,10 +69,6 @@ struct txinfo {
 	struct ulptx_sge_pair reserved[TX_SGL_SEGS / 2];
 };
 
-struct mblk_pair {
-	mblk_t *head, *tail;
-};
-
 struct rxbuf {
 	kmem_cache_t *cache;		/* the kmem_cache this rxb came from */
 	ddi_dma_handle_t dhdl;
@@ -123,7 +119,7 @@ static bool t4_fl_refill(struct sge_fl *, uint_t);
 static void t4_sfl_enqueue(struct adapter *, struct sge_fl *);
 static void t4_sfl_process(void *);
 static void t4_fl_free_bufs(struct sge_fl *fl);
-static mblk_t *t4_get_fl_payload(struct sge_fl *, uint32_t, uint_t *);
+static mblk_t *t4_fl_get_payload(struct sge_fl *, uint32_t, bool);
 static int get_frame_txinfo(struct sge_txq *txq, mblk_t **fp,
     struct txinfo *txinfo, int sgl_only);
 static inline int fits_in_txb(struct sge_txq *txq, int len, int *waste);
@@ -604,16 +600,11 @@ t4_intr_port_queues(caddr_t arg1, caddr_t arg2)
 }
 
 static bool
-t4_fl_periodic_refill(struct sge_fl *fl, uint_t bufs_used)
+t4_fl_periodic_refill(struct sge_fl *fl)
 {
-	bool starved = false;
-
-	if (bufs_used != 0) {
-		FL_LOCK(fl);
-		fl->needed += bufs_used;
-		starved = t4_fl_refill(fl, fl->eq.cap);
-		FL_UNLOCK(fl);
-	}
+	FL_LOCK(fl);
+	const bool starved = t4_fl_refill(fl, fl->eq.cap);
+	FL_UNLOCK(fl);
 
 	return (starved);
 }
@@ -625,7 +616,7 @@ t4_service_iq(struct sge_iq *iq, uint_t desc_budget, struct t4_poll_req *tpr)
 	struct sge_fl *fl = iq->fl;
 	struct sge_rxq *rxq = t4_iq_to_rxq(iq);
 	struct rsp_ctrl ctrl;
-	uint_t ndescs = 0, fl_used = 0, rx_bytes = 0;
+	uint_t ndescs = 0, rx_bytes = 0;
 	int rc = 0;
 	mblk_t *mp_head = NULL, **mp_tail = &mp_head;
 	const uint_t limit = (desc_budget != 0) ? desc_budget : iq->qsize / 8;
@@ -659,12 +650,15 @@ repeat:
 		const struct rss_header *rss =
 		    (const struct rss_header *)iq->cdesc;
 
+		DTRACE_PROBE3(t4__iq__entry, struct sge_iq *, iq,
+		    struct rsp_ctrl *, &ctrl, struct rss_header *, rss);
+
 		switch (rsp_type) {
 		case X_RSPD_TYPE_FLBUF: {
 			ASSERT(fl != NULL);
 			ASSERT(rxq != NULL);
 
-			const uint32_t dlen = BE_32(ctrl.pldbuflen_qid);
+			const uint32_t dlen_nb = BE_32(ctrl.pldbuflen_qid);
 			const struct cpl_rx_pkt *cpl = t4_rss_payload(rss);
 
 			if (rss->opcode == CPL_RX_PKT) {
@@ -678,7 +672,10 @@ repeat:
 				}
 			}
 
-			mblk_t *mp = t4_get_fl_payload(fl, dlen, &fl_used);
+			const bool newbuf = (dlen_nb & F_RSPD_NEWBUF) != 0;
+			const uint32_t data_len = G_RSPD_LEN(dlen_nb);
+			mblk_t *mp =
+			    t4_fl_get_payload(fl, data_len, newbuf);
 			if (mp == NULL) {
 				/* Rearm IQ with longer-than-default timer */
 				t4_iq_gts_update(iq, TIC_TIMER5, ndescs);
@@ -753,10 +750,9 @@ repeat:
 
 		if (ndescs == limit) {
 			t4_iq_gts_incr(iq, ndescs);
-			(void) t4_fl_periodic_refill(fl, fl_used);
+			(void) t4_fl_periodic_refill(fl);
 
 			ndescs = 0;
-			fl_used = 0;
 
 			if (desc_budget != 0) {
 				rc = EINPROGRESS;
@@ -813,7 +809,7 @@ bail:
 		}
 	}
 
-	if (t4_fl_periodic_refill(fl, fl_used)) {
+	if (t4_fl_periodic_refill(fl)) {
 		t4_sfl_enqueue(sc, fl);
 	}
 	return (rc);
@@ -1755,26 +1751,34 @@ t4_fl_not_running_low(const struct sge_fl *fl)
 	return ((buf_cap - fl->needed) >= (2 * fl->lowat));
 }
 
-static bool
-t4_fl_update_consumed(struct sge_fl *fl)
+static inline uint_t
+t4_fl_advance_cidx(struct sge_fl *fl)
 {
 	struct sge_eq *eq = &fl->eq;
 
 	EQ_LOCK_ASSERT_OWNED(eq);
+	ASSERT3U(fl->cidx_sdesc, <, FL_BUF_PER_BLOCK);
+	ASSERT3U(eq->cidx, <, eq->cap);
 
-	const uint_t cur_cidx = BE_16(eq->spg->cidx);
-	const uint_t consumed_since = (cur_cidx >= eq->cidx) ?
-	    (cur_cidx - eq->cidx) : (cur_cidx + eq->cap - eq->cidx);
-
-	if (consumed_since != 0) {
-		eq->avail += consumed_since;
-		eq->cidx += consumed_since;
-
-		if (eq->cidx >= eq->cap) {
-			eq->cidx -= eq->cap;
+	fl->cidx_sdesc++;
+	if (fl->cidx_sdesc == FL_BUF_PER_BLOCK) {
+		fl->cidx_sdesc = 0;
+		eq->cidx++;
+		if (eq->cidx == eq->cap) {
+			eq->cidx = 0;
 		}
+		return (1);
 	}
-	return (eq->avail != 0);
+	return (0);
+}
+
+static inline struct fl_sdesc *
+t4_fl_sdesc(struct sge_fl *fl, uint_t eq_idx, uint_t sdesc_idx)
+{
+	ASSERT(sdesc_idx < FL_BUF_PER_BLOCK);
+	const uint_t idx = (eq_idx * FL_BUF_PER_BLOCK) + sdesc_idx;
+
+	return (&fl->sdesc[idx]);
 }
 
 /*
@@ -1792,10 +1796,9 @@ t4_fl_refill(struct sge_fl *fl, uint_t nbufs)
 	EQ_LOCK_ASSERT_OWNED(eq);
 
 	nbufs = MIN(nbufs, fl->needed);
-	while (nbufs != 0 && t4_fl_update_consumed(fl)) {
+	while (nbufs != 0 && eq->avail != 0) {
 		struct fl_desc *fld = t4_eq_desc(eq, eq->pidx);
-		struct fl_sdesc *sd =
-		    &fl->sdesc[(eq->pidx * FL_BUF_PER_BLOCK) + fl->desc_idx];
+		struct fl_sdesc *sd = t4_fl_sdesc(fl, eq->pidx, fl->pidx_sdesc);
 
 		if (sd->rxb != NULL) {
 			if (sd->rxb->ref_cnt == 1) {
@@ -1816,7 +1819,7 @@ t4_fl_refill(struct sge_fl *fl, uint_t nbufs)
 				 * Either way the bus address in the descriptor
 				 * ring is already valid.
 				 */
-				ASSERT3U(fld->dptr[fl->desc_idx], ==,
+				ASSERT3U(fld->dptr[fl->pidx_sdesc], ==,
 				    BE_64(sd->rxb->ba));
 			} else {
 				/*
@@ -1834,17 +1837,17 @@ t4_fl_refill(struct sge_fl *fl, uint_t nbufs)
 			if (sd->rxb == NULL)
 				break;
 		}
-		fld->dptr[fl->desc_idx] = BE_64(sd->rxb->ba);
+		fld->dptr[fl->pidx_sdesc] = BE_64(sd->rxb->ba);
 
 		nbufs--;
 		fl->needed--;
-		fl->desc_idx++;
-		if (fl->desc_idx == FL_BUF_PER_BLOCK) {
+		fl->pidx_sdesc++;
+		if (fl->pidx_sdesc == FL_BUF_PER_BLOCK) {
 			/*
 			 * An 8-entry block was filled, so it can be considered
 			 * available to be posted to the device.
 			 */
-			fl->desc_idx = 0;
+			fl->pidx_sdesc = 0;
 			eq->pending++;
 			eq->avail--;
 			eq->pidx++;
@@ -1941,92 +1944,95 @@ t4_fl_free_bufs(struct sge_fl *fl)
  * Note that eq->cidx and fl->offset are left unchanged in case of failure.
  */
 static mblk_t *
-t4_get_fl_payload(struct sge_fl *fl, uint32_t len_newbuf, uint_t *fl_bufs_used)
+t4_fl_get_payload(struct sge_fl *fl, uint32_t len, bool newbuf)
 {
 	struct adapter *sc = fl->iq->adapter;
 	struct sge_eq *eq = &fl->eq;
-	struct mblk_pair frame = {0};
-	struct rxbuf *rxb;
-	mblk_t *m = NULL;
-	uint_t nbuf = 0, len, copy, n;
-	uint32_t cidx, offset, rcidx, roffset;
+	mblk_t *mp = NULL;
+	mblk_t *head = NULL, **tailp = &head;
+	uint_t bufs_consumed = 0;
 
+	FL_LOCK(fl);
 	/*
 	 * The SGE won't pack a new frame into the current buffer if the entire
 	 * payload doesn't fit in the remaining space.  Move on to the next buf
 	 * in that case.
 	 */
-	rcidx = eq->cidx;
-	roffset = fl->offset;
-	if (fl->offset > 0 && len_newbuf & F_RSPD_NEWBUF) {
-		fl->offset = 0;
-		if (++eq->cidx == eq->cap)
-			eq->cidx = 0;
-		nbuf++;
-	}
-	cidx = eq->cidx;
-	offset = fl->offset;
+	const uint16_t rcidx = eq->cidx;
+	const uint_t rcidx_sdesc = fl->cidx_sdesc;
+	const uint32_t roffset = fl->offset;
+	uint_t new_avail = 0;
 
-	len = G_RSPD_LEN(len_newbuf);	/* pktshift + payload length */
-	copy = (len <= fl->copy_threshold);
-	if (copy != 0) {
-		frame.head = m = allocb(len, BPRI_HI);
-		if (m == NULL) {
+	if (fl->offset > 0 && newbuf) {
+		fl->offset = 0;
+		new_avail += t4_fl_advance_cidx(fl);
+		bufs_consumed++;
+	}
+
+	const bool do_copy = (len <= fl->copy_threshold);
+	if (do_copy) {
+		mp = allocb(len, 0);
+		if (mp == NULL) {
 			fl->stats.allocb_fail++;
 			DTRACE_PROBE1(t4__fl_alloc_fail, struct sge_fl *, fl);
-			eq->cidx = rcidx;
-			fl->offset = roffset;
-			return (NULL);
+			goto restore;
 		}
+		*tailp = mp;
+		tailp = &mp->b_cont;
 	}
 
-	while (len) {
-		rxb = fl->sdesc[cidx].rxb;
-		n = min(len, rxb->buf_size - offset);
+	uint_t offset = fl->offset;
+	while (len != 0) {
+		struct rxbuf *rxb =
+		    t4_fl_sdesc(fl, eq->cidx, fl->cidx_sdesc)->rxb;
+		const uint_t copy_len = MIN(len, rxb->buf_size - offset);
 
-		(void) ddi_dma_sync(rxb->dhdl, offset, n,
+		(void) ddi_dma_sync(rxb->dhdl, offset, copy_len,
 		    DDI_DMA_SYNC_FORKERNEL);
 
-		if (copy != 0)
-			bcopy(rxb->va + offset, m->b_wptr, n);
-		else {
-			m = desballoc((unsigned char *)rxb->va + offset, n,
-			    BPRI_HI, &rxb->freefunc);
-			if (m == NULL) {
+		if (do_copy) {
+			bcopy(rxb->va + offset, mp->b_wptr, copy_len);
+		} else {
+			mp = desballoc((unsigned char *)rxb->va + offset,
+			    copy_len, 0, &rxb->freefunc);
+			if (mp == NULL) {
 				fl->stats.allocb_fail++;
 				DTRACE_PROBE1(t4__fl_alloc_fail,
 				    struct sge_fl *, fl);
-				if (frame.head)
-					freemsgchain(frame.head);
-				eq->cidx = rcidx;
-				fl->offset = roffset;
-				return (NULL);
+				goto restore;
 			}
 			atomic_inc_uint(&rxb->ref_cnt);
-			if (frame.head != NULL)
-				frame.tail->b_cont = m;
-			else
-				frame.head = m;
-			frame.tail = m;
+			*tailp = mp;
+			tailp = &mp->b_cont;
 		}
-		m->b_wptr += n;
-		len -= n;
-		offset += roundup(n, sc->sge.fl_align);
-		ASSERT(offset <= rxb->buf_size);
+		mp->b_wptr += copy_len;
+		len -= copy_len;
+		offset += roundup(copy_len, sc->sge.fl_align);
+
+		ASSERT3U(offset, <=, rxb->buf_size);
 		if (offset == rxb->buf_size) {
 			offset = 0;
-			if (++cidx == eq->cap)
-				cidx = 0;
-			nbuf++;
+			new_avail += t4_fl_advance_cidx(fl);
+			bufs_consumed++;
 		}
 	}
-
-	eq->cidx = cidx;
 	fl->offset = offset;
-	(*fl_bufs_used) += nbuf;
+	eq->avail += new_avail;
+	fl->needed += bufs_consumed;
 
-	ASSERT(frame.head != NULL);
-	return (frame.head);
+	FL_UNLOCK(fl);
+
+	ASSERT(head != NULL);
+	return (head);
+
+restore:
+	eq->cidx = rcidx;
+	fl->cidx_sdesc = rcidx_sdesc;
+	fl->offset = roffset;
+	FL_UNLOCK(fl);
+	freemsgchain(head);
+
+	return (NULL);
 }
 
 /*

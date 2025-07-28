@@ -111,8 +111,6 @@ static int free_desc_ring(ddi_dma_handle_t *dhdl, ddi_acc_handle_t *ahdl);
 static int alloc_tx_copybuffer(struct adapter *sc, size_t len,
     ddi_dma_handle_t *dma_hdl, ddi_acc_handle_t *acc_hdl, uint64_t *pba,
     caddr_t *pva);
-static inline bool is_new_response(const struct sge_iq *iq,
-    struct rsp_ctrl **ctrl);
 static inline bool t4_get_new_rsp(const struct sge_iq *, struct rsp_ctrl *);
 static inline void iq_next(struct sge_iq *iq);
 static bool t4_fl_refill(struct sge_fl *, uint_t);
@@ -1706,22 +1704,9 @@ alloc_tx_copybuffer(struct adapter *sc, size_t len,
 }
 
 static inline bool
-is_new_response(const struct sge_iq *iq, struct rsp_ctrl **ctrl)
-{
-	(void) ddi_dma_sync(iq->dhdl, (uintptr_t)iq->cdesc -
-	    (uintptr_t)iq->desc, iq->esize, DDI_DMA_SYNC_FORKERNEL);
-
-	*ctrl = (void *)((uintptr_t)iq->cdesc +
-	    (iq->esize - sizeof (struct rsp_ctrl)));
-
-	return ((((*ctrl)->u.type_gen >> S_RSPD_GEN) == iq->gen));
-}
-
-static inline bool
 t4_get_new_rsp(const struct sge_iq *iq, struct rsp_ctrl *ctrl)
 {
-	(void) ddi_dma_sync(iq->dhdl, (uintptr_t)iq->cdesc -
-	    (uintptr_t)iq->desc, iq->esize, DDI_DMA_SYNC_FORKERNEL);
+	(void) ddi_dma_sync(iq->dhdl, 0, 0, DDI_DMA_SYNC_FORKERNEL);
 
 	*ctrl = *(struct rsp_ctrl *)
 	    ((caddr_t)iq->cdesc + (iq->esize - sizeof (struct rsp_ctrl)));
@@ -1989,8 +1974,7 @@ t4_fl_get_payload(struct sge_fl *fl, uint32_t len, bool newbuf)
 		    t4_fl_sdesc(fl, eq->cidx, fl->cidx_sdesc)->rxb;
 		const uint_t copy_len = MIN(len, rxb->buf_size - offset);
 
-		(void) ddi_dma_sync(rxb->dhdl, offset, copy_len,
-		    DDI_DMA_SYNC_FORKERNEL);
+		(void) ddi_dma_sync(rxb->dhdl, 0, 0, DDI_DMA_SYNC_FORKERNEL);
 
 		if (do_copy) {
 			bcopy(rxb->va + offset, mp->b_wptr, copy_len);
@@ -2896,23 +2880,7 @@ t4_tx_ring_db(struct sge_txq *txq)
 	if (eq->pending > 1)
 		db &= ~DOORBELL_WCWR;
 
-	if (eq->pending > eq->pidx) {
-		int offset = eq->cap - (eq->pending - eq->pidx);
-
-		/* pidx has wrapped around since last doorbell */
-
-		(void) ddi_dma_sync(eq->desc_dhdl,
-		    offset * sizeof (struct tx_desc), 0,
-		    DDI_DMA_SYNC_FORDEV);
-		(void) ddi_dma_sync(eq->desc_dhdl,
-		    0, eq->pidx * sizeof (struct tx_desc),
-		    DDI_DMA_SYNC_FORDEV);
-	} else if (eq->pending > 0) {
-		(void) ddi_dma_sync(eq->desc_dhdl,
-		    (eq->pidx - eq->pending) * sizeof (struct tx_desc),
-		    eq->pending * sizeof (struct tx_desc),
-		    DDI_DMA_SYNC_FORDEV);
-	}
+	(void) ddi_dma_sync(eq->desc_dhdl, 0, 0, DDI_DMA_SYNC_FORDEV);
 
 	membar_producer();
 
@@ -3096,23 +3064,7 @@ t4_fl_ring_db(struct sge_fl *fl)
 
 	EQ_LOCK_ASSERT_OWNED(eq);
 
-	if (eq->pidx < eq->pending) {
-		/* Wrap-around means two intervals to be synced */
-		const uint_t desc_start = eq->pidx + eq->cap - eq->pending;
-		const uint_t desc_last = eq->pidx;
-
-		(void) ddi_dma_sync(eq->desc_dhdl, desc_start * RX_FL_ESIZE, 0,
-		    DDI_DMA_SYNC_FORDEV);
-
-		if (desc_last != 0) {
-			(void) ddi_dma_sync(eq->desc_dhdl, 0, desc_last *
-			    RX_FL_ESIZE, DDI_DMA_SYNC_FORDEV);
-		}
-	} else {
-		const uint_t desc_start = eq->pidx - eq->pending;
-		(void) ddi_dma_sync(eq->desc_dhdl, desc_start * RX_FL_ESIZE,
-		    eq->pending * RX_FL_ESIZE, DDI_DMA_SYNC_FORDEV);
-	}
+	(void) ddi_dma_sync(eq->desc_dhdl, 0, 0, DDI_DMA_SYNC_FORDEV);
 
 	membar_producer();
 

@@ -614,7 +614,7 @@ t4_service_iq(struct sge_iq *iq, uint_t desc_budget, struct t4_poll_req *tpr)
 	struct sge_fl *fl = iq->fl;
 	struct sge_rxq *rxq = t4_iq_to_rxq(iq);
 	struct rsp_ctrl ctrl;
-	uint_t ndescs = 0, rx_bytes = 0;
+	uint_t cidx_incr = 0, rx_bytes = 0, total_desc = 0;
 	int rc = 0;
 	mblk_t *mp_head = NULL, **mp_tail = &mp_head;
 	const uint_t limit = (desc_budget != 0) ? desc_budget : iq->qsize / 8;
@@ -622,10 +622,11 @@ t4_service_iq(struct sge_iq *iq, uint_t desc_budget, struct t4_poll_req *tpr)
 	list_t iql_fwd;
 
 	IQ_LOCK(iq);
+	const bool is_polling = (iq->flags & IQ_POLLING) != 0;
 	if ((iq->flags & IQ_ENABLED) == 0) {
 		IQ_UNLOCK(iq);
 		return (ENOENT);
-	} else if ((iq->flags & IQ_POLLING) != 0 && tpr == NULL) {
+	} else if (is_polling && tpr == NULL) {
 		/*
 		 * Skip IQ processing driven from interrupt when port is
 		 * configured for polling.
@@ -676,8 +677,8 @@ repeat:
 			    t4_fl_get_payload(fl, data_len, newbuf);
 			if (mp == NULL) {
 				/* Rearm IQ with longer-than-default timer */
-				t4_iq_gts_update(iq, TIC_TIMER5, ndescs);
-				ndescs = 0;
+				t4_iq_gts_update(iq, TIC_TIMER5, cidx_incr);
+				cidx_incr = 0;
 				rc = ENOMEM;
 				goto bail;
 			}
@@ -743,16 +744,17 @@ repeat:
 		}
 
 		iq_next(iq);
-		ndescs++;
+		cidx_incr++;
+		total_desc++;
 		iq->stats.sis_processed++;
 
-		if (ndescs == limit) {
-			t4_iq_gts_incr(iq, ndescs);
+		if (cidx_incr == limit) {
+			t4_iq_gts_incr(iq, cidx_incr);
 			if (fl != NULL) {
 				(void) t4_fl_periodic_refill(fl);
 			}
 
-			ndescs = 0;
+			cidx_incr = 0;
 
 			if (desc_budget != 0) {
 				rc = EINPROGRESS;
@@ -785,16 +787,28 @@ bail:
 		goto repeat;
 	}
 
-	if (ndescs != 0) {
+	if (cidx_incr != 0) {
 		if (tpr != NULL) {
 			/*
-			 * Only increment CIDX when polling, rather than
-			 * rearming any of the interrupt timers/counters.
+			 * When polling, post a GTS which only increments CIDX
+			 * and skips the rearming of timers/counters for the IQ.
 			 */
-			t4_iq_gts_incr(iq, ndescs);
+			t4_iq_gts_incr(iq, cidx_incr);
 		} else {
-			t4_iq_gts_update(iq, iq->intr_params, ndescs);
+			t4_iq_gts_update(iq, iq->intr_params, cidx_incr);
 		}
+	} else if (total_desc == 0 && !is_polling && iq->intr_evtq != NULL) {
+		/*
+		 * When switching interrupts back on (via GTS) after having the
+		 * IQ in polling mode, it has been observed that a spurious
+		 * interrupt event for the RX IQ will be posted to its
+		 * associated event IQ.
+		 *
+		 * Having found no new entries for said spurious interrupt, we
+		 * re-post the GTS to ensure that this IQ is re-armed for
+		 * interruption upon the next event arrival.
+		 */
+		t4_iq_gts_update(iq, iq->intr_params, 0);
 	}
 	IQ_UNLOCK(iq);
 

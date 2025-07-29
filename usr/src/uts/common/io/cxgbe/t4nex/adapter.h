@@ -39,9 +39,9 @@
 #include "shared.h"
 
 struct adapter;
+struct port_info;
 typedef struct adapter adapter_t;
 struct sge_fl;
-struct sge_iq;
 
 #define	FW_IQ_QSIZE	256
 #define	FW_IQ_ESIZE	64	/* At least 64 mandated by the firmware spec */
@@ -65,72 +65,6 @@ struct sge_iq;
 #define	UDBS_SEG_SHIFT	7	/* log2(UDBS_SEG_SIZE) */
 #define	UDBS_DB_OFFSET	8	/* offset of the 4B doorbell in a segment */
 #define	UDBS_WR_OFFSET	64	/* offset of the work request in a segment */
-
-typedef enum t4_port_flags {
-	TPF_INIT_DONE	= (1 << 0),
-	TPF_OPEN	= (1 << 1),
-} t4_port_flags_t;
-
-typedef enum t4_port_feat {
-	CXGBE_HW_LSO	= (1 << 0),
-	CXGBE_HW_CSUM	= (1 << 1),
-} t4_port_feat_t;
-
-struct port_info {
-	kmutex_t	lock;
-	dev_info_t	*dip;
-	struct adapter	*adapter;
-	uint8_t		port_id;
-
-	t4_port_flags_t	flags;
-	t4_port_feat_t	features;
-
-	mac_handle_t	mh;
-	int		mtu;
-	uint8_t		hw_addr[ETHERADDRL];
-	int16_t 	xact_addr_filt; /* index of exact MAC address filter */
-
-	uint16_t	rxq_count;	/* # of rx queues */
-	uint16_t	rxq_start;	/* index of first rx queue */
-	uint16_t	txq_count;	/* # of tx queues */
-	uint16_t	txq_start;	/* index of first tx queue */
-
-	/* Port attributes/data set by common code: */
-	uint16_t	viid;
-	uint16_t	rss_size;	/* size of VI's RSS table slice */
-
-	uint8_t		port_type;
-	int8_t		mdio_addr;
-	uint8_t		mod_type;
-
-	uint8_t		lport;
-	uint8_t		tx_chan;
-	uint8_t		rx_chan;
-	uint8_t		rx_cchan;
-
-	uint8_t		rss_mode;
-
-	uint8_t		tmr_idx;
-	int8_t		pktc_idx;
-	uint8_t		dbq_timer_idx;
-
-	struct link_config link_cfg;
-	uint8_t		macaddr_cnt;
-
-	struct port_stats stats;
-	kstat_t *ksp_config;
-	kstat_t *ksp_info;
-	kstat_t *ksp_fec;
-
-	u8 vivld;
-	u8 vin;
-	u8 smt_idx;
-
-	/* Mirroring bits utilized by common code (unused by our driver) */
-	u16 viid_mirror;
-	u8 vivld_mirror;
-	u8 vin_mirror;
-};
 
 struct fl_desc {
 	__be64 dptr[FL_BUF_PER_BLOCK];
@@ -190,12 +124,18 @@ typedef enum t4_intr_config {
 	TIC_START_COUNTER	= (6 << 1),
 } t4_intr_config_t;
 
+typedef enum t4_iq_type {
+	TIQT_EVENT,
+	TIQT_ETH_RX,
+} t4_iq_type_t;
+
 /*
  * Ingress Queue: T4 is producer, driver is consumer.
  */
 struct sge_iq {
 	kmutex_t lock;
 	t4_iq_flags_t flags;
+	t4_iq_type_t iqtype;
 
 	t4_intr_config_t intr_params;
 	uint_t intr_idx;	/* Assigned interrupt index */
@@ -227,7 +167,6 @@ struct sge_iq {
 	struct sge_fl *fl;	/* associated freelist (if any) */
 
 	struct sge_iq_stats stats;
-
 };
 
 /*
@@ -246,11 +185,12 @@ typedef enum t4_eq_flags {
 
 	/* Runtime state flags: */
 
+	EQ_ENABLED	= (1 << 3),	/* ready for submitted work requests */
 	/*
 	 * Short on resources (memory and/or descriptors) while attempting to
 	 * enqueue work in EQ
 	 */
-	EQ_CORKED	= (1 << 3),
+	EQ_CORKED	= (1 << 4),
 } t4_eq_flags_t;
 
 /* Listed in order of preference. */
@@ -262,8 +202,8 @@ typedef enum t4_doorbells {
 } t4_doorbells_t;
 
 typedef enum t4_eq_type {
-	TET_ETH_TX,
-	TET_FREELIST,
+	TEQT_ETH_TX,
+	TEQT_FREELIST,
 } t4_eq_type_t;
 
 /*
@@ -417,6 +357,76 @@ struct sge_rxq {
 	struct sge_rxq_stats stats;
 };
 
+typedef enum t4_port_flags {
+	TPF_INIT_DONE	= (1 << 0),
+	TPF_OPEN	= (1 << 1),
+	TPF_VI_ENABLED	= (1 << 2),
+} t4_port_flags_t;
+
+typedef enum t4_port_feat {
+	CXGBE_HW_LSO	= (1 << 0),
+	CXGBE_HW_CSUM	= (1 << 1),
+} t4_port_feat_t;
+
+
+struct port_info {
+	kmutex_t	lock;
+	dev_info_t	*dip;
+	struct adapter	*adapter;
+	uint8_t		port_id;
+
+	t4_port_flags_t	flags;
+	t4_port_feat_t	features;
+
+	mac_handle_t	mh;
+	int		mtu;
+	uint8_t		hw_addr[ETHERADDRL];
+	int16_t 	xact_addr_filt; /* index of exact MAC address filter */
+
+	uint16_t	rxq_count;	/* # of rx queues */
+	uint16_t	rxq_start;	/* index of first rx queue */
+	uint16_t	txq_count;	/* # of tx queues */
+	uint16_t	txq_start;	/* index of first tx queue */
+
+	struct sge_iq	intr_iq;	/* IQ for interrupt events, when possible */
+
+	/* Port attributes/data set by common code: */
+	uint16_t	viid;
+	uint16_t	rss_size;	/* size of VI's RSS table slice */
+
+	uint8_t		port_type;
+	int8_t		mdio_addr;
+	uint8_t		mod_type;
+
+	uint8_t		lport;
+	uint8_t		tx_chan;
+	uint8_t		rx_chan;
+	uint8_t		rx_cchan;
+
+	uint8_t		rss_mode;
+
+	uint8_t		tmr_idx;
+	int8_t		pktc_idx;
+	uint8_t		dbq_timer_idx;
+
+	struct link_config link_cfg;
+	uint8_t		macaddr_cnt;
+
+	struct port_stats stats;
+	kstat_t *ksp_config;
+	kstat_t *ksp_info;
+	kstat_t *ksp_fec;
+
+	u8 vivld;
+	u8 vin;
+	u8 smt_idx;
+
+	/* Mirroring bits utilized by common code (unused by our driver) */
+	u16 viid_mirror;
+	u8 vivld_mirror;
+	u8 vin_mirror;
+};
+
 struct sge_info {
 	int fl_starve_threshold;
 	int s_qpp;
@@ -430,7 +440,6 @@ struct sge_info {
 	int8_t fwq_pktc_idx;	/* Intr. coalesce count for FWQ */
 
 	struct sge_iq fwq;	/* Firmware event queue */
-	struct sge_iq dev_intrq; /* device-wide interrupt event queue */
 
 	uint_t rxq_count;	/* total rx queues (all ports and the rest) */
 	uint_t txq_count;	/* total tx queues (all ports and the rest) */
@@ -494,11 +503,9 @@ typedef enum t4_adapter_flags {
 typedef enum t4_intr_plan {
 	/* Everything on a single interrupt */
 	TIP_SINGLE,
-	/* One for errors, one for queue processing */
+	/* One for device errors, one FWQ (including forwarded intrs) */
 	TIP_ERR_QUEUES,
-	/* One for errors, one for FWQ, one for RX queues */
-	TIP_ERR_FWQ_QUEUES,
-	/* 1 & 1 for errors and FWQ, with rest divided evenly between ports */
+	/* 1 + 1 for errors and FWQ, with rest divided evenly between ports */
 	TIP_PER_PORT,
 } t4_intr_plan_t;
 
@@ -612,33 +619,10 @@ struct adapter {
 	rxq = &pi->adapter->sge.rxq[pi->rxq_start]; \
 	for (iter = 0; iter < pi->rxq_count; ++iter, ++rxq)
 
-/* One for errors, one for firmware events */
-#define	T4_EXTRA_INTR 2
-
-
 static inline struct port_info *
 adap2pinfo(struct adapter *sc, int idx)
 {
 	return (sc->port[idx]);
-}
-
-static inline struct sge_rxq *
-iq_to_rxq(struct sge_iq *iq)
-{
-	return (__containerof(iq, struct sge_rxq, iq));
-}
-
-static inline bool
-t4_port_is_10xg(const struct port_info *pi)
-{
-	return (pi->link_cfg.pcaps &
-	    (FW_PORT_CAP32_SPEED_400G |
-	    FW_PORT_CAP32_SPEED_200G |
-	    FW_PORT_CAP32_SPEED_100G |
-	    FW_PORT_CAP32_SPEED_50G |
-	    FW_PORT_CAP32_SPEED_40G |
-	    FW_PORT_CAP32_SPEED_25G |
-	    FW_PORT_CAP32_SPEED_10G));
 }
 
 static inline unsigned int t4_use_ldst(struct adapter *adap)
@@ -665,8 +649,6 @@ t4_cver_ge(const adapter_t *adap, uint8_t ver)
 
 /* t4_nexus.c */
 int t4_port_full_init(struct port_info *);
-void t4_port_queues_enable(struct port_info *pi);
-void t4_port_queues_disable(struct port_info *pi);
 
 uint32_t t4_read_reg(struct adapter *, uint32_t);
 void t4_write_reg(struct adapter *, uint32_t, uint32_t);
@@ -683,15 +665,18 @@ void t4_debug_fini(void);
 
 /* t4_sge.c */
 void t4_sge_init(struct adapter *);
-int t4_alloc_fwq(struct adapter *);
-void t4_free_fwq(struct adapter *);
-int t4_setup_port_queues(struct port_info *);
-void t4_teardown_port_queues(struct port_info *);
+int t4_alloc_evt_iqs(struct adapter *);
+void t4_free_evt_iqs(struct adapter *);
+void t4_port_kstats_init(struct port_info *);
+void t4_port_kstats_fini(struct port_info *);
+int t4_port_queues_init(struct port_info *);
+void t4_port_queues_fini(struct port_info *);
+void t4_port_queues_enable(struct port_info *pi);
+void t4_port_queues_disable(struct port_info *pi);
 uint_t t4_intr_all(caddr_t, caddr_t);
 uint_t t4_intr_err(caddr_t, caddr_t);
 uint_t t4_intr_fwq(caddr_t, caddr_t);
-uint_t t4_intr_queues(caddr_t, caddr_t);
-uint_t t4_intr_port_queues(caddr_t, caddr_t);
+uint_t t4_intr_port_queue(caddr_t, caddr_t);
 void t4_iq_gts_update(struct sge_iq *, t4_intr_config_t, uint16_t);
 void t4_iq_update_intr_cfg(struct sge_iq *, uint8_t, int8_t);
 void t4_eq_update_dbq_timer(struct sge_eq *, struct port_info *);

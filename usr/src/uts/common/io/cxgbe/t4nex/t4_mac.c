@@ -49,8 +49,8 @@ static int t4_mc_getprop(void *arg, const char *name, mac_prop_id_t id,
 static void t4_mc_propinfo(void *arg, const char *name, mac_prop_id_t id,
     mac_prop_info_handle_t ph);
 
-static int t4_init_synchronized(struct port_info *pi);
-static int t4_uninit_synchronized(struct port_info *pi);
+static int t4_port_enable(struct port_info *pi);
+static int t4_port_disable(struct port_info *pi);
 static void t4_propinfo_priv(struct port_info *, const char *,
     mac_prop_info_handle_t);
 static int t4_getprop_priv(struct port_info *, const char *, uint_t, void *);
@@ -64,7 +64,7 @@ mac_callbacks_t t4_mac_callbacks = {
 	.mc_setpromisc	= t4_mc_setpromisc,
 	.mc_multicst	= t4_mc_multicst,
 	/*
-	 * Not required for rings-capalbe driver:
+	 * Not required for rings-capable driver:
 	 * .mc_unicst
 	 * .mc_tx
 	 */
@@ -712,7 +712,7 @@ t4_mc_start(void *arg)
 {
 	struct port_info *pi = arg;
 
-	return (t4_init_synchronized(pi));
+	return (t4_port_enable(pi));
 }
 
 static void
@@ -720,7 +720,7 @@ t4_mc_stop(void *arg)
 {
 	struct port_info *pi = arg;
 
-	(void) t4_uninit_synchronized(pi);
+	(void) t4_port_disable(pi);
 }
 
 static int
@@ -861,7 +861,7 @@ t4_fill_group(void *arg, mac_ring_type_t rtype, const int rg_index,
 }
 
 static int
-t4_ring_start(mac_ring_driver_t rh, uint64_t mr_gen_num)
+t4_ring_rx_start(mac_ring_driver_t rh, uint64_t mr_gen_num)
 {
 	struct sge_rxq *rxq = (struct sge_rxq *)rh;
 	struct sge_iq *iq = &rxq->iq;
@@ -873,9 +873,6 @@ t4_ring_start(mac_ring_driver_t rh, uint64_t mr_gen_num)
 	return (0);
 }
 
-/*
- * Enable interrupt on the specificed rx ring.
- */
 int
 t4_ring_intr_enable(mac_intr_handle_t intrh)
 {
@@ -890,21 +887,17 @@ t4_ring_intr_enable(mac_intr_handle_t intrh)
 	return (0);
 }
 
-/*
- * Disable interrupt on the specificed rx ring.
- */
 int
 t4_ring_intr_disable(mac_intr_handle_t intrh)
 {
 	struct sge_rxq *rxq = (struct sge_rxq *)intrh;
 	struct sge_iq *iq = &rxq->iq;
 
+	IQ_LOCK(iq);
 	/*
 	 * Nothing to be done here WRT the interrupt, as it will not fire until
 	 * re-enabled through the t4_iq_gts_update() in t4_ring_intr_enable().
 	 */
-
-	IQ_LOCK(iq);
 	iq->flags |= IQ_POLLING;
 	IQ_UNLOCK(iq);
 
@@ -962,11 +955,11 @@ t4_tx_stat(mac_ring_driver_t rh, uint_t stat, uint64_t *val)
 	struct sge_txq *txq = (struct sge_txq *)rh;
 
 	switch (stat) {
-	case MAC_STAT_RBYTES:
+	case MAC_STAT_OBYTES:
 		*val = txq->stats.txbytes;
 		break;
 
-	case MAC_STAT_IPACKETS:
+	case MAC_STAT_OPACKETS:
 		*val = txq->stats.txpkts;
 		break;
 
@@ -1002,7 +995,7 @@ t4_fill_ring(void *arg, mac_ring_type_t rtype, const int group_index,
 		rxq->ring_handle = rh;
 
 		infop->mri_driver = (mac_ring_driver_t)rxq;
-		infop->mri_start = t4_ring_start;
+		infop->mri_start = t4_ring_rx_start;
 		infop->mri_stop = NULL;
 		infop->mri_poll = t4_poll_ring;
 		infop->mri_stat = t4_rx_stat;
@@ -1668,7 +1661,7 @@ t4_mc_propinfo(void *arg, const char *name, mac_prop_id_t id,
 }
 
 static int
-t4_init_synchronized(struct port_info *pi)
+t4_port_enable(struct port_info *pi)
 {
 	struct adapter *sc = pi->adapter;
 	int rc = 0;
@@ -1688,9 +1681,8 @@ t4_init_synchronized(struct port_info *pi)
 			PORT_UNLOCK(pi);
 			return (rc); /* error message displayed already */
 		}
-	} else {
-		t4_port_queues_enable(pi);
 	}
+	t4_port_queues_enable(pi);
 
 	rc = -t4_set_rxmode(sc, sc->mbox, pi->viid, pi->mtu, 0, 0, 1, 0, false);
 	if (rc != 0) {
@@ -1719,41 +1711,41 @@ t4_init_synchronized(struct port_info *pi)
 		cxgb_printf(pi->dip, CE_WARN, "enable_vi failed: %d", rc);
 		goto done;
 	}
+	pi->flags |= TPF_VI_ENABLED;
 
 	/* all ok */
 	pi->flags |= TPF_OPEN;
 done:
 	PORT_UNLOCK(pi);
 	if (rc != 0)
-		(void) t4_uninit_synchronized(pi);
+		(void) t4_port_disable(pi);
 
 	return (rc);
 }
 
-/*
- * Idempotent.
- */
 static int
-t4_uninit_synchronized(struct port_info *pi)
+t4_port_disable(struct port_info *pi)
 {
 	struct adapter *sc = pi->adapter;
-	int rc;
 
 	PORT_LOCK_ASSERT_NOTOWNED(pi);
 
 	PORT_LOCK(pi);
 	/*
 	 * Disable the VI so that all its data in either direction is discarded
-	 * by the MPS.  Leave everything else (the queues, interrupts, and 1Hz
-	 * tick) intact as the TP can deliver negative advice or data that it's
-	 * holding in its RAM (for an offloaded connection) even after the VI is
-	 * disabled.
+	 * by the MPS.  Leave everything else (queues, interrupts, etc) so any
+	 * straggling work in flight has a safe place to land.
 	 */
-	rc = -t4_enable_vi(sc, sc->mbox, pi->viid, false, false);
-	if (rc != 0) {
-		cxgb_printf(pi->dip, CE_WARN, "disable_vi failed: %d", rc);
-		PORT_UNLOCK(pi);
-		return (rc);
+	if (pi->flags & TPF_VI_ENABLED) {
+		const int rc =
+		    -t4_enable_vi(sc, sc->mbox, pi->viid, false, false);
+		if (rc != 0) {
+			cxgb_printf(pi->dip, CE_WARN,
+			    "disable_vi failed: %d", rc);
+			PORT_UNLOCK(pi);
+			return (rc);
+		}
+		pi->flags &= ~TPF_VI_ENABLED;
 	}
 
 	t4_port_queues_disable(pi);

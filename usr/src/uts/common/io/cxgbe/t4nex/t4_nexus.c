@@ -45,11 +45,37 @@
 #include <sys/mac_provider.h>
 #include <sys/mac_ether.h>
 #include <sys/vlan.h>
+#include <sys/cpuvar.h>
 
 #include "common/common.h"
 #include "common/t4_msg.h"
 #include "common/t4_regs.h"
 #include "common/t4_extra_regs.h"
+
+/*
+ * Nexus driver for Chelsio Teminator 4-6 Network Adapters
+ *
+ * This driver is designed to support the Chelsio Terminator series of network
+ * adapters, starting at version 4.  While those adapters support a wide range
+ * of functionality, including presenting themselves as storage adapters (for
+ * exposing resources such as iSCSI volumes), this driver focuses solely on
+ * providing access to the Ethernet networking capabilities.  It is, however,
+ * structured as a nexus driver to potentially facilitate attachment to the
+ * other device functions in the future.
+ *
+ * ------
+ * Queues
+ * ------
+ *
+ * ----------
+ * Interrupts
+ * ----------
+ */
+
+static void *t4_soft_state;
+
+static kmutex_t t4_adapter_list_lock;
+static list_t t4_adapter_list;
 
 typedef enum t4_port_speed {
 	TPS_1G,
@@ -61,11 +87,6 @@ typedef enum t4_port_speed {
 	TPS_200G,
 	TPS_400G,
 } t4_port_speed_t;
-
-static void *t4_soft_state;
-
-static kmutex_t t4_adapter_list_lock;
-static list_t t4_adapter_list;
 
 static uint_t t4_getpf(struct adapter *);
 static int t4_prep_firmware(struct adapter *);
@@ -461,7 +482,7 @@ t4_devo_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	}
 	ddi_ufm_update(sc->ufm_hdl);
 
-	if ((rc = t4_alloc_fwq(sc)) != 0) {
+	if ((rc = t4_alloc_evt_iqs(sc)) != 0) {
 		cxgb_printf(dip, CE_WARN, "failed to alloc FWQ: %d", rc);
 		rc = DDI_FAILURE;
 		goto done;
@@ -536,7 +557,7 @@ t4_devo_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 				(void) ddi_intr_disable(sc->intr_handle[i]);
 		}
 
-		t4_free_fwq(sc);
+		t4_free_evt_iqs(sc);
 
 		sc->flags &= ~TAF_INIT_DONE;
 	}
@@ -745,9 +766,11 @@ t4_bus_unconfig(dev_info_t *dip, uint_t flags, ddi_bus_config_op_t op,
 	struct adapter *sc
 	    = ddi_get_soft_state(t4_soft_state, ddi_get_instance(dip));
 
-	if (op == BUS_CONFIG_ONE || op == BUS_UNCONFIG_ALL ||
-	    op == BUS_UNCONFIG_DRIVER)
+	if (op == BUS_UNCONFIG_ONE ||
+	    op == BUS_UNCONFIG_ALL ||
+	    op == BUS_UNCONFIG_DRIVER) {
 		flags |= NDI_UNCONFIG;
+	}
 
 	int rc = ndi_busop_bus_unconfig(dip, flags, op, arg);
 	if (rc != 0)
@@ -762,10 +785,10 @@ t4_bus_unconfig(dev_info_t *dip, uint_t flags, ddi_bus_config_op_t op,
 
 		rc = t4_remove_child_node(sc, dev_num);
 	} else if (op == BUS_UNCONFIG_ALL || op == BUS_UNCONFIG_DRIVER) {
-		int i;
+		uint_t i;
 
 		for_each_port(sc, i) {
-			(void) t4_remove_child_node(sc, (uint_t)i);
+			(void) t4_remove_child_node(sc, i);
 		}
 	}
 
@@ -1616,7 +1639,7 @@ t4_init_driver_props(struct adapter *sc)
 	p->dbq_timer_idx = 0;
 }
 
-static uint_t t4_intr_count_clamp = 1;
+static uint_t t4_intr_count_clamp = 0;
 
 /* TODO: tune these empirically? */
 static const struct t4_queue_count {
@@ -1626,6 +1649,7 @@ static const struct t4_queue_count {
 } t4_queue_counts[] = {
 	{ TPS_100G, 32, 32 },
 	{ TPS_50G, 24, 24 },
+	{ TPS_40G, 24, 24 },
 	{ TPS_25G, 16, 16 },
 	{ TPS_10G, 8, 8 },
 	{ TPS_1G, 2, 2 },
@@ -1681,7 +1705,7 @@ t4_cfg_intrs_queues(struct adapter *sc)
 	}
 	iaq->intr_type = itype;
 
-	/* TODO: clean up? */
+	/* Permit artificial clamping of consumed interrupts. */
 	if (t4_intr_count_clamp != 0) {
 		intr_avail = MIN(intr_avail, t4_intr_count_clamp);
 	}
@@ -1695,22 +1719,18 @@ t4_cfg_intrs_queues(struct adapter *sc)
 
 	if (intr_avail == 1) {
 		iaq->intr_plan = TIP_SINGLE;
-	} else if (intr_avail == 2) {
+	} else if (intr_avail == 2 || (port_count + 2) > intr_avail) {
 		iaq->intr_plan = TIP_ERR_QUEUES;
-	} else if (intr_avail == 3) {
-		iaq->intr_plan = TIP_ERR_FWQ_QUEUES;
-	} else if ((port_count + 2) > intr_avail) {
-		/*
-		 * Too many ports to do intr-per-port, so fall back to a single
-		 * interrupt for all those queues.
-		 */
-		iaq->intr_plan = TIP_ERR_FWQ_QUEUES;
-		iaq->intr_count = 3;
 	} else {
 		iaq->intr_plan = TIP_PER_PORT;
-		const uint_t per_port = (intr_avail - 2) / port_count;
-		iaq->intr_count = 2 + (port_count * per_port);
-		iaq->intr_per_port = per_port;
+		iaq->intr_count = 2 + port_count;
+		iaq->intr_per_port = 1;
+		/*
+		 * Count the interrupt-handling IQ associated with each port as
+		 * shared, as it is otherwise occupying IQ resources which
+		 * cannot be used for an RX queue.
+		 */
+		iaq->shared_iqs += port_count;
 	}
 
 	const struct pf_resources *pfres = &sc->params.pfres;
@@ -1742,17 +1762,9 @@ t4_cfg_intrs_queues(struct adapter *sc)
 		return (DDI_FAILURE);
 	}
 
-	if (iaq->intr_plan == TIP_PER_PORT) {
-		iaq->port_max_rxq = max_rxq;
-		iaq->port_max_txq = max_txq;
-	} else {
-		/*
-		 * No sense in fanning out to multiple queues if we cannot even
-		 * manage an interrupt per port.
-		 */
-		iaq->port_max_rxq = 1;
-		iaq->port_max_txq = 1;
-	}
+	/* Clamp max queue counts to number of CPUs */
+	iaq->port_max_rxq = MIN(max_rxq, ncpus);
+	iaq->port_max_txq = MIN(max_txq, ncpus);
 
 	VERIFY(iaq->intr_count != 0);
 	VERIFY(iaq->port_max_rxq != 0);
@@ -1802,34 +1814,27 @@ t4_setup_intrs(struct adapter *sc)
 {
 	const struct t4_intrs_queues *iaq = &sc->intr_queue_cfg;
 	const uint_t intr_count = iaq->intr_count;
+	const uint_t port_count = sc->params.nports;
 	const int intr_type = iaq->intr_type;
-	struct sge_iq *fwq = &sc->sge.fwq;
 
-	int i = 0;
+	int allocated = 0;
 	int rc = ddi_intr_alloc(sc->dip, sc->intr_handle, intr_type, 0,
-	    intr_count, &i, DDI_INTR_ALLOC_STRICT);
+	    intr_count, &allocated, DDI_INTR_ALLOC_STRICT);
 	if (rc != DDI_SUCCESS) {
 		cxgb_printf(sc->dip, CE_WARN,
 		    "failed to allocate %d interrupt(s) of type %d: %d, %d",
-		    intr_count, intr_type, rc, i);
+		    intr_count, intr_type, rc, allocated);
 		return (rc);
 	}
-	ASSERT3U(intr_count, ==, i); /* allocation was STRICT */
+	ASSERT3U(intr_count, ==, allocated); /* allocation was STRICT */
 	(void) ddi_intr_get_cap(sc->intr_handle[0], &sc->intr_cap);
 	(void) ddi_intr_get_pri(sc->intr_handle[0], &sc->intr_pri);
-
-	/*
-	 * Save for the override for TIP_SINGLE, the FWQ occupies the idx=1
-	 * interrupt.
-	 */
-	fwq->intr_idx = 1;
 
 	switch (iaq->intr_plan) {
 	case TIP_SINGLE:
 		ASSERT3U(intr_count, ==, 1);
 		(void) ddi_intr_add_handler(sc->intr_handle[0], t4_intr_all, sc,
 		    NULL);
-		fwq->intr_idx = 0;
 		break;
 	case TIP_ERR_QUEUES:
 		ASSERT3U(intr_count, ==, 2);
@@ -1838,19 +1843,18 @@ t4_setup_intrs(struct adapter *sc)
 		(void) ddi_intr_add_handler(sc->intr_handle[1], t4_intr_fwq, sc,
 		    NULL);
 		break;
-	case TIP_ERR_FWQ_QUEUES:
-		ASSERT3U(intr_count, ==, 3);
-		(void) ddi_intr_add_handler(sc->intr_handle[0], t4_intr_err, sc,
-		    NULL);
-		(void) ddi_intr_add_handler(sc->intr_handle[1], t4_intr_fwq, sc,
-		    NULL);
-		break;
 	case TIP_PER_PORT:
+		ASSERT3U(intr_count, ==, 2 + port_count);
 		(void) ddi_intr_add_handler(sc->intr_handle[0], t4_intr_err, sc,
 		    NULL);
 		(void) ddi_intr_add_handler(sc->intr_handle[1], t4_intr_fwq, sc,
 		    NULL);
-		/* XXX: wire up port event queues */
+		for (uint_t i = 0; i < port_count; i++) {
+			struct port_info *port = sc->port[i];
+
+			(void) ddi_intr_add_handler(sc->intr_handle[2 + i],
+			    t4_intr_port_queue, port, NULL);
+		}
 		break;
 	}
 	return (DDI_SUCCESS);
@@ -1938,6 +1942,12 @@ static const struct t4_port_speed_def t4_port_speeds[] = {
 };
 
 
+/*
+ * Get maximum advertised speed of this port.
+ *
+ * This is, unfortunately, impacted by the installed transceiver at the time of
+ * query.
+ */
 static t4_port_speed_t
 t4_port_speed(const struct port_info *pi)
 {
@@ -2251,7 +2261,7 @@ t4_port_full_init(struct port_info *pi)
 	ASSERT((pi->flags & TPF_INIT_DONE) == 0);
 
 	/* Allocate TX/RX/FL queues for this port. */
-	if ((rc = t4_setup_port_queues(pi)) != 0) {
+	if ((rc = t4_port_queues_init(pi)) != 0) {
 		goto done;
 	}
 
@@ -2268,7 +2278,7 @@ t4_port_full_init(struct port_info *pi)
 		goto done;
 	}
 
-	/* Initialize our per-port FEC kstats. */
+	t4_port_kstats_init(pi);
 	pi->ksp_fec = t4_init_fec_kstats(pi);
 
 	pi->flags |= TPF_INIT_DONE;
@@ -2295,66 +2305,9 @@ t4_port_full_uninit(struct port_info *pi)
 		kstat_delete(pi->ksp_fec);
 		pi->ksp_fec = NULL;
 	}
-	t4_teardown_port_queues(pi);
+	t4_port_kstats_fini(pi);
+	t4_port_queues_fini(pi);
 	pi->flags &= ~TPF_INIT_DONE;
-}
-
-void
-t4_port_queues_enable(struct port_info *pi)
-{
-	ASSERT(pi->flags & TPF_INIT_DONE);
-
-	int i;
-	struct adapter *sc = pi->adapter;
-	struct sge_rxq *rxq;
-
-	mutex_enter(&sc->sfl_lock);
-	for_each_rxq(pi, i, rxq) {
-		struct sge_iq *iq = &rxq->iq;
-
-		IQ_LOCK(iq);
-		VERIFY0(iq->flags & IQ_ENABLED);
-		iq->flags |= IQ_ENABLED;
-
-		/*
-		 * Freelists which were marked "doomed" by a previous
-		 * t4_port_queues_disable() call should clear that status.
-		 */
-		rxq->fl.flags &= ~FL_DOOMED;
-
-		t4_iq_gts_update(iq, iq->intr_params, 0);
-		IQ_UNLOCK(iq);
-	}
-	mutex_exit(&sc->sfl_lock);
-}
-
-void
-t4_port_queues_disable(struct port_info *pi)
-{
-	int i;
-	struct adapter *sc = pi->adapter;
-	struct sge_rxq *rxq;
-
-	ASSERT(pi->flags & TPF_INIT_DONE);
-
-	/*
-	 * TODO: need proper implementation for all tx queues (ctrl, eth, ofld).
-	 */
-
-	for_each_rxq(pi, i, rxq) {
-		struct sge_iq *iq = &rxq->iq;
-
-		IQ_LOCK(iq);
-		iq->flags &= ~IQ_ENABLED;
-		IQ_UNLOCK(iq);
-	}
-
-	mutex_enter(&sc->sfl_lock);
-	for_each_rxq(pi, i, rxq) {
-		rxq->fl.flags |= FL_DOOMED;
-	}
-	mutex_exit(&sc->sfl_lock);
-	/* TODO: need to wait for all fl's to be removed from sc->sfl */
 }
 
 void

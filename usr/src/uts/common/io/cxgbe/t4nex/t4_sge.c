@@ -81,6 +81,7 @@ struct rxbuf {
 };
 
 struct t4_iq_params {
+	t4_iq_type_t	tip_iq_type;
 	uint8_t		tip_tmr_idx;
 	int8_t		tip_pktc_idx;
 	uint_t		tip_qsize;
@@ -198,8 +199,11 @@ t4_eq_desc(struct sge_eq *eq, uint_t idx)
 static inline struct sge_rxq *
 t4_iq_to_rxq(struct sge_iq *iq)
 {
-	/* TODO: verify IQ is proper type */
-	return (__containerof(iq, struct sge_rxq, iq));
+	if (iq->iqtype == TIQT_ETH_RX) {
+		return (__containerof(iq, struct sge_rxq, iq));
+	} else {
+		return (NULL);
+	}
 }
 
 void
@@ -352,73 +356,34 @@ t4_rxq_intr_assign(struct port_info *pi, uint_t iq_idx,
 	const struct t4_intrs_queues *iqc = &sc->intr_queue_cfg;
 
 	switch (iqc->intr_plan) {
+	case TIP_PER_PORT:
+		/* Use per-port event queue */
+		iqp->tip_intr_evtq = &pi->intr_iq;
+		iqp->tip_intr_idx = 0;
+		break;
 	case TIP_SINGLE:
 	case TIP_ERR_QUEUES:
-	case TIP_ERR_FWQ_QUEUES:
+	default:
 		/* Forward all RXQ interrupts to FWQ */
 		iqp->tip_intr_evtq = &sc->sge.fwq;
 		iqp->tip_intr_idx = 0;
 		break;
-	default:
-		/* TODO: handle more cases */
-		iqp->tip_intr_evtq = &sc->sge.fwq;
-		iqp->tip_intr_idx = 0;
-		break;
 	}
 }
 
-/*
- * Setup port kstats and queues.
- *
- * If this fails (emitting a non-0 return code), it is expected that a
- * subsequent call to t4_teardown_port_queues() will be made by the consumer to
- * clean up any state which was partially allocated here.
- */
-int
-t4_setup_port_queues(struct port_info *pi)
+void
+t4_port_kstats_init(struct port_info *pi)
 {
-	int rc, i;
-	struct sge_rxq *rxq;
-	struct sge_txq *txq;
-	struct adapter *sc = pi->adapter;
-	struct driver_properties *p = &sc->props;
+	ASSERT(pi->ksp_config == NULL);
+	ASSERT(pi->ksp_info == NULL);
 
 	pi->ksp_config = setup_port_config_kstats(pi);
 	pi->ksp_info = setup_port_info_kstats(pi);
-
-	for_each_rxq(pi, i, rxq) {
-		rc = t4_alloc_rxq(pi, rxq, i);
-		if (rc != 0) {
-			return (rc);
-		}
-	}
-
-	for_each_txq(pi, i, txq) {
-		txq->eq.flags = 0;
-		txq->eq.tx_chan = pi->tx_chan;
-		txq->eq.qsize = p->qsize_txq;
-
-		/* For now, direct all TX queue notifications to the FW IQ. */
-		txq->eq.iqid = sc->sge.fwq.cntxt_id;
-
-		if ((rc = t4_alloc_txq(pi, txq, i)) != 0) {
-			return (rc);
-		}
-	}
-
-	return (0);
 }
 
-/*
- * Idempotent
- */
 void
-t4_teardown_port_queues(struct port_info *pi)
+t4_port_kstats_fini(struct port_info *pi)
 {
-	int i;
-	struct sge_rxq *rxq;
-	struct sge_txq *txq;
-
 	if (pi->ksp_config != NULL) {
 		kstat_delete(pi->ksp_config);
 		pi->ksp_config = NULL;
@@ -427,24 +392,134 @@ t4_teardown_port_queues(struct port_info *pi)
 		kstat_delete(pi->ksp_info);
 		pi->ksp_info = NULL;
 	}
+}
 
+int
+t4_port_queues_init(struct port_info *pi)
+{
+	int rc = 0;
+	uint_t i;
+	struct adapter *sc = pi->adapter;
+
+	struct sge_rxq *rxq;
+	for_each_rxq(pi, i, rxq) {
+		if ((rc = t4_alloc_rxq(pi, rxq, i)) != 0) {
+			goto cleanup;
+		}
+	}
+
+	struct sge_txq *txq;
+	const uint16_t eq_qsize = sc->props.qsize_txq;
+	for_each_txq(pi, i, txq) {
+		txq->eq.flags = 0;
+		txq->eq.tx_chan = pi->tx_chan;
+		txq->eq.qsize = eq_qsize;
+
+		/* For now, direct all TX queue notifications to the FW IQ. */
+		txq->eq.iqid = sc->sge.fwq.cntxt_id;
+
+		if ((rc = t4_alloc_txq(pi, txq, i)) != 0) {
+			goto cleanup;
+		}
+	}
+
+	return (0);
+
+cleanup:
+	t4_port_queues_fini(pi);
+	return (rc);
+}
+
+void
+t4_port_queues_fini(struct port_info *pi)
+{
+	uint_t i;
+
+	struct sge_txq *txq;
 	for_each_txq(pi, i, txq) {
 		t4_free_txq(pi, txq);
 	}
 
+	struct sge_rxq *rxq;
 	for_each_rxq(pi, i, rxq) {
-		if ((rxq->iq.flags & IQ_INTR) == 0)
-			t4_free_rxq(pi, rxq);
+		t4_free_rxq(pi, rxq);
+	}
+}
+
+void
+t4_port_queues_enable(struct port_info *pi)
+{
+	ASSERT(pi->flags & TPF_INIT_DONE);
+
+	uint_t i;
+	struct adapter *sc = pi->adapter;
+	struct sge_rxq *rxq;
+
+	mutex_enter(&sc->sfl_lock);
+	for_each_rxq(pi, i, rxq) {
+		struct sge_iq *iq = &rxq->iq;
+
+		IQ_LOCK(iq);
+		VERIFY0(iq->flags & IQ_ENABLED);
+		iq->flags |= IQ_ENABLED;
+
+		/*
+		 * Freelists which were marked "doomed" by a previous
+		 * t4_port_queues_disable() call should clear that status.
+		 */
+		rxq->fl.flags &= ~FL_DOOMED;
+
+		t4_iq_gts_update(iq, iq->intr_params, 0);
+		IQ_UNLOCK(iq);
+	}
+	mutex_exit(&sc->sfl_lock);
+
+	struct sge_txq *txq;
+	for_each_txq(pi, i, txq) {
+		struct sge_eq *eq = &txq->eq;
+
+		EQ_LOCK(eq);
+		eq->flags |= EQ_ENABLED;
+		EQ_UNLOCK(eq);
+	}
+}
+
+void
+t4_port_queues_disable(struct port_info *pi)
+{
+	uint_t i;
+	struct adapter *sc = pi->adapter;
+	struct sge_rxq *rxq;
+
+	ASSERT(pi->flags & TPF_INIT_DONE);
+
+	for_each_rxq(pi, i, rxq) {
+		struct sge_iq *iq = &rxq->iq;
+
+		IQ_LOCK(iq);
+		iq->flags &= ~IQ_ENABLED;
+		IQ_UNLOCK(iq);
 	}
 
+	mutex_enter(&sc->sfl_lock);
+	for_each_rxq(pi, i, rxq) {
+		rxq->fl.flags |= FL_DOOMED;
+	}
+	mutex_exit(&sc->sfl_lock);
+	/* TODO: need to wait for all fl's to be removed from sc->sfl */
+
+	struct sge_txq *txq;
+	for_each_txq(pi, i, txq) {
+		struct sge_eq *eq = &txq->eq;
+
+		EQ_LOCK(eq);
+		eq->flags &= ~EQ_ENABLED;
+		EQ_UNLOCK(eq);
+	}
 	/*
-	 * Then take down the rx queues that take direct interrupts.
+	 * TODO: issue flush WR to EQs and wait for EGR update to ensure that
+	 * all processing has completed.
 	 */
-
-	for_each_rxq(pi, i, rxq) {
-		if (rxq->iq.flags & IQ_INTR)
-			t4_free_rxq(pi, rxq);
-	}
 }
 
 /*
@@ -584,16 +659,12 @@ t4_intr_fwq(caddr_t arg1, caddr_t arg2)
 }
 
 uint_t
-t4_intr_queues(caddr_t arg1, caddr_t arg2)
+t4_intr_port_queue(caddr_t arg1, caddr_t arg2)
 {
-	/* process IQs (only) */
-	return (DDI_INTR_CLAIMED);
-}
+	struct port_info *port = (struct port_info *)arg1;
 
-uint_t
-t4_intr_port_queues(caddr_t arg1, caddr_t arg2)
-{
-	/* process IQs (only) */
+	(void) t4_service_iq(&port->intr_iq, 0, NULL);
+
 	return (DDI_INTR_CLAIMED);
 }
 
@@ -607,6 +678,13 @@ t4_fl_periodic_refill(struct sge_fl *fl)
 	return (starved);
 }
 
+struct sge_iq_totals {
+	uint_t sit_desc;
+	uint_t sit_flbuf;
+	uint_t sit_cpl;
+	uint_t sit_intr;
+};
+
 int
 t4_service_iq(struct sge_iq *iq, uint_t desc_budget, struct t4_poll_req *tpr)
 {
@@ -614,12 +692,14 @@ t4_service_iq(struct sge_iq *iq, uint_t desc_budget, struct t4_poll_req *tpr)
 	struct sge_fl *fl = iq->fl;
 	struct sge_rxq *rxq = t4_iq_to_rxq(iq);
 	struct rsp_ctrl ctrl;
-	uint_t cidx_incr = 0, rx_bytes = 0, total_desc = 0;
+	uint_t cidx_incr = 0, rx_bytes = 0;
 	int rc = 0;
 	mblk_t *mp_head = NULL, **mp_tail = &mp_head;
 	const uint_t limit = (desc_budget != 0) ? desc_budget : iq->qsize / 8;
 	const uint_t byte_limit = (tpr != NULL) ? tpr->tpr_byte_budget : 0;
 	list_t iql_fwd;
+	struct sge_iq_totals totals = { 0 };
+	bool needs_rearm = false;
 
 	IQ_LOCK(iq);
 	const bool is_polling = (iq->flags & IQ_POLLING) != 0;
@@ -655,13 +735,11 @@ repeat:
 		switch (rsp_type) {
 		case X_RSPD_TYPE_FLBUF: {
 			ASSERT(fl != NULL);
-			ASSERT(rxq != NULL);
 
 			const uint32_t dlen_nb = BE_32(ctrl.pldbuflen_qid);
 			const struct cpl_rx_pkt *cpl = t4_rss_payload(rss);
 
 			if (rss->opcode == CPL_RX_PKT) {
-				ASSERT(rxq != NULL);
 
 				const uint16_t pkt_len = BE_16(cpl->len);
 				if (byte_limit != 0 &&
@@ -683,7 +761,16 @@ repeat:
 				goto bail;
 			}
 
+			/*
+			 * Add this entry to the totals once we are past the
+			 * possible bail-outs above.
+			 */
+			totals.sit_flbuf++;
+
 			if (rss->opcode == CPL_RX_PKT) {
+				ASSERT(iq->iqtype == TIQT_ETH_RX);
+				ASSERT(rxq != NULL);
+
 				mp->b_rptr += sc->sge.pktshift;
 
 				uint16_t err_vec;
@@ -719,6 +806,7 @@ repeat:
 		}
 
 		case X_RSPD_TYPE_CPL:
+			totals.sit_cpl++;
 			(void) t4_handle_cpl_msg(iq, rss, NULL);
 			break;
 
@@ -729,6 +817,7 @@ repeat:
 			 */
 			ASSERT(iq->intr_evtq == NULL);
 
+			totals.sit_intr++;
 			const uint32_t tgt_qid = BE_32(ctrl.pldbuflen_qid);
 
 			struct sge_iq *tgt_iq = *t4_iqmap_slot(sc, tgt_qid);
@@ -745,16 +834,25 @@ repeat:
 
 		iq_next(iq);
 		cidx_incr++;
-		total_desc++;
+		totals.sit_desc++;
 		iq->stats.sis_processed++;
 
 		if (cidx_incr == limit) {
+			/*
+			 * Keep the device up to date with the entries we have
+			 * consumed.  Such a GTS will not re-arm interrupts, so
+			 * in cases where we might immediately bail out of the
+			 * loop, it is imperative that we follow up with a GTS
+			 * which will do such a re-arm.
+			 */
 			t4_iq_gts_incr(iq, cidx_incr);
+			cidx_incr = 0;
+			needs_rearm = true;
+
 			if (fl != NULL) {
 				(void) t4_fl_periodic_refill(fl);
 			}
 
-			cidx_incr = 0;
 
 			if (desc_budget != 0) {
 				rc = EINPROGRESS;
@@ -778,7 +876,8 @@ bail:
 		 */
 		const bool iq_over_budget =
 		    (intr_rc == EINPROGRESS || intr_rc == ENOSPC);
-		if (!iq_over_budget || rc != 0) {
+		const bool iq_is_disabled  = intr_rc == ENOENT;
+		if (!(iq_over_budget || iq_is_disabled) || rc != 0) {
 			list_remove(&iql_fwd, intr_iq);
 		}
 		intr_iq = next;
@@ -787,28 +886,33 @@ bail:
 		goto repeat;
 	}
 
-	if (cidx_incr != 0) {
-		if (tpr != NULL) {
-			/*
-			 * When polling, post a GTS which only increments CIDX
-			 * and skips the rearming of timers/counters for the IQ.
-			 */
+	if (tpr != NULL) {
+		/*
+		 * Do not re-arm interrupts while this IQ is being polled.
+		 * Just update the CIDX as necessary.
+		 */
+		if (cidx_incr != 0) {
 			t4_iq_gts_incr(iq, cidx_incr);
-		} else {
+		}
+	} else {
+		if (totals.sit_desc == 0 && iq->intr_evtq != NULL) {
+			/*
+			 * When switching interrupts back on (via GTS) after
+			 * having the IQ in polling mode, it has been observed
+			 * that a spurious interrupt event for the RX IQ will be
+			 * posted to its associated event IQ.
+			 *
+			 * When no entries are found on an interrupt-forwarding
+			 * IQ, we assume such a spurious event, and force a
+			 * re-arm of the interrupts for the IQ to ensure
+			 * notification when the next entry arrives.
+			 */
+			needs_rearm = true;
+		}
+
+		if (cidx_incr != 0 || needs_rearm) {
 			t4_iq_gts_update(iq, iq->intr_params, cidx_incr);
 		}
-	} else if (total_desc == 0 && !is_polling && iq->intr_evtq != NULL) {
-		/*
-		 * When switching interrupts back on (via GTS) after having the
-		 * IQ in polling mode, it has been observed that a spurious
-		 * interrupt event for the RX IQ will be posted to its
-		 * associated event IQ.
-		 *
-		 * Having found no new entries for said spurious interrupt, we
-		 * re-post the GTS to ensure that this IQ is re-armed for
-		 * interruption upon the next event arrival.
-		 */
-		t4_iq_gts_update(iq, iq->intr_params, 0);
 	}
 	IQ_UNLOCK(iq);
 
@@ -826,6 +930,8 @@ bail:
 	if (fl != NULL && t4_fl_periodic_refill(fl)) {
 		t4_sfl_enqueue(sc, fl);
 	}
+	DTRACE_PROBE3(t4__iq__serviced, struct sge_iq *, iq,
+	    struct sge_iq_totals *, &totals, int, rc);
 	return (rc);
 }
 
@@ -866,8 +972,14 @@ t4_eth_tx(void *arg, mblk_t *frame)
 	coalescing = 0;
 
 	TXQ_LOCK(txq);
-	if (eq->avail < 8)
+	if ((eq->flags & EQ_ENABLED) == 0) {
+		/* drop packets immediate if EQ is not enabled */
+		TXQ_UNLOCK(txq);
+		return (frame);
+	}
+	if (eq->avail < 8) {
 		(void) t4_tx_reclaim_descs(txq, 8);
+	}
 	for (; frame; frame = next_frame) {
 
 		if (eq->avail < 8)
@@ -989,14 +1101,12 @@ t4_alloc_iq(struct port_info *pi, const struct t4_iq_params *tip,
 	const uint_t intr_idx =
 	    intr_fwd ? tip->tip_intr_evtq->cntxt_id : tip->tip_intr_idx;
 
-	/*
-	 * TODO: fixup
-	ASSERT(intr_idx < sc->intr_count || intr_fwd);
-	*/
+	ASSERT(intr_fwd || intr_idx < sc->intr_queue_cfg.intr_count);
 
 	mutex_init(&iq->lock, NULL, MUTEX_DRIVER,
 	    DDI_INTR_PRI(DDI_INTR_PRI(sc->intr_pri)));
 	iq->flags = 0;
+	iq->iqtype = tip->tip_iq_type;
 	iq->adapter = sc;
 	iq->intr_params = V_QINTR_TIMER_IDX(tip->tip_tmr_idx);
 	iq->intr_pktc_idx = -1;
@@ -1068,7 +1178,7 @@ t4_alloc_iq(struct port_info *pi, const struct t4_iq_params *tip,
 
 		eq->flags = 0;
 		eq->qsize = tip->tip_fl_qsize;
-		if ((rc = t4_alloc_eq_base(pi, eq, TET_FREELIST)) != 0) {
+		if ((rc = t4_alloc_eq_base(pi, eq, TEQT_FREELIST)) != 0) {
 			t4_free_iq(pi, iq);
 			return (rc);
 		}
@@ -1173,9 +1283,11 @@ t4_alloc_iq(struct port_info *pi, const struct t4_iq_params *tip,
 		}
 	}
 
-	/* Enable IQ interrupts */
-	iq->flags |= IQ_ENABLED;
-	t4_iq_gts_update(iq, iq->intr_params, 0);
+	/* Enable event (and firmware) queues IQs immediately */
+	if (iq->iqtype == TIQT_EVENT) {
+		iq->flags |= IQ_ENABLED;
+		t4_iq_gts_update(iq, iq->intr_params, 0);
+	}
 
 	return (0);
 }
@@ -1250,35 +1362,73 @@ t4_free_iq(struct port_info *pi, struct sge_iq *iq)
 }
 
 int
-t4_alloc_fwq(struct adapter *sc)
+t4_alloc_evt_iqs(struct adapter *sc)
 {
-	struct sge_iq *fwq = &sc->sge.fwq;
-	struct t4_iq_params iqp = {
+	const t4_intr_plan_t plan = sc->intr_queue_cfg.intr_plan;
+
+	const struct t4_iq_params fwq_iqp = {
+		.tip_iq_type	= TIQT_EVENT,
 		.tip_tmr_idx	= sc->sge.fwq_tmr_idx,
 		.tip_pktc_idx	= sc->sge.fwq_pktc_idx,
 		.tip_qsize	= FW_IQ_QSIZE,
 		.tip_esize	= FW_IQ_ESIZE,
 		.tip_cong_chan	= -1,
 		/*
-		 * If multiple interrupt vectors are available for use on the
-		 * device, the error-handling interrupt occupies the 0th slot.
+		 * The device error-handling interrupt always occupies the 0th
+		 * slot, which the firmware queue will share if no additional
+		 * interrupts are available.  Otherwise it uses the next slot
+		 * after that.
 		 */
-		.tip_intr_idx	= fwq->intr_idx,
+		.tip_intr_idx	= (plan == TIP_SINGLE) ? 0 : 1,
 	};
-	const int rc = t4_alloc_iq(sc->port[0], &iqp, fwq, NULL);
+	const int rc = t4_alloc_iq(sc->port[0], &fwq_iqp, &sc->sge.fwq, NULL);
 	if (rc != 0) {
 		cxgb_printf(sc->dip, CE_WARN,
 		    "failed to create firmware event queue: %d.", rc);
 		return (rc);
 	}
 
+	if (plan == TIP_PER_PORT) {
+		const uint_t port_count = sc->params.nports;
+
+		for (uint_t i = 0; i < port_count; i++) {
+			struct port_info *port = sc->port[i];
+
+			const struct t4_iq_params iqp = {
+				.tip_iq_type	= TIQT_EVENT,
+				.tip_tmr_idx	= sc->sge.fwq_tmr_idx,
+				.tip_pktc_idx	= sc->sge.fwq_pktc_idx,
+				.tip_qsize	= FW_IQ_QSIZE,
+				.tip_esize	= FW_IQ_ESIZE,
+				.tip_cong_chan	= -1,
+				.tip_intr_idx	= 2 + i,
+			};
+			const int rc =
+			    t4_alloc_iq(port, &iqp, &port->intr_iq, NULL);
+			if (rc != 0) {
+				cxgb_printf(sc->dip, CE_WARN,
+				    "failed to create interrupt event "
+				    "queue for port %u: %d.", i, rc);
+				t4_free_evt_iqs(sc);
+				return (rc);
+			}
+		}
+	}
+
 	return (0);
 }
 
 void
-t4_free_fwq(struct adapter *sc)
+t4_free_evt_iqs(struct adapter *sc)
 {
-	t4_free_iq(NULL, &sc->sge.fwq);
+	const uint_t port_count = sc->params.nports;
+
+	for (uint_t i = 0; i < port_count; i++) {
+		struct port_info *port = sc->port[i];
+		t4_free_iq(port, &port->intr_iq);
+	}
+
+	t4_free_iq(sc->port[0], &sc->sge.fwq);
 }
 
 static int
@@ -1289,6 +1439,7 @@ t4_alloc_rxq(struct port_info *pi, struct sge_rxq *rxq, int i)
 	rxq->port = pi;
 
 	struct t4_iq_params iqp = {
+		.tip_iq_type	= TIQT_ETH_RX,
 		.tip_tmr_idx	= pi->tmr_idx,
 		.tip_pktc_idx	= pi->pktc_idx,
 		.tip_qsize	= sc->props.qsize_rxq,
@@ -1326,10 +1477,10 @@ t4_alloc_eq_base(struct port_info *pi, struct sge_eq *eq, t4_eq_type_t eqtype)
 
 	size_t esize;
 	switch (eqtype) {
-	case TET_ETH_TX:
+	case TEQT_ETH_TX:
 		esize = EQ_ESIZE;
 		break;
-	case TET_FREELIST:
+	case TEQT_FREELIST:
 		esize = RX_FL_ESIZE;
 		break;
 	default:
@@ -1337,6 +1488,7 @@ t4_alloc_eq_base(struct port_info *pi, struct sge_eq *eq, t4_eq_type_t eqtype)
 	}
 
 	eq->eqtype = eqtype;
+	eq->esize = esize;
 	mutex_init(&eq->lock, NULL, MUTEX_DRIVER, DDI_INTR_PRI(sc->intr_pri));
 
 	const size_t len = eq->qsize * esize;
@@ -1388,7 +1540,7 @@ t4_eq_alloc_eth(struct port_info *pi, struct sge_eq *eq)
 	struct adapter *sc = pi->adapter;
 	int rc;
 
-	if ((rc = t4_alloc_eq_base(pi, eq, TET_ETH_TX)) != 0) {
+	if ((rc = t4_alloc_eq_base(pi, eq, TEQT_ETH_TX)) != 0) {
 		return (rc);
 	}
 
@@ -2914,13 +3066,13 @@ t4_tx_ring_db(struct sge_txq *txq)
 			const uint_t desc_idx =
 			    eq->pidx != 0 ? eq->pidx - 1 : eq->cap - 1;
 			uint64_t *src = t4_eq_desc(eq, desc_idx);
-			uint64_t *dst =  (uint64_t *)(eq->udb + UDBS_WR_OFFSET);
+			uint64_t *dst = (uint64_t *)(eq->udb + UDBS_WR_OFFSET);
 
 			/* Copy the 8 flits of the TX descriptor to the DB */
 			for (uint_t i = 0;
 			    i < (sizeof (struct tx_desc) / sizeof (uint64_t));
 			    i++) {
-				ddi_put64(sc->bar2_hdl, &dst[i], src[i]);
+				ddi_put64(sc->bar2_hdl, dst + i, src[i]);
 			}
 
 			membar_producer();

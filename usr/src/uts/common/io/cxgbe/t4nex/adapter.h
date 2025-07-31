@@ -139,9 +139,19 @@ struct sge_iq {
 
 	t4_intr_config_t intr_params;
 	uint_t intr_idx;	/* Assigned interrupt index */
+	/*
+	 * An IQ can be configured to "forward" its interrupt notifications to
+	 * appear as events in a different IQ, rather than as (presumably
+	 * MSI(-X)) "real" interrupts.  When this IQ is configured in such a
+	 * way, the `intr_evtq` field points to the IQ which will receive those
+	 * forwarded interrupt event notifications, subsequently calling
+	 * t4_iq_service() on this IQ.
+	 */
 	struct sge_iq *intr_evtq;
 	/*
-	 * TODO: add expectations about node ownership
+	 * A list of to-be-serviced IQs is built up as interrupt notification
+	 * events are processed in `intr_evtq`.  The `intr_fwd_node` field is
+	 * protected by `intr_evtq->lock`, rather than the `lock` of this IQ.
 	 */
 	list_node_t intr_fwd_node;
 
@@ -682,7 +692,7 @@ void t4_iq_update_intr_cfg(struct sge_iq *, uint8_t, int8_t);
 void t4_eq_update_dbq_timer(struct sge_eq *, struct port_info *);
 
 mblk_t *t4_eth_tx(void *, mblk_t *);
-int t4_service_iq(struct sge_iq *, uint_t, struct t4_poll_req *);
+int t4_iq_service(struct sge_iq *, uint_t, struct t4_poll_req *);
 
 /* t4_mac.c */
 void t4_os_link_changed(struct adapter *sc, int idx, int link_stat);

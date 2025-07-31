@@ -917,7 +917,7 @@ t4_poll_ring(void *arg, int n_bytes)
 		.tpr_byte_budget = n_bytes,
 		.tpr_mp = NULL,
 	};
-	(void) t4_service_iq(&rxq->iq, 0, &req);
+	(void) t4_iq_service(&rxq->iq, 0, &req);
 	return (req.tpr_mp);
 }
 

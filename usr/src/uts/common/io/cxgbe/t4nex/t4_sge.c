@@ -415,8 +415,16 @@ t4_port_queues_init(struct port_info *pi)
 		txq->eq.tx_chan = pi->tx_chan;
 		txq->eq.qsize = eq_qsize;
 
-		/* For now, direct all TX queue notifications to the FW IQ. */
-		txq->eq.iqid = sc->sge.fwq.cntxt_id;
+		if (sc->intr_queue_cfg.intr_plan == TIP_PER_PORT) {
+			/*
+			 * With a per-port IQ available for interrupt events, we
+			 * can also handle TX queue completion events there.
+			 */
+			txq->eq.iqid = pi->intr_iq.cntxt_id;
+		} else {
+			/* ... otherwise we do so in the FWQ */
+			txq->eq.iqid = sc->sge.fwq.cntxt_id;
+		}
 
 		if ((rc = t4_alloc_txq(pi, txq, i)) != 0) {
 			goto cleanup;
@@ -631,7 +639,7 @@ t4_intr_all(caddr_t arg1, caddr_t arg2)
 	(void) t4_slow_intr_handler(sc);
 
 	/* process fwq */
-	(void) t4_service_iq(&sc->sge.fwq, 0, NULL);
+	(void) t4_iq_service(&sc->sge.fwq, 0, NULL);
 
 	return (DDI_INTR_CLAIMED);
 }
@@ -653,7 +661,7 @@ t4_intr_fwq(caddr_t arg1, caddr_t arg2)
 {
 	struct adapter *sc = (struct adapter *)arg1;
 
-	(void) t4_service_iq(&sc->sge.fwq, 0, NULL);
+	(void) t4_iq_service(&sc->sge.fwq, 0, NULL);
 
 	return (DDI_INTR_CLAIMED);
 }
@@ -663,7 +671,7 @@ t4_intr_port_queue(caddr_t arg1, caddr_t arg2)
 {
 	struct port_info *port = (struct port_info *)arg1;
 
-	(void) t4_service_iq(&port->intr_iq, 0, NULL);
+	(void) t4_iq_service(&port->intr_iq, 0, NULL);
 
 	return (DDI_INTR_CLAIMED);
 }
@@ -678,6 +686,36 @@ t4_fl_periodic_refill(struct sge_fl *fl)
 	return (starved);
 }
 
+void
+t4_iq_service_notified(struct sge_iq *iq, list_t *iql_fwd)
+{
+	IQ_LOCK_ASSERT_OWNED(iq);
+
+	/* Dispatch any forwarded interrupts processed from the IQ */
+	for (struct sge_iq *intr_iq = list_head(iql_fwd); intr_iq != NULL; ) {
+		const int rc = t4_iq_service(intr_iq, intr_iq->qsize / 8, NULL);
+
+		/*
+		 * The IQ to which we are delivering the interrupt event to
+		 * should be left in the list of to-be-interrupted IQs if it had
+		 * entries remaining to process _and_ we are not bailing out of
+		 * processing the IQ from which the interrupt event was sourced.
+		 */
+		const bool over_budget = (rc == EINPROGRESS || rc == ENOSPC);
+		const bool is_disabled = (rc == ENOENT);
+
+		struct sge_iq *next = list_next(iql_fwd, intr_iq);
+		if (!over_budget && !is_disabled) {
+			list_remove(iql_fwd, intr_iq);
+		}
+		intr_iq = next;
+	}
+}
+
+/*
+ * Convenience struct for tracking entry types while servicing an IQ.
+ * Used to communicate said counts through the t4-iq-serviced probe.
+ */
 struct sge_iq_totals {
 	uint_t sit_desc;
 	uint_t sit_flbuf;
@@ -685,8 +723,19 @@ struct sge_iq_totals {
 	uint_t sit_intr;
 };
 
+/*
+ * Process entries in a given IQ.  This includes:
+ *
+ * - Freelist buffer entries holding received packets
+ * - IQ interrupt event notifications
+ * - CPL messages for EQ CIDX updates
+ * - Async firmware events messages (in CPL messages)
+ *
+ * Servicing an IQ can occur in an interrupt thread (including "forwarded" IQ
+ * interrupt notifications) or when called directly as part of mac polling.
+ */
 int
-t4_service_iq(struct sge_iq *iq, uint_t desc_budget, struct t4_poll_req *tpr)
+t4_iq_service(struct sge_iq *iq, uint_t desc_budget, struct t4_poll_req *tpr)
 {
 	struct adapter *sc = iq->adapter;
 	struct sge_fl *fl = iq->fl;
@@ -816,6 +865,7 @@ repeat:
 			 * are not forwarding their interrupts.
 			 */
 			ASSERT(iq->intr_evtq == NULL);
+			ASSERT(iq->iqtype == TIQT_EVENT);
 
 			totals.sit_intr++;
 			const uint32_t tgt_qid = BE_32(ctrl.pldbuflen_qid);
@@ -849,41 +899,38 @@ repeat:
 			cidx_incr = 0;
 			needs_rearm = true;
 
-			if (fl != NULL) {
-				(void) t4_fl_periodic_refill(fl);
-			}
-
-
 			if (desc_budget != 0) {
 				rc = EINPROGRESS;
 				goto bail;
+			}
+
+			if (fl != NULL) {
+				(void) t4_fl_periodic_refill(fl);
+			}
+			if (!list_is_empty(&iql_fwd)) {
+				t4_iq_service_notified(iq, &iql_fwd);
 			}
 		}
 	}
 
 bail:
 	/* Dispatch any forwarded interrupts processed from the IQ */
-	for (struct sge_iq *intr_iq = list_head(&iql_fwd); intr_iq != NULL; ) {
-		const int intr_rc =
-		    t4_service_iq(intr_iq, intr_iq->qsize / 8, NULL);
-
-		struct sge_iq *next = list_next(&iql_fwd, intr_iq);
+	t4_iq_service_notified(iq, &iql_fwd);
+	if (rc == 0 && !list_is_empty(&iql_fwd)) {
 		/*
-		 * The IQ to which we are delivering the interrupt event to
-		 * should be left in the list of to-be-interrupted IQs if it had
-		 * entries remaining to process _and_ we are not bailing out of
-		 * processing the IQ from which the interrupt event was sourced.
+		 * Some of the IQs receiving interrupt notifications may still
+		 * possess more work to do.  Take another lap through processing
+		 * of events on this IQ if we have no other reason to bail out.
 		 */
-		const bool iq_over_budget =
-		    (intr_rc == EINPROGRESS || intr_rc == ENOSPC);
-		const bool iq_is_disabled  = intr_rc == ENOENT;
-		if (!(iq_over_budget || iq_is_disabled) || rc != 0) {
-			list_remove(&iql_fwd, intr_iq);
-		}
-		intr_iq = next;
-	}
-	if (!list_is_empty(&iql_fwd)) {
 		goto repeat;
+	} else {
+		/*
+		 * Unlink IQs which may still have entries pending. They will
+		 * have re-armed their interrupt conditions resulting in
+		 * notifications to this IQ which will cause them to be
+		 * revisited in a subsequent call.
+		 */
+		while (list_remove_head(&iql_fwd) != NULL) { }
 	}
 
 	if (tpr != NULL) {
@@ -3181,7 +3228,7 @@ t4_handle_cpl_msg(struct sge_iq *iq, const struct rss_header *rss, mblk_t *mp)
 		return (0);
 	case CPL_RX_PKT:
 		/*
-		 * Packet RX is expected to be handled in t4_service_iq().  CPL
+		 * Packet RX is expected to be handled in t4_iq_service().  CPL
 		 * messages of such a type should not make it here.
 		 */
 		cxgb_printf(iq->adapter->dip, CE_WARN,

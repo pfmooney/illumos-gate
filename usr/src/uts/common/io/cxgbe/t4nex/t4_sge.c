@@ -1168,8 +1168,8 @@ t4_alloc_iq(struct port_info *pi, const struct t4_iq_params *tip,
 	iq->intr_idx = intr_fwd ? UINT_MAX : intr_idx;
 
 	const size_t len = iq->qsize * iq->esize;
-	rc = alloc_desc_ring(sc, len, DDI_DMA_READ, &iq->dhdl, &iq->ahdl,
-	    &iq->ba, (caddr_t *)&iq->desc);
+	rc = alloc_desc_ring(sc, len, DDI_DMA_READ, &iq->desc_dhdl,
+	    &iq->desc_ahdl, &iq->desc_ba, (caddr_t *)&iq->desc);
 	if (rc != 0) {
 		mutex_destroy(&iq->lock);
 		return (rc);
@@ -1209,7 +1209,7 @@ t4_alloc_iq(struct port_info *pi, const struct t4_iq_params *tip,
 		    V_FW_IQ_CMD_IQINTCNTTHRESH(pktc_idx) |
 		    V_FW_IQ_CMD_IQESIZE(ilog2(iq->esize) - 4)),
 		.iqsize = BE_16(iq->qsize),
-		.iqaddr = BE_64(iq->ba),
+		.iqaddr = BE_64(iq->desc_ba),
 		/* Only NIC queues used today */
 		.iqns_to_fl0congen = tip->tip_cong_chan == -1 ? 0 : BE_32(
 		    F_FW_IQ_CMD_IQFLINTCONGEN |
@@ -1261,7 +1261,7 @@ t4_alloc_iq(struct port_info *pi, const struct t4_iq_params *tip,
 		    V_FW_IQ_CMD_FL0FBMIN(fbmin) |
 		    V_FW_IQ_CMD_FL0FBMAX(fbmax));
 		iq_cmd.fl0size |= BE_16(eq->qsize);
-		iq_cmd.fl0addr |= BE_64(eq->ba);
+		iq_cmd.fl0addr |= BE_64(eq->desc_ba);
 	}
 	if (!intr_fwd) {
 		iq->flags |= IQ_INTR;
@@ -1280,9 +1280,8 @@ t4_alloc_iq(struct port_info *pi, const struct t4_iq_params *tip,
 
 	iq->cdesc = iq->desc;
 	iq->cidx = 0;
-	iq->gen = 1;
+	iq->gen = F_RSPD_GEN;
 	iq->adapter = sc;
-	iq->polling = 0;
 
 	*t4_iqmap_slot(sc, iq->cntxt_id) = iq;
 
@@ -1374,10 +1373,10 @@ t4_free_iq(struct port_info *pi, struct sge_iq *iq)
 		}
 	}
 	if (iq->flags & IQ_ALLOC_HOST) {
-		(void) free_desc_ring(&iq->dhdl, &iq->ahdl);
+		(void) free_desc_ring(&iq->desc_dhdl, &iq->desc_ahdl);
 		iq->desc = NULL;
 		iq->cdesc = NULL;
-		iq->ba = 0;
+		iq->desc_ba = 0;
 		mutex_destroy(&iq->lock);
 		iq->flags &= ~IQ_ALLOC_HOST;
 	}
@@ -1540,7 +1539,7 @@ t4_alloc_eq_base(struct port_info *pi, struct sge_eq *eq, t4_eq_type_t eqtype)
 
 	const size_t len = eq->qsize * esize;
 	int rc = alloc_desc_ring(sc, len, DDI_DMA_WRITE, &eq->desc_dhdl,
-	    &eq->desc_ahdl, &eq->ba, (caddr_t *)&eq->desc);
+	    &eq->desc_ahdl, &eq->desc_ba, (caddr_t *)&eq->desc);
 	if (rc != 0) {
 		mutex_destroy(&eq->lock);
 		return (rc);
@@ -1615,7 +1614,7 @@ t4_eq_alloc_eth(struct port_info *pi, struct sge_eq *eq)
 		    V_FW_EQ_ETH_CMD_FBMAX(X_FETCHBURSTMAX_512B) |
 		    V_FW_EQ_ETH_CMD_CIDXFTHRESH(X_CIDXFLUSHTHRESH_32) |
 		    V_FW_EQ_ETH_CMD_EQSIZE(eq->qsize)),
-		.eqaddr = BE_64(eq->ba),
+		.eqaddr = BE_64(eq->desc_ba),
 	};
 
 	if (sc->flags & TAF_DBQ_TIMER) {
@@ -1675,7 +1674,7 @@ t4_free_eq(struct port_info *pi, struct sge_eq *eq)
 	if (eq->flags & EQ_ALLOC_HOST) {
 		(void) free_desc_ring(&eq->desc_dhdl, &eq->desc_ahdl);
 		eq->desc = NULL;
-		eq->ba = 0;
+		eq->desc_ba = 0;
 		eq->spg = NULL;
 		mutex_destroy(&eq->lock);
 
@@ -1919,11 +1918,11 @@ alloc_tx_copybuffer(struct adapter *sc, size_t len,
 static inline bool
 t4_get_new_rsp(const struct sge_iq *iq, struct rsp_ctrl *ctrl)
 {
-	(void) ddi_dma_sync(iq->dhdl, 0, 0, DDI_DMA_SYNC_FORKERNEL);
+	(void) ddi_dma_sync(iq->desc_dhdl, 0, 0, DDI_DMA_SYNC_FORKERNEL);
 
 	*ctrl = *(struct rsp_ctrl *)
 	    ((caddr_t)iq->cdesc + (iq->esize - sizeof (struct rsp_ctrl)));
-	return ((ctrl->u.type_gen >> S_RSPD_GEN) == iq->gen);
+	return ((ctrl->u.type_gen & F_RSPD_GEN) == iq->gen);
 }
 
 static inline void
@@ -1932,7 +1931,7 @@ iq_next(struct sge_iq *iq)
 	iq->cdesc = (void *) ((uintptr_t)iq->cdesc + iq->esize);
 	if (++iq->cidx == iq->qsize - 1) {
 		iq->cidx = 0;
-		iq->gen ^= 1;
+		iq->gen ^= F_RSPD_GEN;
 		iq->cdesc = iq->desc;
 	}
 }

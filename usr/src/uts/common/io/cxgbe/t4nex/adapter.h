@@ -67,7 +67,7 @@ struct sge_fl;
 #define	UDBS_WR_OFFSET	64	/* offset of the work request in a segment */
 
 struct fl_desc {
-	__be64 dptr[FL_BUF_PER_BLOCK];
+	uint64_t dptr[FL_BUF_PER_BLOCK];
 };
 
 struct fl_sdesc {
@@ -75,7 +75,7 @@ struct fl_sdesc {
 };
 
 struct tx_desc {
-	__be64 flit[8];
+	uint64_t flit[8];
 };
 
 struct tx_sdesc {
@@ -129,9 +129,7 @@ typedef enum t4_iq_type {
 	TIQT_ETH_RX,
 } t4_iq_type_t;
 
-/*
- * Ingress Queue: T4 is producer, driver is consumer.
- */
+/* Ingress Queue: T4 is producer, driver is consumer. */
 struct sge_iq {
 	kmutex_t lock;
 	t4_iq_flags_t flags;
@@ -155,25 +153,24 @@ struct sge_iq {
 	 */
 	list_node_t intr_fwd_node;
 
-	ddi_dma_handle_t dhdl;
-	ddi_acc_handle_t ahdl;
+	ddi_dma_handle_t desc_dhdl;
+	ddi_acc_handle_t desc_ahdl;
 
-	__be64 *desc;		/* KVA of descriptor ring */
-	uint64_t ba;		/* bus address of descriptor ring */
-	const __be64 *cdesc;	/* current descriptor */
+	uint64_t *desc;		/* KVA of descriptor ring */
+	uint64_t desc_ba;	/* bus address of descriptor ring */
+	const uint64_t *cdesc;	/* current descriptor (at CIDX) */
 
 	uint16_t esize;		/* size (bytes) of each entry in the queue */
 	uint16_t qsize;		/* size (# of entries) of the queue */
 	uint16_t cidx;		/* consumer index */
 	uint16_t pending;	/* # of descs processed since last doorbell */
 	uint8_t gen;		/* generation bit */
-	uint8_t polling;	/* Is IQ in polling mode? */
 	int8_t intr_pktc_idx;	/* packet count threshold index */
 
-	uint16_t cntxt_id;	/* SGE context id  for the iq */
-	uint16_t abs_id;	/* absolute SGE id for the iq */
+	uint16_t cntxt_id;	/* SGE context ID for IQ */
+	uint16_t abs_id;	/* absolute SGE ID for IQ */
 
-	struct adapter *adapter; /* associated  adapter */
+	struct adapter *adapter; /* associated adapter */
 	struct sge_fl *fl;	/* associated freelist (if any) */
 
 	struct sge_iq_stats stats;
@@ -216,12 +213,7 @@ typedef enum t4_eq_type {
 	TEQT_FREELIST,
 } t4_eq_type_t;
 
-/*
- * Egress Queue: driver is producer, T4 is consumer.
- *
- * Note: A free list is an egress queue (driver produces the buffers and T4
- * consumes them) but it's special enough to have its own struct (see sge_fl).
- */
+/* Egress Queue: driver is producer, T4 is consumer. */
 struct sge_eq {
 	t4_eq_type_t eqtype;
 	t4_eq_flags_t flags;
@@ -230,9 +222,8 @@ struct sge_eq {
 	ddi_dma_handle_t desc_dhdl;
 	ddi_acc_handle_t desc_ahdl;
 
-	// struct tx_desc *desc;	/* KVA of descriptor ring */
 	void *desc;		/* KVA of descriptor ring */
-	uint64_t ba;		/* bus address of descriptor ring */
+	uint64_t desc_ba;	/* bus address of descriptor ring */
 
 	/* Sizing and status */
 	uint16_t cap;		/* max # of desc, for convenience */
@@ -258,9 +249,6 @@ typedef enum t4_fl_flags {
 	FL_STARVING	= (1 << 0),	/* on the list of starving fl's */
 	FL_DOOMED	= (1 << 1),	/* about to be destroyed */
 } t4_fl_flags_t;
-
-#define	FL_RUNNING_LOW(fl)	(fl->eq.cap - fl->needed <= fl->lowat)
-#define	FL_NOT_RUNNING_LOW(fl)	(fl->eq.cap - fl->needed >= 2 * fl->lowat)
 
 struct sge_fl_stats {
 	uint64_t copied_up;	/* # of frames copied into mblk and handed up */
@@ -317,12 +305,13 @@ struct sge_txq_stats {
 	uint32_t csum_failed;	/* # of csum reqs we failed to fulfill */
 };
 
-/* txq: SGE egress queue + miscellaneous items */
+/* Ethernet packet transmission queue */
 struct sge_txq {
-	struct sge_eq eq;	/* MUST be first */
+	struct sge_eq eq;
 
-	struct port_info *port;	/* the port this txq belongs to */
+	struct port_info *port;
 	struct tx_sdesc *sdesc;	/* KVA of software descriptor ring */
+
 	mac_ring_handle_t ring_handle;
 
 	/* DMA handles used for tx */
@@ -353,17 +342,17 @@ struct sge_rxq_stats {
 	uint64_t rxbytes;	/* # of ethernet bytes */
 };
 
-/* rxq: SGE ingress queue + SGE free list + miscellaneous items */
+/* Ethernet packet receive queue */
 struct sge_rxq {
-	struct sge_iq iq;	/* MUST be first */
-	struct sge_fl fl;
+	struct sge_iq iq;
+	struct sge_fl fl;	/* Freelist for packet receive buffers */
 
-	struct port_info *port;	/* the port this rxq belongs to */
-	kstat_t *ksp;
+	struct port_info *port;
 
 	mac_ring_handle_t ring_handle;
 	uint64_t ring_gen_num;
 
+	kstat_t *ksp;
 	struct sge_rxq_stats stats;
 };
 

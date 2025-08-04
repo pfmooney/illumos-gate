@@ -67,9 +67,41 @@
  * Queues
  * ------
  *
- * ----------
- * Interrupts
- * ----------
+ * Queues are the primary mechanism by which data is transferred to/from the
+ * adapter.  These queues fall under two categories: ingress and egress.
+ *
+ * Egress queues (EQs) are used to transfer data from the host to the adapter.
+ * Packet transmission requests are the most obvious application, but also
+ * included are buffers into which received packet data will be placed.
+ *
+ * Ingress queues (IQs) are used to transfer data from the adapter to the host.
+ * This can include received packets, messages from the firmware, and
+ * asynchronous event notifications.
+ *
+ * Both queue types are driven with the common "ring" pattern, where the
+ * producer pushes items into the ring, which are picked up by the consumer
+ * trailing behind, with notifications (interrupts and doorbells, respectively)
+ * being provided to indicate such progress.
+ *
+ * ---------
+ * Freelists
+ * ---------
+ *
+ * Freelists are a special type of egress queue used to provide buffers to the
+ * adapter's scatter-gather engine (SGE) for it to place incoming data.  Unlike
+ * "normal" egress queues, which are configured with a separate firmware
+ * command, freelists are configured on the adapter at the same time as the
+ * ingress queue to which they are associated.
+ *
+ * --------------------------
+ * Notifications & Interrupts
+ * --------------------------
+ *
+ * Ingress queues are configured to notify the host when they have entries
+ * available for consumption.  This can be in the form of a traditional
+ * interrupt or a notification message, posted to an elected IQ (a "forwarded"
+ * interrupt).
+ *
  */
 
 static void *t4_soft_state;
@@ -133,7 +165,6 @@ static ddi_ufm_ops_t t4_ufm_ops = {
 };
 
 
-/* ARGSUSED */
 static int
 t4_devo_getinfo(dev_info_t *dip, ddi_info_cmd_t cmd, void *arg, void **rp)
 {
@@ -795,53 +826,49 @@ t4_bus_unconfig(dev_info_t *dip, uint_t flags, ddi_bus_config_op_t op,
 	return (rc);
 }
 
-/* ARGSUSED */
 static int
 t4_cb_open(dev_t *devp, int flag, int otyp, cred_t *credp)
 {
-	struct adapter *sc;
+	struct adapter *sc = ddi_get_soft_state(t4_soft_state, getminor(*devp));
 
-	if (otyp != OTYP_CHR)
+	if (otyp != OTYP_CHR) {
 		return (EINVAL);
+	}
 
-	sc = ddi_get_soft_state(t4_soft_state, getminor(*devp));
-	if (sc == NULL)
+	if (sc == NULL) {
 		return (ENXIO);
+	}
 
 	return (atomic_cas_uint(&sc->open, 0, EBUSY));
 }
 
-/* ARGSUSED */
 static int
 t4_cb_close(dev_t dev, int flag, int otyp, cred_t *credp)
 {
-	struct adapter *sc;
+	struct adapter *sc = ddi_get_soft_state(t4_soft_state, getminor(dev));
 
-	sc = ddi_get_soft_state(t4_soft_state, getminor(dev));
-	if (sc == NULL)
+	if (sc == NULL) {
 		return (EINVAL);
+	}
 
 	(void) atomic_swap_uint(&sc->open, 0);
 	return (0);
 }
 
-/* ARGSUSED */
 static int
 t4_cb_ioctl(dev_t dev, int cmd, intptr_t d, int mode, cred_t *credp, int *rp)
 {
-	int instance;
-	struct adapter *sc;
-	void *data = (void *)d;
+	struct adapter *sc = ddi_get_soft_state(t4_soft_state, getminor(dev));
 
-	if (crgetuid(credp) != 0)
+	if (crgetuid(credp) != 0) {
 		return (EPERM);
+	}
 
-	instance = getminor(dev);
-	sc = ddi_get_soft_state(t4_soft_state, instance);
-	if (sc == NULL)
+	if (sc == NULL) {
 		return (EINVAL);
+	}
 
-	return (t4_ioctl(sc, cmd, data, mode));
+	return (t4_ioctl(sc, cmd, (void *)d, mode));
 }
 
 static uint_t
@@ -870,18 +897,9 @@ static int
 t4_prep_firmware(struct adapter *sc)
 {
 	int rc;
-	size_t fw_size;
-	int reset = 1;
-	enum dev_state state;
-	unsigned char *fw_data;
-	struct fw_hdr *card_fw, *hdr;
-	const char *fw_file = NULL;
-	firmware_handle_t fw_hdl;
-	struct fw_info fi, *fw_info = &fi;
-
-	struct driver_properties *p = &sc->props;
 
 	/* Contact firmware, request master */
+	enum dev_state state;
 	rc = t4_fw_hello(sc, sc->mbox, sc->mbox, MASTER_MUST, &state);
 	if (rc < 0) {
 		rc = -rc;
@@ -896,6 +914,7 @@ t4_prep_firmware(struct adapter *sc)
 	/* We may need FW version info for later reporting */
 	(void) t4_get_version_info(sc);
 
+	const char *fw_file = NULL;
 	switch (CHELSIO_CHIP_VERSION(sc->params.chip)) {
 	case CHELSIO_T4:
 		fw_file = "t4fw.bin";
@@ -911,29 +930,28 @@ t4_prep_firmware(struct adapter *sc)
 		return (EINVAL);
 	}
 
+	firmware_handle_t fw_hdl;
 	if (firmware_open(T4_PORT_NAME, fw_file, &fw_hdl) != 0) {
 		cxgb_printf(sc->dip, CE_WARN, "Could not open %s\n", fw_file);
 		return (EINVAL);
 	}
 
-	fw_size = firmware_get_size(fw_hdl);
-
+	const size_t fw_size = firmware_get_size(fw_hdl);
 	if (fw_size < sizeof (struct fw_hdr)) {
-		cxgb_printf(sc->dip, CE_WARN, "%s is too small (%ld bytes)\n",
+		cxgb_printf(sc->dip, CE_WARN, "%s is too small (%lu bytes)\n",
 		    fw_file, fw_size);
 		(void) firmware_close(fw_hdl);
 		return (EINVAL);
 	}
-
 	if (fw_size > FLASH_FW_MAX_SIZE) {
 		cxgb_printf(sc->dip, CE_WARN,
-		    "%s is too large (%ld bytes, max allowed is %ld)\n",
+		    "%s is too large (%lu bytes, max allowed is %lu)\n",
 		    fw_file, fw_size, FLASH_FW_MAX_SIZE);
 		(void) firmware_close(fw_hdl);
 		return (EFBIG);
 	}
 
-	fw_data = kmem_zalloc(fw_size, KM_SLEEP);
+	unsigned char *fw_data = kmem_zalloc(fw_size, KM_SLEEP);
 	if (firmware_read(fw_hdl, 0, fw_data, fw_size) != 0) {
 		cxgb_printf(sc->dip, CE_WARN, "Failed to read from %s\n",
 		    fw_file);
@@ -943,26 +961,29 @@ t4_prep_firmware(struct adapter *sc)
 	}
 	(void) firmware_close(fw_hdl);
 
-	bzero(fw_info, sizeof (*fw_info));
-	fw_info->chip = CHELSIO_CHIP_VERSION(sc->params.chip);
-
-	hdr = (struct fw_hdr *)fw_data;
-	fw_info->fw_hdr.fw_ver = hdr->fw_ver;
-	fw_info->fw_hdr.chip = hdr->chip;
-	fw_info->fw_hdr.intfver_nic = hdr->intfver_nic;
-	fw_info->fw_hdr.intfver_vnic = hdr->intfver_vnic;
-	fw_info->fw_hdr.intfver_ofld = hdr->intfver_ofld;
-	fw_info->fw_hdr.intfver_ri = hdr->intfver_ri;
-	fw_info->fw_hdr.intfver_iscsipdu = hdr->intfver_iscsipdu;
-	fw_info->fw_hdr.intfver_iscsi = hdr->intfver_iscsi;
-	fw_info->fw_hdr.intfver_fcoepdu = hdr->intfver_fcoepdu;
-	fw_info->fw_hdr.intfver_fcoe = hdr->intfver_fcoe;
+	const struct fw_hdr *hdr = (struct fw_hdr *)fw_data;
+	struct fw_info fi = {
+		.chip = CHELSIO_CHIP_VERSION(sc->params.chip),
+		.fw_hdr = {
+			.fw_ver			= hdr->fw_ver,
+			.chip			= hdr->chip,
+			.intfver_nic		= hdr->intfver_nic,
+			.intfver_vnic		= hdr->intfver_vnic,
+			.intfver_ofld		= hdr->intfver_ofld,
+			.intfver_ri		= hdr->intfver_ri,
+			.intfver_iscsipdu	= hdr->intfver_iscsipdu,
+			.intfver_iscsi		= hdr->intfver_iscsi,
+			.intfver_fcoepdu	= hdr->intfver_fcoepdu,
+			.intfver_fcoe		= hdr->intfver_fcoe,
+		},
+	};
 
 	/* allocate memory to read the header of the firmware on the card */
-	card_fw = kmem_zalloc(sizeof (*card_fw), KM_SLEEP);
+	struct fw_hdr *card_fw = kmem_zalloc(sizeof (struct fw_hdr), KM_SLEEP);
 
-	rc = -t4_prep_fw(sc, fw_info, fw_data, fw_size, card_fw,
-	    p->t4_fw_install, state, &reset);
+	int reset = 1;
+	rc = -t4_prep_fw(sc, &fi, fw_data, fw_size, card_fw,
+	    sc->props.t4_fw_install, state, &reset);
 
 	kmem_free(card_fw, sizeof (*card_fw));
 	kmem_free(fw_data, fw_size);
@@ -991,15 +1012,13 @@ t4_prep_firmware(struct adapter *sc)
 		/* Handle default vs special T4 config file */
 
 		rc = t4_partition_resources(sc);
-		if (rc != 0)
-			goto err;	/* error message displayed already */
+		if (rc != 0) {
+			return (rc);
+		}
 	}
 
 	sc->flags |= FW_OK;
 	return (0);
-err:
-	return (rc);
-
 }
 
 struct memwin {
@@ -1384,11 +1403,6 @@ t4_init_get_params_post(struct adapter *sc)
 	sc->sge.eq_start = val[1];
 	sc->sge.iqmap_sz = val[2] - sc->sge.iq_start + 1;
 	sc->sge.eqmap_sz = val[3] - sc->sge.eq_start + 1;
-
-	uint32_t r = t4_read_reg(sc, A_SGE_EGRESS_QUEUES_PER_PAGE_PF);
-	r >>= S_QUEUESPERPAGEPF0 +
-	    (S_QUEUESPERPAGEPF1 - S_QUEUESPERPAGEPF0) * sc->pf;
-	sc->sge.s_qpp = r & M_QUEUESPERPAGEPF0;
 
 	/* get capabilites */
 	bzero(&caps, sizeof (caps));

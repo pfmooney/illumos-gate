@@ -212,8 +212,7 @@ t4_sge_init(struct adapter *sc)
 	struct driver_properties *p = &sc->props;
 	ddi_dma_attr_t *dma_attr;
 	ddi_device_acc_attr_t *acc_attr;
-	uint32_t sge_control, sge_conm_ctrl;
-	int egress_threshold;
+	uint32_t sge_control;
 
 	/*
 	 * Device access and DMA attributes for descriptor rings
@@ -269,13 +268,20 @@ t4_sge_init(struct adapter *sc)
 	/* t4_nex uses FLM packed mode */
 	const int fl_align = t4_fl_pkt_align(sc, true);
 	VERIFY3S(fl_align, >=, 0);
-	sc->sge.fl_align = fl_align;
+	/*
+	 * Minimum alignment for freelist buffer sizes is stated as 16, but in
+	 * order to keep bits [3:0] clear for identifying the buffer size
+	 * register, we use a minimum of 32.
+	 *
+	 * See A_SGE_FL_BUFFER_SIZE0 setting below.
+	 */
+	sc->sge.fl_align = MAX(fl_align, 32);
 
 	/*
-	 * Device access and DMA attributes for rx buffers
+	 * Device access and DMA attributes for RX buffers
 	 */
 	sc->sge.rxb_params.dip = sc->dip;
-	sc->sge.rxb_params.buf_size = rx_buf_size;
+	sc->sge.rxb_params.buf_size = P2ROUNDUP(rx_buf_size, fl_align);
 
 	acc_attr = &sc->sge.rxb_params.acc_attr_rx;
 	acc_attr->devacc_attr_version = DDI_DEVICE_ATTR_V0;
@@ -286,11 +292,6 @@ t4_sge_init(struct adapter *sc)
 	dma_attr->dma_attr_addr_lo = 0;
 	dma_attr->dma_attr_addr_hi = UINT64_MAX;
 	dma_attr->dma_attr_count_max = UINT64_MAX;
-	/*
-	 * Low 4 bits of an rx buffer address have a special meaning to the SGE
-	 * and an rx buf cannot have an address with any of these bits set.
-	 * FL_ALIGN is >= 32 so we're sure things are ok.
-	 */
 	dma_attr->dma_attr_align = sc->sge.fl_align;
 	dma_attr->dma_attr_burstsizes = 0xfff;
 	dma_attr->dma_attr_minxfer = 1;
@@ -303,7 +304,7 @@ t4_sge_init(struct adapter *sc)
 	sc->sge.rxbuf_cache = rxbuf_cache_create(&sc->sge.rxb_params);
 
 	/*
-	 * A FL with <= fl_starve_thres buffers is starving and a periodic
+	 * A FL with <= fl_starve_threshold buffers is starving and a periodic
 	 * timer will attempt to refill it.  This needs to be larger than the
 	 * SGE's Egress Congestion Threshold.  If it isn't, then we can get
 	 * stuck waiting for new packets while the SGE is waiting for us to
@@ -315,7 +316,8 @@ t4_sge_init(struct adapter *sc)
 	 * buffers.
 	 */
 
-	sge_conm_ctrl = t4_read_reg(sc, A_SGE_CONM_CTRL);
+	const uint32_t sge_conm_ctrl = t4_read_reg(sc, A_SGE_CONM_CTRL);
+	uint_t egress_threshold;
 	switch (CHELSIO_CHIP_VERSION(sc->params.chip)) {
 	case CHELSIO_T4:
 		egress_threshold = G_EGRTHRESHOLD(sge_conm_ctrl);
@@ -327,9 +329,20 @@ t4_sge_init(struct adapter *sc)
 	default:
 		egress_threshold = G_T6_EGRTHRESHOLDPACKING(sge_conm_ctrl);
 	}
-	sc->sge.fl_starve_threshold = 2*egress_threshold + 1;
+	sc->sge.fl_starve_threshold = 2 * egress_threshold + 1;
 
-	t4_write_reg(sc, A_SGE_FL_BUFFER_SIZE0, rx_buf_size);
+	/*
+	 * Set the size of buffers submitted through freelists.
+	 *
+	 * Strictly speaking, this is setting one of sixteen possible buffer
+	 * sizes, with bits [3:0] of freelist entries designating the size
+	 * register (0-15) which contains its corresponding size.
+	 *
+	 * Our driver does not currently make use of multiple sizes.  Submitted
+	 * buffers are at least 16-byte aligned, thus bits [3:0] are 0,
+	 * selecting this size register.
+	 */
+	t4_write_reg(sc, A_SGE_FL_BUFFER_SIZE0, sc->sge.rxb_params.buf_size);
 
 	t4_write_reg(sc, A_SGE_INGRESS_RX_THRESHOLD,
 	    V_THRESHOLD_0(p->holdoff_pktcnt[0]) |
@@ -477,7 +490,7 @@ t4_port_queues_enable(struct port_info *pi)
 		 */
 		rxq->fl.flags &= ~FL_DOOMED;
 
-		t4_iq_gts_update(iq, iq->intr_params, 0);
+		t4_iq_gts_update(iq, iq->gts_rearm, 0);
 		IQ_UNLOCK(iq);
 	}
 	mutex_exit(&sc->sfl_lock);
@@ -531,13 +544,13 @@ t4_port_queues_disable(struct port_info *pi)
 }
 
 /*
- * We are counting on the values of t4_intr_config_t matching the register
+ * We are counting on the values of t4_gts_config_t matching the register
  * definitions from the shared code.
  */
-CTASSERT(TIC_SE_INTR_ARM == F_QINTR_CNT_EN);
-CTASSERT(TIC_TIMER0 == V_QINTR_TIMER_IDX(X_TIMERREG_COUNTER0));
-CTASSERT(TIC_TIMER5 == V_QINTR_TIMER_IDX(X_TIMERREG_COUNTER5));
-CTASSERT(TIC_START_COUNTER == V_QINTR_TIMER_IDX(X_TIMERREG_RESTART_COUNTER));
+CTASSERT(TGC_SE_INTR_ARM == F_QINTR_CNT_EN);
+CTASSERT(TGC_TIMER0 == V_QINTR_TIMER_IDX(X_TIMERREG_COUNTER0));
+CTASSERT(TGC_TIMER5 == V_QINTR_TIMER_IDX(X_TIMERREG_COUNTER5));
+CTASSERT(TGC_START_COUNTER == V_QINTR_TIMER_IDX(X_TIMERREG_RESTART_COUNTER));
 
 void
 t4_iq_update_intr_cfg(struct sge_iq *iq, uint8_t tmr_idx, int8_t pktc_idx)
@@ -553,8 +566,8 @@ t4_iq_update_intr_cfg(struct sge_iq *iq, uint8_t tmr_idx, int8_t pktc_idx)
 	 */
 	ASSERT3U(tmr_idx, <, SGE_NTIMERS);
 
-	iq->intr_params = V_QINTR_TIMER_IDX(tmr_idx) |
-	    ((pktc_idx != -1) ? TIC_SE_INTR_ARM : 0);
+	iq->gts_rearm = V_QINTR_TIMER_IDX(tmr_idx) |
+	    ((pktc_idx != -1) ? TGC_SE_INTR_ARM : 0);
 
 	/* Update IQ for new packet count threshold, but only if enabled */
 	if (pktc_idx != iq->intr_pktc_idx && pktc_idx >= 0) {
@@ -600,7 +613,7 @@ t4_eq_update_dbq_timer(struct sge_eq *eq, struct port_info *pi)
  * ingress queue.
  */
 void
-t4_iq_gts_update(struct sge_iq *iq, t4_intr_config_t cfg, uint16_t cidx_incr)
+t4_iq_gts_update(struct sge_iq *iq, t4_gts_config_t cfg, uint16_t cidx_incr)
 {
 	const uint32_t value =
 	    V_INGRESSQID((uint32_t)iq->cntxt_id) |
@@ -804,7 +817,7 @@ repeat:
 			    t4_fl_get_payload(fl, data_len, newbuf);
 			if (mp == NULL) {
 				/* Rearm IQ with longer-than-default timer */
-				t4_iq_gts_update(iq, TIC_TIMER5, cidx_incr);
+				t4_iq_gts_update(iq, TGC_TIMER5, cidx_incr);
 				cidx_incr = 0;
 				rc = ENOMEM;
 				goto bail;
@@ -958,7 +971,7 @@ bail:
 		}
 
 		if (cidx_incr != 0 || needs_rearm) {
-			t4_iq_gts_update(iq, iq->intr_params, cidx_incr);
+			t4_iq_gts_update(iq, iq->gts_rearm, cidx_incr);
 		}
 	}
 	IQ_UNLOCK(iq);
@@ -1155,10 +1168,10 @@ t4_alloc_iq(struct port_info *pi, const struct t4_iq_params *tip,
 	iq->flags = 0;
 	iq->iqtype = tip->tip_iq_type;
 	iq->adapter = sc;
-	iq->intr_params = V_QINTR_TIMER_IDX(tip->tip_tmr_idx);
+	iq->gts_rearm = V_QINTR_TIMER_IDX(tip->tip_tmr_idx);
 	iq->intr_pktc_idx = -1;
 	if (tip->tip_pktc_idx >= 0) {
-		iq->intr_params |= TIC_SE_INTR_ARM;
+		iq->gts_rearm |= TGC_SE_INTR_ARM;
 		iq->intr_pktc_idx = tip->tip_pktc_idx;
 	}
 	/* See FW_IQ_CMD for qsize/esize constraint details */
@@ -1332,7 +1345,7 @@ t4_alloc_iq(struct port_info *pi, const struct t4_iq_params *tip,
 	/* Enable event (and firmware) queues IQs immediately */
 	if (iq->iqtype == TIQT_EVENT) {
 		iq->flags |= IQ_ENABLED;
-		t4_iq_gts_update(iq, iq->intr_params, 0);
+		t4_iq_gts_update(iq, iq->gts_rearm, 0);
 	}
 
 	return (0);

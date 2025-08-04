@@ -103,8 +103,8 @@ struct rxbuf_cache_params {
 };
 
 struct sge_iq_stats {
-	uint64_t sis_overflow;
-	uint64_t sis_processed;
+	uint64_t sis_processed;	/* # entries processed from IQ */
+	uint64_t sis_overflow;	/* # entries bearing overflow flag */
 };
 
 /*
@@ -113,16 +113,16 @@ struct sge_iq_stats {
  *
  * See: t4_iq_update_intr_cfg() and t4_iq_gts_update().
  */
-typedef enum t4_intr_config {
-	TIC_SE_INTR_ARM		= 1,
-	TIC_TIMER0		= (0 << 1),
-	TIC_TIMER1		= (1 << 1),
-	TIC_TIMER2		= (2 << 1),
-	TIC_TIMER3		= (3 << 1),
-	TIC_TIMER4		= (4 << 1),
-	TIC_TIMER5		= (5 << 1),
-	TIC_START_COUNTER	= (6 << 1),
-} t4_intr_config_t;
+typedef enum t4_gts_config {
+	TGC_SE_INTR_ARM		= 1,
+	TGC_TIMER0		= (0 << 1),
+	TGC_TIMER1		= (1 << 1),
+	TGC_TIMER2		= (2 << 1),
+	TGC_TIMER3		= (3 << 1),
+	TGC_TIMER4		= (4 << 1),
+	TGC_TIMER5		= (5 << 1),
+	TGC_START_COUNTER	= (6 << 1),
+} t4_gts_config_t;
 
 typedef enum t4_iq_type {
 	TIQT_EVENT,
@@ -132,11 +132,10 @@ typedef enum t4_iq_type {
 /* Ingress Queue: T4 is producer, driver is consumer. */
 struct sge_iq {
 	kmutex_t lock;
-	t4_iq_flags_t flags;
-	t4_iq_type_t iqtype;
 
-	t4_intr_config_t intr_params;
-	uint_t intr_idx;	/* Assigned interrupt index */
+	t4_iq_type_t iqtype;
+	t4_iq_flags_t flags;
+
 	/*
 	 * An IQ can be configured to "forward" its interrupt notifications to
 	 * appear as events in a different IQ, rather than as (presumably
@@ -152,6 +151,12 @@ struct sge_iq {
 	 * protected by `intr_evtq->lock`, rather than the `lock` of this IQ.
 	 */
 	list_node_t intr_fwd_node;
+	/*
+	 * When interrupt forwarding is not in use (such as for IQs which
+	 * receive the forwarded notifications themselves), intr_idx holds the
+	 * index of the interrupt index assigned to this IQ.
+	 */
+	uint_t intr_idx;
 
 	ddi_dma_handle_t desc_dhdl;
 	ddi_acc_handle_t desc_ahdl;
@@ -160,11 +165,14 @@ struct sge_iq {
 	uint64_t desc_ba;	/* bus address of descriptor ring */
 	const uint64_t *cdesc;	/* current descriptor (at CIDX) */
 
+	/* Sizing and status */
 	uint16_t esize;		/* size (bytes) of each entry in the queue */
 	uint16_t qsize;		/* size (# of entries) of the queue */
 	uint16_t cidx;		/* consumer index */
 	uint16_t pending;	/* # of descs processed since last doorbell */
 	uint8_t gen;		/* generation bit */
+
+	t4_gts_config_t gts_rearm; /* GTS config to re-arm queue notification */
 	int8_t intr_pktc_idx;	/* packet count threshold index */
 
 	uint16_t cntxt_id;	/* SGE context ID for IQ */
@@ -200,7 +208,10 @@ typedef enum t4_eq_flags {
 	EQ_CORKED	= (1 << 4),
 } t4_eq_flags_t;
 
-/* Listed in order of preference. */
+/*
+ * EQ doorbell mechanisms.
+ * These listed in order of preference, which is load-bearing.
+ */
 typedef enum t4_doorbells {
 	DOORBELL_UDB	= (1 << 0),
 	DOORBELL_WCWR	= (1 << 1),
@@ -215,10 +226,11 @@ typedef enum t4_eq_type {
 
 /* Egress Queue: driver is producer, T4 is consumer. */
 struct sge_eq {
+	kmutex_t lock;
+
 	t4_eq_type_t eqtype;
 	t4_eq_flags_t flags;
 
-	kmutex_t lock;
 	ddi_dma_handle_t desc_dhdl;
 	ddi_acc_handle_t desc_ahdl;
 
@@ -240,9 +252,9 @@ struct sge_eq {
 	uint_t udb_qid;		/* relative qid within the doorbell page */
 
 	struct sge_qstat *spg;	/* status page, for convenience */
-	uint16_t iqid;		/* iq that gets egr_update for the eq */
-	uint8_t tx_chan;	/* tx channel used by the eq */
-	uint32_t cntxt_id;	/* SGE context id for the eq */
+	uint16_t iqid;		/* IQ that gets egr_update msg for EQ */
+	uint8_t tx_chan;	/* tx channel used by the EQ */
+	uint32_t cntxt_id;	/* SGE context id for the EQ */
 };
 
 typedef enum t4_fl_flags {
@@ -382,12 +394,13 @@ struct port_info {
 	uint8_t		hw_addr[ETHERADDRL];
 	int16_t 	xact_addr_filt; /* index of exact MAC address filter */
 
-	uint16_t	rxq_count;	/* # of rx queues */
-	uint16_t	rxq_start;	/* index of first rx queue */
-	uint16_t	txq_count;	/* # of tx queues */
-	uint16_t	txq_start;	/* index of first tx queue */
+	uint16_t	rxq_count;	/* # of RX queues */
+	uint16_t	rxq_start;	/* index of first RX queue */
+	uint16_t	txq_count;	/* # of TX queues */
+	uint16_t	txq_start;	/* index of first TX queue */
 
-	struct sge_iq	intr_iq;	/* IQ for interrupt events, when possible */
+	/* IQ for queue events, when interrupt is available for it */
+	struct sge_iq	intr_iq;
 
 	/* Port attributes/data set by common code: */
 	uint16_t	viid;
@@ -427,8 +440,7 @@ struct port_info {
 };
 
 struct sge_info {
-	int fl_starve_threshold;
-	int s_qpp;
+	uint_t fl_starve_threshold;
 	uint64_t dbq_timer_tick;
 	uint16_t dbq_timers[SGE_NDBQTIMERS];
 
@@ -440,18 +452,18 @@ struct sge_info {
 
 	struct sge_iq fwq;	/* Firmware event queue */
 
-	uint_t rxq_count;	/* total rx queues (all ports and the rest) */
-	uint_t txq_count;	/* total tx queues (all ports and the rest) */
-	struct sge_txq *txq;	/* NIC tx queues */
-	struct sge_rxq *rxq;	/* NIC rx queues */
+	uint_t rxq_count;	/* total RX queues (all ports and the rest) */
+	uint_t txq_count;	/* total TX queues (all ports and the rest) */
+	struct sge_txq *txq;	/* NIC TX queues */
+	struct sge_rxq *rxq;	/* NIC RX queues */
 
-	uint_t iq_start; /* iq context id map start index */
-	uint_t eq_start; /* eq context id map start index */
-	uint_t iqmap_sz; /* size of iq context id map */
-	uint_t eqmap_sz; /* size of eq context id map */
-	struct sge_iq **iqmap;	/* iq->cntxt_id to iq mapping */
-	struct sge_eq **eqmap;	/* eq->cntxt_id to eq mapping */
-	struct sge_fl **flmap;	/* fl->cntxt_id to fl mapping */
+	uint_t iq_start;	/* IQ context id map start index */
+	uint_t eq_start;	/* EQ context id map start index */
+	uint_t iqmap_sz;	/* size of IQ context id map */
+	uint_t eqmap_sz;	/* size of EQ context id map */
+	struct sge_iq **iqmap;	/* iq->cntxt_id to IQ mapping */
+	struct sge_eq **eqmap;	/* eq->cntxt_id to EQ mapping */
+	struct sge_fl **flmap;	/* fl->cntxt_id to FL mapping */
 
 	/* Device access and DMA attributes for all the descriptor rings */
 	ddi_device_acc_attr_t acc_attr_desc;
@@ -461,7 +473,7 @@ struct sge_info {
 	ddi_device_acc_attr_t acc_attr_tx;
 	ddi_dma_attr_t	dma_attr_tx;
 
-	/* Device access and DMA attributes for rx buffers are in rxb_params */
+	/* Device access and DMA attributes for RX buffers are in rxb_params */
 	kmem_cache_t *rxbuf_cache;
 	struct rxbuf_cache_params rxb_params;
 };
@@ -676,7 +688,7 @@ uint_t t4_intr_all(caddr_t, caddr_t);
 uint_t t4_intr_err(caddr_t, caddr_t);
 uint_t t4_intr_fwq(caddr_t, caddr_t);
 uint_t t4_intr_port_queue(caddr_t, caddr_t);
-void t4_iq_gts_update(struct sge_iq *, t4_intr_config_t, uint16_t);
+void t4_iq_gts_update(struct sge_iq *, t4_gts_config_t, uint16_t);
 void t4_iq_update_intr_cfg(struct sge_iq *, uint8_t, int8_t);
 void t4_eq_update_dbq_timer(struct sge_eq *, struct port_info *);
 

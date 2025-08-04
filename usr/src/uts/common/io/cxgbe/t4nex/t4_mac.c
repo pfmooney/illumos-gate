@@ -22,7 +22,7 @@
 
 /*
  * Copyright 2020 RackTop Systems, Inc.
- * Copyright 2023 Oxide Computer Company
+ * Copyright 2025 Oxide Computer Company
  */
 
 #include <sys/ddi.h>
@@ -881,7 +881,7 @@ t4_ring_intr_enable(mac_intr_handle_t intrh)
 
 	IQ_LOCK(iq);
 	iq->flags &= ~IQ_POLLING;
-	t4_iq_gts_update(iq, iq->intr_params, 0);
+	t4_iq_gts_update(iq, iq->gts_rearm, 0);
 	IQ_UNLOCK(iq);
 
 	return (0);
@@ -1118,8 +1118,6 @@ t4_mc_getcapab(void *arg, mac_capab_t cap, void *data)
 {
 	struct port_info *pi = arg;
 	boolean_t status = B_TRUE;
-	mac_capab_transceiver_t *mct;
-	mac_capab_led_t *mcl;
 
 	switch (cap) {
 	case MAC_CAPAB_HCKSUM:
@@ -1127,8 +1125,9 @@ t4_mc_getcapab(void *arg, mac_capab_t cap, void *data)
 			uint32_t *d = data;
 			*d = HCKSUM_INET_FULL_V4 | HCKSUM_IPHDRCKSUM |
 			    HCKSUM_INET_FULL_V6;
-		} else
+		} else {
 			status = B_FALSE;
+		}
 		break;
 
 	case MAC_CAPAB_LSO:
@@ -1141,8 +1140,9 @@ t4_mc_getcapab(void *arg, mac_capab_t cap, void *data)
 			    LSO_TX_BASIC_TCP_IPV6;
 			d->lso_basic_tcp_ipv4.lso_max = 65535;
 			d->lso_basic_tcp_ipv6.lso_max = 65535;
-		} else
+		} else {
 			status = B_FALSE;
+		}
 		break;
 
 	case MAC_CAPAB_RINGS: {
@@ -1169,20 +1169,24 @@ t4_mc_getcapab(void *arg, mac_capab_t cap, void *data)
 		break;
 	}
 
-	case MAC_CAPAB_TRANSCEIVER:
-		mct = data;
+	case MAC_CAPAB_TRANSCEIVER: {
+		mac_capab_transceiver_t *mct = data;
 
 		mct->mct_flags = 0;
 		mct->mct_ntransceivers = 1;
 		mct->mct_info = t4_mc_transceiver_info;
 		mct->mct_read = t4_mc_transceiver_read;
 		break;
-	case MAC_CAPAB_LED:
-		mcl = data;
+	}
+
+	case MAC_CAPAB_LED: {
+		mac_capab_led_t *mcl = data;
+
 		mcl->mcl_flags = 0;
 		mcl->mcl_modes = MAC_LED_DEFAULT | MAC_LED_IDENT;
 		mcl->mcl_set = t4_port_led_set;
 		break;
+	}
 
 	default:
 		status = B_FALSE; /* cap not supported */
@@ -1191,25 +1195,19 @@ t4_mc_getcapab(void *arg, mac_capab_t cap, void *data)
 	return (status);
 }
 
-static void
-t4_mac_link_caps_to_flowctrl(fw_port_cap32_t caps, link_flowctrl_t *fc)
+static link_flowctrl_t
+t4_mac_link_caps_to_flowctrl(fw_port_cap32_t caps)
 {
-	u8 pause_tx = 0, pause_rx = 0;
-
-	if (caps & FW_PORT_CAP32_FC_TX)
-		pause_tx = 1;
-
-	if (caps & FW_PORT_CAP32_FC_RX)
-		pause_rx = 1;
-
-	if (pause_rx & pause_tx)
-		*fc = LINK_FLOWCTRL_BI;
-	else if (pause_tx)
-		*fc = LINK_FLOWCTRL_TX;
-	else if (pause_rx)
-		*fc = LINK_FLOWCTRL_RX;
-	else
-		*fc = LINK_FLOWCTRL_NONE;
+	switch (caps & (FW_PORT_CAP32_FC_TX | FW_PORT_CAP32_FC_RX)) {
+	case (FW_PORT_CAP32_FC_TX | FW_PORT_CAP32_FC_RX):
+		return (LINK_FLOWCTRL_BI);
+	case FW_PORT_CAP32_FC_TX:
+		return (LINK_FLOWCTRL_TX);
+	case FW_PORT_CAP32_FC_RX:
+		return (LINK_FLOWCTRL_RX);
+	default:
+		return (LINK_FLOWCTRL_NONE);
+	}
 }
 
 static int
@@ -1259,20 +1257,13 @@ t4_mac_port_caps_to_fec_cap(fw_port_cap32_t caps)
 	return (link_fec);
 }
 
-static void
-t4_mac_admin_caps_to_fec_cap(fw_port_cap32_t caps, link_fec_t *fec)
+static link_fec_t
+t4_mac_link_caps_to_fec_cap(fw_port_cap32_t caps)
 {
-	*fec = t4_mac_port_caps_to_fec_cap(caps);
-}
+	const link_fec_t link_fec =
+	    t4_mac_port_caps_to_fec_cap(caps & ~FW_PORT_CAP32_FEC_NO_FEC);
 
-static void
-t4_mac_link_caps_to_fec_cap(fw_port_cap32_t caps, link_fec_t *fec)
-{
-	link_fec_t link_fec;
-
-	caps &= ~FW_PORT_CAP32_FEC_NO_FEC;
-	link_fec = t4_mac_port_caps_to_fec_cap(caps);
-	*fec = link_fec ? link_fec : LINK_FEC_NONE;
+	return (link_fec ? link_fec : LINK_FEC_NONE);
 }
 
 static int
@@ -1312,7 +1303,6 @@ out:
 	return (t4_link_set_fec(pi, fec, new_caps));
 }
 
-/* ARGSUSED */
 static int
 t4_mc_setprop(void *arg, const char *name, mac_prop_id_t id, uint_t size,
     const void *val)
@@ -1477,15 +1467,18 @@ t4_mc_getprop(void *arg, const char *name, mac_prop_id_t id, uint_t size,
 		break;
 
 	case MAC_PROP_FLOWCTRL:
-		t4_mac_link_caps_to_flowctrl(lc->link_caps, val);
+		*(link_flowctrl_t *)val =
+		    t4_mac_link_caps_to_flowctrl(lc->link_caps);
 		break;
 
 	case MAC_PROP_ADV_FEC_CAP:
-		t4_mac_link_caps_to_fec_cap(lc->link_caps, val);
+		*(link_fec_t *)val =
+		    t4_mac_link_caps_to_fec_cap(lc->link_caps);
 		break;
 
 	case MAC_PROP_EN_FEC_CAP:
-		t4_mac_admin_caps_to_fec_cap(lc->admin_caps, val);
+		*(link_fec_t *)val =
+		    t4_mac_port_caps_to_fec_cap(lc->admin_caps);
 		break;
 
 	case MAC_PROP_ADV_100GFDX_CAP:

@@ -96,19 +96,6 @@ struct vmxstate {
 	uint16_t vpid;
 };
 
-struct apic_page {
-	uint32_t reg[PAGE_SIZE / 4];
-};
-CTASSERT(sizeof (struct apic_page) == PAGE_SIZE);
-
-/* Posted Interrupt Descriptor (described in section 29.6 of the Intel SDM) */
-struct pir_desc {
-	uint32_t	pir[8];
-	uint64_t	pending;
-	uint64_t	unused[3];
-} __aligned(64);
-CTASSERT(sizeof (struct pir_desc) == 64);
-
 /* Index into the 'guest_msrs[]' array */
 enum {
 	IDX_MSR_LSTAR,
@@ -129,9 +116,7 @@ typedef enum {
 /* virtual machine softc */
 struct vmx {
 	struct vmcs	vmcs[VM_MAXCPU];	/* one vmcs per virtual cpu */
-	struct apic_page apic_page[VM_MAXCPU];	/* one apic page per vcpu */
 	uint8_t		*msr_bitmap[VM_MAXCPU];	/* one MSR bitmap per vCPU */
-	struct pir_desc	pir_desc[VM_MAXCPU];
 	uint64_t	guest_msrs[VM_MAXCPU][GUEST_MSR_NUM];
 	uint64_t	host_msrs[VM_MAXCPU][GUEST_MSR_NUM];
 	uint64_t	tsc_offset_active[VM_MAXCPU];
@@ -154,7 +139,6 @@ struct vmx {
 };
 CTASSERT((offsetof(struct vmx, vmcs) & PAGE_MASK) == 0);
 CTASSERT((offsetof(struct vmx, msr_bitmap) & PAGE_MASK) == 0);
-CTASSERT((offsetof(struct vmx, pir_desc[0]) & 63) == 0);
 
 static __inline bool
 vmx_cap_en(const struct vmx *vmx, enum vmx_caps cap)

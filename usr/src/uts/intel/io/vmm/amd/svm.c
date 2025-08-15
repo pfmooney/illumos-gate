@@ -79,6 +79,7 @@
 #include "vmcb.h"
 #include "svm.h"
 #include "svm_softc.h"
+#include "svm_avic.h"
 #include "svm_msr.h"
 
 SYSCTL_DECL(_hw_vmm);
@@ -157,6 +158,8 @@ svm_init(void)
 	const uint32_t demand_bits =
 	    (CPUID_AMD_EDX_NESTED_PAGING | CPUID_AMD_EDX_NRIPS);
 	VERIFY((svm_feature & demand_bits) == demand_bits);
+
+	svm_avic_probe();
 
 	return (0);
 }
@@ -2525,28 +2528,10 @@ svm_getcap(void *arg, int vcpu, int type, int *retval)
 	return (error);
 }
 
-static struct vlapic *
-svm_vlapic_init(void *arg, int vcpuid)
-{
-	struct svm_softc *svm_sc;
-	struct vlapic *vlapic;
-
-	svm_sc = arg;
-	vlapic = kmem_zalloc(sizeof (struct vlapic), KM_SLEEP);
-	vlapic->vm = svm_sc->vm;
-	vlapic->vcpuid = vcpuid;
-	vlapic->apic_page = (struct LAPIC *)&svm_sc->apic_page[vcpuid];
-
-	vlapic_init(vlapic);
-
-	return (vlapic);
-}
-
 static void
-svm_vlapic_cleanup(void *arg, struct vlapic *vlapic)
+svm_vlapic_init(void *arg, int vcpuid, struct vlapic *vlapic)
 {
-	vlapic_cleanup(vlapic);
-	kmem_free(vlapic, sizeof (struct vlapic));
+	/* TODO: setup AVIC */
 }
 
 static void
@@ -2646,9 +2631,10 @@ struct vmm_ops vmm_ops_amd = {
 	.vmsetdesc	= svm_setdesc,
 	.vmgetcap	= svm_getcap,
 	.vmsetcap	= svm_setcap,
-	.vlapic_init	= svm_vlapic_init,
-	.vlapic_cleanup	= svm_vlapic_cleanup,
 	.vmpause	= svm_pause,
+
+	.vlapic_init	= svm_vlapic_init,
+	.vlapic_priv_sz	= 0,
 
 	.vmsavectx	= svm_savectx,
 	.vmrestorectx	= svm_restorectx,

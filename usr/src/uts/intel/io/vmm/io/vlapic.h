@@ -46,6 +46,8 @@
 #ifndef _VLAPIC_H_
 #define	_VLAPIC_H_
 
+struct vlapic *vlapic_alloc(struct vm *, int, size_t);
+void vlapic_free(struct vlapic *, size_t);
 void vlapic_reset(struct vlapic *vlapic, bool);
 
 int vlapic_mmio_write(struct vlapic *, uint64_t, uint64_t, uint_t);

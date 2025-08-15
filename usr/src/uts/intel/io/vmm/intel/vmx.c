@@ -799,8 +799,6 @@ vmx_vminit(struct vm *vm)
 		 * by VMPTRLD() below.
 		 */
 		vm_paddr_t msr_bitmap_pa = vtophys(vmx->msr_bitmap[i]);
-		vm_paddr_t apic_page_pa = vtophys(&vmx->apic_page[i]);
-		vm_paddr_t pir_desc_pa = vtophys(&vmx->pir_desc[i]);
 
 		vmx->vmcs_pa[i] = (uintptr_t)vtophys(&vmx->vmcs[i]);
 		vmcs_initialize(&vmx->vmcs[i], vmx->vmcs_pa[i]);
@@ -875,10 +873,6 @@ vmx_vminit(struct vm *vm)
 		vmx->ctx[i].guest_dr6 = DBREG_DR6_RESERVED1;
 		vmcs_write(VMCS_GUEST_DR7, DBREG_DR7_RESERVED1);
 
-		if (vmx_cap_en(vmx, VMX_CAP_TPR_SHADOW)) {
-			vmcs_write(VMCS_VIRTUAL_APIC, apic_page_pa);
-		}
-
 		if (vmx_cap_en(vmx, VMX_CAP_APICV)) {
 			vmcs_write(VMCS_APIC_ACCESS, apic_access_pa);
 			vmcs_write(VMCS_EOI_EXIT0, 0);
@@ -888,7 +882,6 @@ vmx_vminit(struct vm *vm)
 		}
 		if (vmx_cap_en(vmx, VMX_CAP_APICV_PIR)) {
 			vmcs_write(VMCS_PIR_VECTOR, pirvec);
-			vmcs_write(VMCS_PIR_DESC, pir_desc_pa);
 		}
 
 		/*
@@ -3495,22 +3488,32 @@ vmx_setcap(void *arg, int vcpu, int type, int val)
 	return (0);
 }
 
-struct vlapic_vtx {
-	struct vlapic	vlapic;
+/* Posted Interrupt Descriptor (described in section 29.6 of the Intel SDM) */
+struct pir_desc {
+	uint32_t	pir[8];
+	uint64_t	pending;
+	uint64_t	unused[3];
+} __aligned(64);
+CTASSERT(sizeof (struct pir_desc) == 64);
 
-	/* Align to the nearest cacheline */
-	uint8_t		_pad[64 - (sizeof (struct vlapic) % 64)];
+struct vlapic_vtx {
+	struct pir_desc	pir_desc;
 
 	/* TMR handling state for posted interrupts */
 	uint32_t	tmr_active[8];
 	uint32_t	pending_level[8];
 	uint32_t	pending_edge[8];
 
-	struct pir_desc	*pir_desc;
 	struct vmx	*vmx;
-	uint_t	pending_prio;
+	uint_t		pending_prio;
 	boolean_t	tmr_sync;
 };
+
+static inline struct vlapic_vtx *
+vlapic_to_vtx(struct vlapic *vlapic)
+{
+	return ((struct vlapic_vtx *)vlapic->priv);
+}
 
 CTASSERT((offsetof(struct vlapic_vtx, tmr_active) & 63) == 0);
 
@@ -3519,16 +3522,8 @@ CTASSERT((offsetof(struct vlapic_vtx, tmr_active) & 63) == 0);
 static vcpu_notify_t
 vmx_apicv_set_ready(struct vlapic *vlapic, int vector, bool level)
 {
-	struct vlapic_vtx *vlapic_vtx;
-	struct pir_desc *pir_desc;
-	uint32_t mask, tmrval;
-	int idx;
-	vcpu_notify_t notify = VCPU_NOTIFY_NONE;
-
-	vlapic_vtx = (struct vlapic_vtx *)vlapic;
-	pir_desc = vlapic_vtx->pir_desc;
-	idx = vector / 32;
-	mask = 1UL << (vector % 32);
+	struct vlapic_vtx *vlapic_vtx = vlapic_to_vtx(vlapic);
+	struct pir_desc *pir_desc = &vlapic_vtx->pir_desc;
 
 	/*
 	 * If the currently asserted TMRs do not match the state requested by
@@ -3541,16 +3536,18 @@ vmx_apicv_set_ready(struct vlapic *vlapic, int vector, bool level)
 	 * inconsistent.  Such circumstances are considered a rare edge case and
 	 * are never expected to be found in the wild.
 	 */
-	tmrval = atomic_load_acq_int(&vlapic_vtx->tmr_active[idx]);
+	const uint_t idx = vector / 32;
+	const uint32_t mask = 1UL << (vector % 32);
+	const uint32_t val = atomic_load_acq_int(&vlapic_vtx->tmr_active[idx]);
 	if (!level) {
-		if ((tmrval & mask) != 0) {
+		if ((val & mask) != 0) {
 			/* Edge-triggered interrupt needs TMR de-asserted */
 			atomic_set_int(&vlapic_vtx->pending_edge[idx], mask);
 			atomic_store_rel_long(&pir_desc->pending, 1);
 			return (VCPU_NOTIFY_EXIT);
 		}
 	} else {
-		if ((tmrval & mask) == 0) {
+		if ((val & mask) == 0) {
 			/* Level-triggered interrupt needs TMR asserted */
 			atomic_set_int(&vlapic_vtx->pending_level[idx], mask);
 			atomic_store_rel_long(&pir_desc->pending, 1);
@@ -3583,6 +3580,7 @@ vmx_apicv_set_ready(struct vlapic *vlapic, int vector, bool level)
 	 * notification is sent.  The priorities recorded in 'pending_prio' are
 	 * cleared whenever the 'pending' bit makes another 0->1 transition.
 	 */
+	vcpu_notify_t notify = VCPU_NOTIFY_NONE;
 	if (atomic_cmpset_long(&pir_desc->pending, 0, 1) != 0) {
 		notify = VCPU_NOTIFY_APIC;
 		vlapic_vtx->pending_prio = 0;
@@ -3635,7 +3633,7 @@ vmx_apicv_sync_tmr(struct vlapic *vlapic)
 static void
 vmx_set_x2apic_mode_ts(struct vlapic *vlapic, bool x2apic_enabled)
 {
-	struct vmx *vmx = ((struct vlapic_vtx *)vlapic)->vmx;
+	struct vmx *vmx = vlapic_to_vtx(vlapic)->vmx;
 	const int vcpuid = vlapic->vcpuid;
 	uint32_t proc_ctls;
 
@@ -3659,7 +3657,7 @@ vmx_set_x2apic_mode_ts(struct vlapic *vlapic, bool x2apic_enabled)
 static void
 vmx_set_x2apic_mode_vid(struct vlapic *vlapic, bool x2apic_enabled)
 {
-	struct vmx *vmx = ((struct vlapic_vtx *)vlapic)->vmx;
+	struct vmx *vmx = vlapic_to_vtx(vlapic)->vmx;
 	const int vcpuid = vlapic->vcpuid;
 	uint32_t proc_ctls2;
 
@@ -3693,14 +3691,8 @@ vmx_apicv_notify(struct vlapic *vlapic, int hostcpu)
 static void
 vmx_apicv_sync(struct vlapic *vlapic)
 {
-	struct vlapic_vtx *vlapic_vtx;
-	struct pir_desc *pir_desc;
-	struct LAPIC *lapic;
-	uint_t i;
-
-	vlapic_vtx = (struct vlapic_vtx *)vlapic;
-	pir_desc = vlapic_vtx->pir_desc;
-	lapic = vlapic->apic_page;
+	struct vlapic_vtx *vlapic_vtx = vlapic_to_vtx(vlapic);
+	struct pir_desc *pir_desc = &vlapic_vtx->pir_desc;
 
 	if (atomic_cmpset_long(&pir_desc->pending, 1, 0) == 0) {
 		return;
@@ -3713,7 +3705,8 @@ vmx_apicv_sync(struct vlapic *vlapic)
 	ASSERT0(vlapic_vtx->pending_edge[0] & 0xffff);
 	ASSERT0(pir_desc->pir[0] & 0xffff);
 
-	for (i = 0; i <= 7; i++) {
+	struct LAPIC *lapic = vlapic->apic_page;
+	for (uint_t i = 0; i <= 7; i++) {
 		uint32_t *tmrp = &lapic->tmr0 + (i * 4);
 		uint32_t *irrp = &lapic->irr0 + (i * 4);
 
@@ -3780,46 +3773,33 @@ vmx_tpr_shadow_exit(struct vlapic *vlapic)
 	vlapic_sync_tpr(vlapic);
 }
 
-static struct vlapic *
-vmx_vlapic_init(void *arg, int vcpuid)
+static void
+vmx_vlapic_init(void *arg, int vcpuid, struct vlapic *vlapic)
 {
 	struct vmx *vmx = arg;
-	struct vlapic_vtx *vlapic_vtx;
-	struct vlapic *vlapic;
+	struct vlapic_vtx *vlapic_vtx = vlapic_to_vtx(vlapic);
 
-	vlapic_vtx = kmem_zalloc(sizeof (struct vlapic_vtx), KM_SLEEP);
-	vlapic_vtx->pir_desc = &vmx->pir_desc[vcpuid];
 	vlapic_vtx->vmx = vmx;
 
-	vlapic = &vlapic_vtx->vlapic;
-	vlapic->vm = vmx->vm;
-	vlapic->vcpuid = vcpuid;
-	vlapic->apic_page = (struct LAPIC *)&vmx->apic_page[vcpuid];
-
 	if (vmx_cap_en(vmx, VMX_CAP_TPR_SHADOW)) {
+		vmcs_write(VMCS_VIRTUAL_APIC, vtophys(vlapic->apic_page));
 		vlapic->ops.set_x2apic_mode = vmx_set_x2apic_mode_ts;
 	}
 	if (vmx_cap_en(vmx, VMX_CAP_APICV)) {
+		ASSERT(vmx_cap_en(vmx, VMX_CAP_TPR_SHADOW));
+
 		vlapic->ops.set_intr_ready = vmx_apicv_set_ready;
 		vlapic->ops.sync_state = vmx_apicv_sync;
 		vlapic->ops.intr_accepted = vmx_apicv_accepted;
 		vlapic->ops.set_x2apic_mode = vmx_set_x2apic_mode_vid;
 
-		if (vmx_cap_en(vmx, VMX_CAP_APICV_PIR)) {
-			vlapic->ops.post_intr = vmx_apicv_notify;
-		}
 	}
+	if (vmx_cap_en(vmx, VMX_CAP_APICV_PIR)) {
+		ASSERT(vmx_cap_en(vmx, VMX_CAP_APICV));
 
-	vlapic_init(vlapic);
-
-	return (vlapic);
-}
-
-static void
-vmx_vlapic_cleanup(void *arg, struct vlapic *vlapic)
-{
-	vlapic_cleanup(vlapic);
-	kmem_free(vlapic, sizeof (struct vlapic_vtx));
+		vmcs_write(VMCS_PIR_DESC, vtophys(&vlapic_vtx->pir_desc));
+		vlapic->ops.post_intr = vmx_apicv_notify;
+	}
 }
 
 static void
@@ -3901,9 +3881,10 @@ struct vmm_ops vmm_ops_intel = {
 	.vmsetdesc	= vmx_setdesc,
 	.vmgetcap	= vmx_getcap,
 	.vmsetcap	= vmx_setcap,
-	.vlapic_init	= vmx_vlapic_init,
-	.vlapic_cleanup	= vmx_vlapic_cleanup,
 	.vmpause	= vmx_pause,
+
+	.vlapic_init	= vmx_vlapic_init,
+	.vlapic_priv_sz = sizeof (struct vlapic_vtx),
 
 	.vmsavectx	= vmx_savectx,
 	.vmrestorectx	= vmx_restorectx,

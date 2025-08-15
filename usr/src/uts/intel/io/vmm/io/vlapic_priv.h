@@ -153,9 +153,12 @@ struct vlapic {
 
 	/* Occurrences of unusual events are tracked in this stats struct. */
 	struct vlapic_stats	stats;
+
+	/* Private data specific to the emulation backend (SVM/VMX) */
+	void			*priv[] __cacheline_aligned;
 };
 
-void vlapic_init(struct vlapic *vlapic);
-void vlapic_cleanup(struct vlapic *vlapic);
+struct vlapic *vlapic_alloc(struct vm *, int, size_t);
+void vlapic_free(struct vlapic *, size_t);
 
 #endif	/* _VLAPIC_PRIV_H_ */

@@ -247,6 +247,7 @@ static struct vmm_ops vmm_ops_null = {
 	.init		= (vmm_init_func_t)nullop_panic,
 	.cleanup	= (vmm_cleanup_func_t)nullop_panic,
 	.resume		= (vmm_resume_func_t)nullop_panic,
+
 	.vminit		= (vmi_init_func_t)nullop_panic,
 	.vmrun		= (vmi_run_func_t)nullop_panic,
 	.vmcleanup	= (vmi_cleanup_func_t)nullop_panic,
@@ -256,13 +257,17 @@ static struct vmm_ops vmm_ops_null = {
 	.vmsetdesc	= (vmi_set_desc_t)nullop_panic,
 	.vmgetcap	= (vmi_get_cap_t)nullop_panic,
 	.vmsetcap	= (vmi_set_cap_t)nullop_panic,
-	.vlapic_init	= (vmi_vlapic_init)nullop_panic,
-	.vlapic_cleanup	= (vmi_vlapic_cleanup)nullop_panic,
 	.vmpause	= (vmi_pause_t)nullop_panic,
+
+	.vlapic_init	= (vmi_vlapic_init)nullop_panic,
+	.vlapic_priv_sz	= 0,
+
 	.vmsavectx	= (vmi_savectx)nullop_panic,
 	.vmrestorectx	= (vmi_restorectx)nullop_panic,
+
 	.vmgetmsr	= (vmi_get_msr_t)nullop_panic,
 	.vmsetmsr	= (vmi_set_msr_t)nullop_panic,
+
 	.vmfreqratio	= (vmi_freqratio_t)nullop_panic,
 	.fr_fracsize	= 0,
 	.fr_intsize	= 0,
@@ -286,7 +291,6 @@ static vmm_pte_ops_t *pte_ops = NULL;
 #define	VMGETCAP(vmi, vcpu, num, rv)	((*ops->vmgetcap)(vmi, vcpu, num, rv))
 #define	VMSETCAP(vmi, vcpu, num, val)	((*ops->vmsetcap)(vmi, vcpu, num, val))
 #define	VLAPIC_INIT(vmi, vcpu)		((*ops->vlapic_init)(vmi, vcpu))
-#define	VLAPIC_CLEANUP(vmi, vlapic)	((*ops->vlapic_cleanup)(vmi, vlapic))
 
 #define	fpu_start_emulating()	load_cr0(rcr0() | CR0_TS)
 #define	fpu_stop_emulating()	clts()
@@ -358,7 +362,9 @@ vcpu_cleanup(struct vm *vm, int i, bool destroy)
 {
 	struct vcpu *vcpu = &vm->vcpu[i];
 
-	VLAPIC_CLEANUP(vm->cookie, vcpu->vlapic);
+	vlapic_free(vcpu->vlapic, ops->vlapic_priv_sz);
+	vcpu->vlapic = NULL;
+
 	if (destroy) {
 		vmm_stat_free(vcpu->stats);
 
@@ -413,8 +419,12 @@ vcpu_init(struct vm *vm, int vcpu_id, bool create)
 	}
 
 	vcpu->run_state = VRS_HALT;
-	vcpu->vlapic = VLAPIC_INIT(vm->cookie, vcpu_id);
+
+	vcpu->vlapic = vlapic_alloc(vm, vcpu_id, ops->vlapic_priv_sz);
+	ops->vlapic_init(vm->cookie, vcpu_id, vcpu->vlapic);
+	vlapic_reset(vcpu->vlapic, false);
 	(void) vm_set_x2apic_state(vm, vcpu_id, X2APIC_DISABLED);
+
 	vcpu->reqidle = false;
 	vcpu->reqconsist = false;
 	vcpu->reqbarrier = false;

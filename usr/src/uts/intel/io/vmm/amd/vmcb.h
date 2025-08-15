@@ -268,6 +268,7 @@ CTASSERT(sizeof (struct vmcb_segment) == 16);
 /* Fields for Virtual Interrupt Control (v_intr_ctrl) */
 #define	V_INTR_MASKING	BIT(0)	/* Offset 0x60 bit 24 (0x63 bit 0) */
 #define	V_VGIF_ENABLE	BIT(1)	/* Offset 0x60 bit 25 (0x63 bit 1) */
+#define	V_X2AVIC_ENABLE	BIT(6)	/* Offset 0x60 bit 31 (0x63 bit 6) */
 #define	V_AVIC_ENABLE	BIT(7)	/* Offset 0x60 bit 31 (0x63 bit 7) */
 
 /* Fields in Interrupt Shadow, offset 0x68 */
@@ -314,7 +315,8 @@ struct vmcb_ctrl {
 	uint64_t exitinfo2;	/* 0x80, EXITINFO2 */
 	uint64_t exitintinfo;	/* 0x88, Interrupt exit value. */
 	uint64_t np_ctrl;	/* 0x90, Nested paging control. */
-	uint64_t _pad4[2];	/* 0x98-0xA7 reserved. */
+	uint64_t avic_apic_bar;	/* 0x98, AVIC APIC Bar */
+	uint64_t _pad4;		/* 0xA0-0xA7 reserved. */
 	uint64_t eventinj;	/* 0xA8, Event injection. */
 	uint64_t n_cr3;		/* 0xB0, Nested page table. */
 	uint64_t misc_ctrl;	/* 0xB8, Misc virt controls */

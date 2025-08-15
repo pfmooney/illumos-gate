@@ -61,7 +61,6 @@ struct svm_vcpu {
  * SVM softc, one per virtual machine.
  */
 struct svm_softc {
-	uint8_t apic_page[VM_MAXCPU][PAGE_SIZE];
 	struct svm_vcpu vcpu[VM_MAXCPU];
 	uint64_t	nptp;		/* nested page table (host PA) */
 	uint8_t		*iopm_bitmap;	/* shared by all vcpus */

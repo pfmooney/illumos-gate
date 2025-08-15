@@ -94,11 +94,12 @@ typedef int	(*vmi_set_desc_t)(void *vmi, int vcpu, int num,
     const struct seg_desc *desc);
 typedef int	(*vmi_get_cap_t)(void *vmi, int vcpu, int num, int *retval);
 typedef int	(*vmi_set_cap_t)(void *vmi, int vcpu, int num, int val);
-typedef struct vlapic *(*vmi_vlapic_init)(void *vmi, int vcpu);
-typedef void	(*vmi_vlapic_cleanup)(void *vmi, struct vlapic *vlapic);
+typedef void	(*vmi_pause_t)(void *vmi, int vcpu);
+
+typedef void (*vmi_vlapic_init)(void *vmi, int vcpu, struct vlapic *);
+
 typedef void	(*vmi_savectx)(void *vmi, int vcpu);
 typedef void	(*vmi_restorectx)(void *vmi, int vcpu);
-typedef void	(*vmi_pause_t)(void *vmi, int vcpu);
 
 typedef int	(*vmi_get_msr_t)(void *vmi, int vcpu, uint32_t msr,
     uint64_t *valp);
@@ -121,9 +122,10 @@ struct vmm_ops {
 	vmi_set_desc_t		vmsetdesc;
 	vmi_get_cap_t		vmgetcap;
 	vmi_set_cap_t		vmsetcap;
-	vmi_vlapic_init		vlapic_init;
-	vmi_vlapic_cleanup	vlapic_cleanup;
 	vmi_pause_t		vmpause;
+
+	vmi_vlapic_init		vlapic_init;
+	size_t			vlapic_priv_sz;
 
 	vmi_savectx		vmsavectx;
 	vmi_restorectx		vmrestorectx;

@@ -1518,6 +1518,11 @@ vlapic_reset(struct vlapic *vlapic, bool init_only)
 	struct LAPIC *lapic = vlapic->apic_page;
 	uint32_t *isrptr, *tmrptr, *irrptr;
 
+	ASSERT3P(vlapic->vm, !=, NULL);
+	ASSERT(vlapic->vcpuid >= 0 &&
+	    vlapic->vcpuid < vm_get_maxcpus(vlapic->vm));
+	ASSERT3P(lapic, !=, NULL);
+
 	/* Reset any timer-related state first */
 	VLAPIC_TIMER_LOCK(vlapic);
 	callout_stop(&vlapic->callout);
@@ -1591,27 +1596,31 @@ vlapic_reset(struct vlapic *vlapic, bool init_only)
 	vlapic_mask_lvts(vlapic);
 }
 
-void
-vlapic_init(struct vlapic *vlapic)
+struct vlapic *
+vlapic_alloc(struct vm *vm, int vcpuid, size_t priv_state_sz)
 {
-	KASSERT(vlapic->vm != NULL, ("vlapic_init: vm is not initialized"));
-	KASSERT(vlapic->vcpuid >= 0 &&
-	    vlapic->vcpuid < vm_get_maxcpus(vlapic->vm),
-	    ("vlapic_init: vcpuid is not initialized"));
-	KASSERT(vlapic->apic_page != NULL, ("vlapic_init: apic_page is not "
-	    "initialized"));
+	struct vlapic *vlapic =
+	    kmem_zalloc(sizeof (struct vlapic) + priv_state_sz, KM_SLEEP);
+	void *apic_page = kmem_zalloc(PAGESIZE, KM_SLEEP);
+
+	VERIFY3U((uintptr_t)apic_page & PAGEOFFSET, ==, 0);
 
 	mutex_init(&vlapic->timer_lock, NULL, MUTEX_ADAPTIVE, NULL);
 	callout_init(&vlapic->callout, 1);
+	vlapic->vm = vm;
+	vlapic->vcpuid = vcpuid;
+	vlapic->apic_page = (struct LAPIC *)apic_page;
 
-	vlapic_reset(vlapic, false);
+	return (vlapic);
 }
 
 void
-vlapic_cleanup(struct vlapic *vlapic)
+vlapic_free(struct vlapic *vlapic, size_t priv_state_sz)
 {
 	callout_drain(&vlapic->callout);
 	mutex_destroy(&vlapic->timer_lock);
+	kmem_free(vlapic->apic_page, PAGESIZE);
+	kmem_free(vlapic, sizeof (struct vlapic) + priv_state_sz);
 }
 
 int

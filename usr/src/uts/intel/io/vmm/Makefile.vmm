@@ -68,6 +68,7 @@ VMM_OBJS = \
 	vmx.o \
 	vmx_support.o \
 	svm.o \
+	svm_avic.o \
 	svm_msr.o \
 	svm_pmu.o \
 	vmcb.o \

@@ -228,9 +228,16 @@ extern "C" {
 #define	CPUID_AMD_EDX_VMCB_CLEAN	(1 << 5) /* AMD: VMCB clean bits */
 #define	CPUID_AMD_EDX_FLUSH_ASID	(1 << 6) /* AMD: flush by ASID */
 #define	CPUID_AMD_EDX_DECODE_ASSISTS	(1 << 7) /* AMD: decode assists */
-#define	CPUID_AMD_EDX_PAUSE_INCPT	(1 << 8) /* AMD: pause intercept */
-#define	CPUID_AMD_EDX_PAUSE_TRSH	(1 << 9) /* AMD: pause threshold */
-#define	CPUID_AMD_EDX_AVIC		(1 << 10) /* AMD: AVIC */
+#define	CPUID_AMD_EDX_PMC_VIRT		(1 << 8) /* AMD: PMC virtualization */
+#define	CPUID_AMD_EDX_PAUSE_FILTER	(1 << 10) /* AMD: pause intrcpt filt. */
+#define	CPUID_AMD_EDX_PAUSE_TRSH	(1 << 12) /* AMD: pause filt. thresh. */
+#define	CPUID_AMD_EDX_AVIC		(1 << 13) /* AMD: AVIC */
+#define	CPUID_AMD_EDX_VMSAVE_VIRT	(1 << 15) /* AMD: VMSAVE/VMLOAD virt. */
+#define	CPUID_AMD_EDX_VGIF		(1 << 16) /* AMD: GIF virtualization */
+#define	CPUID_AMD_EDX_GMET		(1 << 17) /* AMD: guest mode exc trap */
+#define	CPUID_AMD_EDX_X2AVIC		(1 << 18) /* AMD: x2AVIC */
+#define	CPUID_AMD_EDX_SPEC_CTRL		(1 << 20) /* AMD: SPEC_CTRL virt. */
+#define	CPUID_AMD_EDX_AVIC_LVT		(1 << 27) /* AMD: AVIC LVT access */
 
 /*
  * AMD Encrypted Memory Capabilities -- 0x8000_001F

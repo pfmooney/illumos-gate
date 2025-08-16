@@ -1021,21 +1021,22 @@ vlapic_set_tpr(struct vlapic *vlapic, uint8_t val)
 	if (lapic->tpr != val) {
 		lapic->tpr = val;
 		vlapic_update_ppr(vlapic);
+
+		if (vlapic->ops.set_tpr != NULL) {
+			vlapic->ops.set_tpr(vlapic, val);
+		}
 	}
 }
 
 void
 vlapic_set_cr8(struct vlapic *vlapic, uint64_t val)
 {
-	uint8_t tpr;
-
 	if (val & ~0xf) {
 		vm_inject_gp(vlapic->vm, vlapic->vcpuid);
 		return;
 	}
 
-	tpr = val << 4;
-	vlapic_set_tpr(vlapic, tpr);
+	vlapic_set_tpr(vlapic, val << 4);
 }
 
 uint64_t

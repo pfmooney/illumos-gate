@@ -60,10 +60,10 @@ void vmcs_seg_desc_encoding(int seg, uint32_t *base, uint32_t *lim,
     uint32_t *acc);
 uint32_t vmcs_msr_encoding(uint32_t msr);
 
-void vmcs_initialize(struct vmcs *vmcs, uintptr_t vmcs_pa);
-
-void vmcs_load(uintptr_t vmcs_pa);
-void vmcs_clear(uintptr_t vmcs_pa);
+struct vmx;
+void vmcs_initialize(struct vmx *, int);
+void vmcs_load(struct vmx *, int);
+void vmcs_clear(struct vmx *, int);
 
 uint64_t vmcs_read(uint32_t encoding);
 void vmcs_write(uint32_t encoding, uint64_t val);

@@ -48,6 +48,7 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 
+#include <sys/vmm_vm.h>
 #include <machine/specialreg.h>
 #include <machine/vmm.h>
 #include "vmx.h"
@@ -194,40 +195,21 @@ vmcs_msr_encoding(uint32_t msr)
 }
 
 void
-vmcs_clear(uintptr_t vmcs_pa)
+vmcs_initialize(struct vmx *vmx, int vcpuid)
 {
-	int err;
+	struct vmcs *vmcs = &vmx->vmcs[vcpuid];
+	const uintptr_t vmcs_pa = (uintptr_t)vtophys(&vmx->vmcs[vcpuid]);
 
-	__asm __volatile("vmclear %[addr];"
-	    VMX_SET_ERROR_CODE_ASM
-	    : [error] "=r" (err)
-	    : [addr] "m" (vmcs_pa)
-	    : "memory");
+	vmx->vmcs_pa[vcpuid] = vmcs_pa;
 
-	if (err != 0) {
-		panic("vmclear(%p) error %d", (void *)vmcs_pa, err);
-	}
-
-	/*
-	 * A call to critical_enter() was made in vmcs_load() to prevent
-	 * preemption.  Now that the VMCS is unloaded, it is safe to relax that
-	 * restriction.
-	 */
-	critical_exit();
-}
-
-void
-vmcs_initialize(struct vmcs *vmcs, uintptr_t vmcs_pa)
-{
-	int err;
-
-	/* set to VMCS revision */
+	/* Set to VMCS revision */
 	vmcs->identifier = VMX_BASIC_REVISION(rdmsr(MSR_VMX_BASIC));
 
 	/*
-	 * Perform a vmclear on the VMCS, but without the critical section
-	 * manipulation as done by vmcs_clear() above.
+	 * Perform a base vmclear on the VMCS, without any of the kpreempt
+	 * manipulation as done by vmcs_load()/vmcs_clear().
 	 */
+	int err;
 	__asm __volatile("vmclear %[addr];"
 	    VMX_SET_ERROR_CODE_ASM
 	    : [error] "=r" (err)
@@ -240,18 +222,16 @@ vmcs_initialize(struct vmcs *vmcs, uintptr_t vmcs_pa)
 }
 
 void
-vmcs_load(uintptr_t vmcs_pa)
+vmcs_load(struct vmx *vmx, int vcpuid)
 {
-	int err;
-
 	/*
 	 * While the VMCS is loaded on the CPU for subsequent operations, it is
-	 * important that the thread not be preempted.  That is ensured with
-	 * critical_enter() here, with a matching critical_exit() call in
-	 * vmcs_clear() once the VMCS is unloaded.
+	 * important that the thread not be preempted.
 	 */
-	critical_enter();
+	kpreempt_disable();
 
+	int err;
+	const uintptr_t vmcs_pa = vmx->vmcs_pa[vcpuid];
 	__asm __volatile("vmptrld %[addr];"
 	    VMX_SET_ERROR_CODE_ASM
 	    : [error] "=r" (err)
@@ -261,6 +241,28 @@ vmcs_load(uintptr_t vmcs_pa)
 	if (err != 0) {
 		panic("vmptrld(%p) error %d", (void *)vmcs_pa, err);
 	}
+}
+
+void
+vmcs_clear(struct vmx *vmx, int vcpuid)
+{
+	int err;
+	const uintptr_t vmcs_pa = vmx->vmcs_pa[vcpuid];
+	__asm __volatile("vmclear %[addr];"
+	    VMX_SET_ERROR_CODE_ASM
+	    : [error] "=r" (err)
+	    : [addr] "m" (vmcs_pa)
+	    : "memory");
+
+	if (err != 0) {
+		panic("vmclear(%p) error %d", (void *)vmcs_pa, err);
+	}
+
+	/*
+	 * The preceding call to vmcs_load() disabled preemption.  Now that the
+	 * VMCS is unloaded, it is safe to relax that restriction.
+	 */
+	kpreempt_enable();
 }
 
 uint64_t

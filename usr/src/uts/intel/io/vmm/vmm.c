@@ -2510,11 +2510,11 @@ restart:
 	 * such as VMX-accelerated APIC operations, can occur without inducing
 	 * cyclic cross-calls.
 	 *
-	 * This must be done prior to disabling kpreempt via critical_enter().
+	 * This must be done prior to disabling kpreempt.
 	 */
 	vm_localize_resources(vm, vcpu);
 	affinity_type = CPU_CURRENT;
-	critical_enter();
+	kpreempt_disable();
 
 	/* Force a trip through update_sregs to reload %fs/%gs and friends */
 	PCB_SET_UPDATE_SEGS(&ttolwp(curthread)->lwp_pcb);
@@ -2535,7 +2535,7 @@ restart:
 	 */
 	vcpu->vtc.vtc_status &= ~VTCS_FPU_CTX_CRITICAL;
 	thread_affinity_clear(curthread);
-	critical_exit();
+	kpreempt_enable();
 
 	if (error != 0) {
 		/* Communicate out any error from VMRUN() above */

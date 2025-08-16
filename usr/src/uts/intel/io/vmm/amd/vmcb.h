@@ -139,7 +139,7 @@ struct svm_softc;
 #define	VMCB_EVENTINJ_TYPE_INTR		0
 #define	VMCB_EVENTINJ_TYPE_NMI		(2 << 8)
 #define	VMCB_EVENTINJ_TYPE_EXCEPTION	(3 << 8)
-#define	VMCB_EVENTINJ_TYPE_INTn		(4 << 8)
+#define	VMCB_EVENTINJ_TYPE_INTN		(4 << 8)
 
 /* VMCB exit code, APM vol2 Appendix C */
 #define	VMCB_EXIT_CR0_READ		0x00

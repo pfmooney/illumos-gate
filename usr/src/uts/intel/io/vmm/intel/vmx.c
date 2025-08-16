@@ -795,17 +795,16 @@ vmx_vminit(struct vm *vm)
 	for (i = 0; i < maxcpus; i++) {
 		/*
 		 * Cache physical address lookups for various components which
-		 * may be required inside the critical_enter() section implied
+		 * may be required inside the kpreempt_disable() section implied
 		 * by VMPTRLD() below.
 		 */
-		vm_paddr_t msr_bitmap_pa = vtophys(vmx->msr_bitmap[i]);
+		const vm_paddr_t msr_bitmap_pa = vtophys(vmx->msr_bitmap[i]);
 
-		vmx->vmcs_pa[i] = (uintptr_t)vtophys(&vmx->vmcs[i]);
-		vmcs_initialize(&vmx->vmcs[i], vmx->vmcs_pa[i]);
+		vmcs_initialize(vmx, i);
 
 		vmx_msr_guest_init(vmx, i);
 
-		vmcs_load(vmx->vmcs_pa[i]);
+		vmcs_load(vmx, i);
 
 		vmcs_write(VMCS_HOST_IA32_PAT, vmm_get_host_pat());
 		vmcs_write(VMCS_HOST_IA32_EFER, vmm_get_host_efer());
@@ -895,7 +894,7 @@ vmx_vminit(struct vm *vm)
 		vmcs_write(VMCS_CR4_MASK, cr4_ones_mask | cr4_zeros_mask);
 		vmcs_write(VMCS_CR4_SHADOW, 0);
 
-		vmcs_clear(vmx->vmcs_pa[i]);
+		vmcs_clear(vmx, i);
 
 		vmx->cap[i].set = cap_defaults;
 		vmx->cap[i].proc_ctls = proc_ctls;
@@ -2763,7 +2762,6 @@ vmx_run(void *arg, int vcpu, uint64_t rip)
 	struct vmx *vmx;
 	struct vm *vm;
 	struct vmxctx *vmxctx;
-	uintptr_t vmcs_pa;
 	struct vm_exit *vmexit;
 	struct vlapic *vlapic;
 	uint32_t exit_reason;
@@ -2772,7 +2770,6 @@ vmx_run(void *arg, int vcpu, uint64_t rip)
 
 	vmx = arg;
 	vm = vmx->vm;
-	vmcs_pa = vmx->vmcs_pa[vcpu];
 	vmxctx = &vmx->ctx[vcpu];
 	vlapic = vm_lapic(vm, vcpu);
 	vmexit = vm_exitinfo(vm, vcpu);
@@ -2784,7 +2781,7 @@ vmx_run(void *arg, int vcpu, uint64_t rip)
 
 	vmx_msr_guest_enter(vmx, vcpu);
 
-	vmcs_load(vmcs_pa);
+	vmcs_load(vmx, vcpu);
 
 	VERIFY(vmx->vmcs_state[vcpu] == VS_NONE && curthread->t_preempt != 0);
 	vmx->vmcs_state[vcpu] = VS_LOADED;
@@ -2976,7 +2973,7 @@ vmx_run(void *arg, int vcpu, uint64_t rip)
 		    vmexit->exitcode);
 	}
 
-	vmcs_clear(vmcs_pa);
+	vmcs_clear(vmx, vcpu);
 	vmx_msr_guest_exit(vmx, vcpu);
 
 	VERIFY(vmx->vmcs_state[vcpu] != VS_NONE && curthread->t_preempt != 0);
@@ -3025,7 +3022,7 @@ vmx_vmcs_access_ensure(struct vmx *vmx, int vcpu)
 		/* Earlier logic already took care of the load */
 		return (false);
 	} else {
-		vmcs_load(vmx->vmcs_pa[vcpu]);
+		vmcs_load(vmx, vcpu);
 		return (true);
 	}
 }
@@ -3042,7 +3039,7 @@ vmx_vmcs_access_done(struct vmx *vmx, int vcpu)
 		}
 		/* Later logic will take care of the unload */
 	} else {
-		vmcs_clear(vmx->vmcs_pa[vcpu]);
+		vmcs_clear(vmx, vcpu);
 	}
 }
 
@@ -3468,9 +3465,9 @@ vmx_setcap(void *arg, int vcpu, int type, int val)
 		} else {
 			baseval &= ~flag;
 		}
-		vmcs_load(vmx->vmcs_pa[vcpu]);
+		vmcs_load(vmx, vcpu);
 		vmcs_write(reg, baseval);
-		vmcs_clear(vmx->vmcs_pa[vcpu]);
+		vmcs_clear(vmx, vcpu);
 
 		/*
 		 * Update optional stored flags, and record
@@ -3649,9 +3646,9 @@ vmx_set_x2apic_mode_ts(struct vlapic *vlapic, bool x2apic_enabled)
 	}
 	vmx->cap[vcpuid].proc_ctls = proc_ctls;
 
-	vmcs_load(vmx->vmcs_pa[vcpuid]);
+	vmcs_load(vmx, vcpuid);
 	vmcs_write(VMCS_PRI_PROC_BASED_CTLS, proc_ctls);
-	vmcs_clear(vmx->vmcs_pa[vcpuid]);
+	vmcs_clear(vmx, vcpuid);
 }
 
 static void
@@ -3675,9 +3672,9 @@ vmx_set_x2apic_mode_vid(struct vlapic *vlapic, bool x2apic_enabled)
 	}
 	vmx->cap[vcpuid].proc_ctls2 = proc_ctls2;
 
-	vmcs_load(vmx->vmcs_pa[vcpuid]);
+	vmcs_load(vmx, vcpuid);
 	vmcs_write(VMCS_SEC_PROC_BASED_CTLS, proc_ctls2);
-	vmcs_clear(vmx->vmcs_pa[vcpuid]);
+	vmcs_clear(vmx, vcpuid);
 
 	vmx_set_x2apic_msr_access(vmx, vcpuid, x2apic_enabled);
 }
@@ -3781,8 +3778,13 @@ vmx_vlapic_init(void *arg, int vcpuid, struct vlapic *vlapic)
 
 	vlapic_vtx->vmx = vmx;
 
+	/* Query the physical addresses outside VMCS-loaded critical section */
+	const vm_paddr_t apic_page_pa = vtophys(vlapic->apic_page);
+	const vm_paddr_t pir_desc_pa = vtophys(&vlapic_vtx->pir_desc);
+
+	vmcs_load(vmx, vcpuid);
 	if (vmx_cap_en(vmx, VMX_CAP_TPR_SHADOW)) {
-		vmcs_write(VMCS_VIRTUAL_APIC, vtophys(vlapic->apic_page));
+		vmcs_write(VMCS_VIRTUAL_APIC, apic_page_pa);
 		vlapic->ops.set_x2apic_mode = vmx_set_x2apic_mode_ts;
 	}
 	if (vmx_cap_en(vmx, VMX_CAP_APICV)) {
@@ -3792,14 +3794,14 @@ vmx_vlapic_init(void *arg, int vcpuid, struct vlapic *vlapic)
 		vlapic->ops.sync_state = vmx_apicv_sync;
 		vlapic->ops.intr_accepted = vmx_apicv_accepted;
 		vlapic->ops.set_x2apic_mode = vmx_set_x2apic_mode_vid;
-
 	}
 	if (vmx_cap_en(vmx, VMX_CAP_APICV_PIR)) {
 		ASSERT(vmx_cap_en(vmx, VMX_CAP_APICV));
 
-		vmcs_write(VMCS_PIR_DESC, vtophys(&vlapic_vtx->pir_desc));
+		vmcs_write(VMCS_PIR_DESC, pir_desc_pa);
 		vlapic->ops.post_intr = vmx_apicv_notify;
 	}
+	vmcs_clear(vmx, vcpuid);
 }
 
 static void
@@ -3830,7 +3832,7 @@ vmx_savectx(void *arg, int vcpu)
 	struct vmx *vmx = arg;
 
 	if ((vmx->vmcs_state[vcpu] & VS_LOADED) != 0) {
-		vmcs_clear(vmx->vmcs_pa[vcpu]);
+		vmcs_clear(vmx, vcpu);
 		vmx_msr_guest_exit(vmx, vcpu);
 		/*
 		 * Having VMCLEARed the VMCS, it can no longer be re-entered
@@ -3851,7 +3853,7 @@ vmx_restorectx(void *arg, int vcpu)
 
 	if ((vmx->vmcs_state[vcpu] & VS_LOADED) != 0) {
 		vmx_msr_guest_enter(vmx, vcpu);
-		vmcs_load(vmx->vmcs_pa[vcpu]);
+		vmcs_load(vmx, vcpu);
 	}
 }
 

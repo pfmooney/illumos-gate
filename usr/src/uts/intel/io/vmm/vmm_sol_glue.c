@@ -40,7 +40,7 @@
 /*
  * Copyright 2014 Pluribus Networks Inc.
  * Copyright 2019 Joyent, Inc.
- * Copyright 2020 Oxide Computer Company
+ * Copyright 2025 Oxide Computer Company
  */
 
 #include <sys/types.h>
@@ -104,10 +104,13 @@ vtophys(void *va)
 	pfn_t	pfn;
 
 	/*
-	 * Since hat_getpfnum() may block on an htable mutex, this is not at
-	 * all safe to run from a critical_enter/kpreempt_disable context.
-	 * The FreeBSD analog does not have the same locking constraints, so
-	 * close attention must be paid wherever this is called.
+	 * The FreeBSD vtophys function guarantees the ability to perform a
+	 * translation without blocking on any locks, unlike ours, which may
+	 * encounter a contended htable mutex.  This makes it dangerous to use
+	 * when inside critical sections, like when a VMCS is loaded.
+	 *
+	 * Check that preemption is not disabled, which is what we use to
+	 * protect such sections.
 	 */
 	ASSERT(curthread->t_preempt == 0);
 
@@ -253,19 +256,6 @@ vmm_contig_free(void *addr, size_t size)
 {
 	contig_free(addr, size);
 }
-
-void
-critical_enter(void)
-{
-	kpreempt_disable();
-}
-
-void
-critical_exit(void)
-{
-	kpreempt_enable();
-}
-
 
 static void
 vmm_glue_callout_handler(void *arg)

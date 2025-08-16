@@ -116,6 +116,7 @@ struct vlapic_ops {
 	void (*intr_accepted)(struct vlapic *vlapic, int vector);
 	void (*post_intr)(struct vlapic *vlapic, int hostcpu);
 	void (*set_x2apic_mode)(struct vlapic *vlapic, bool x2apic_enabled);
+	void (*set_tpr)(struct vlapic *, uint8_t);
 };
 
 struct vlapic_stats {
@@ -157,8 +158,5 @@ struct vlapic {
 	/* Private data specific to the emulation backend (SVM/VMX) */
 	void			*priv[] __cacheline_aligned;
 };
-
-struct vlapic *vlapic_alloc(struct vm *, int, size_t);
-void vlapic_free(struct vlapic *, size_t);
 
 #endif	/* _VLAPIC_PRIV_H_ */

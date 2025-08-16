@@ -499,7 +499,6 @@ svm_vminit(struct vm *vm)
 static void
 vm_exit_svm(struct vm_exit *vme, uint64_t code, uint64_t info1, uint64_t info2)
 {
-
 	vme->exitcode = VM_EXITCODE_SVM;
 	vme->u.svm.exitcode = code;
 	vme->u.svm.exitinfo1 = info1;
@@ -893,26 +892,21 @@ svm_inst_emul_other(struct svm_softc *svm_sc, int vcpu, struct vm_exit *vmexit)
 static void
 svm_update_virqinfo(struct svm_softc *sc, int vcpu)
 {
-	struct vm *vm;
-	struct vlapic *vlapic;
-	struct vmcb_ctrl *ctrl;
-
-	vm = sc->vm;
-	vlapic = vm_lapic(vm, vcpu);
-	ctrl = svm_get_vmcb_ctrl(sc, vcpu);
+	struct vm *vm = sc->vm;
+	struct vlapic *vlapic = vm_lapic(vm, vcpu);
+	struct vmcb_ctrl *ctrl = svm_get_vmcb_ctrl(sc, vcpu);
 
 	/* Update %cr8 in the emulated vlapic */
 	vlapic_set_cr8(vlapic, ctrl->v_tpr);
 
 	/* Virtual interrupt injection is not used. */
-	KASSERT(ctrl->v_intr_vector == 0, ("%s: invalid "
-	    "v_intr_vector %d", __func__, ctrl->v_intr_vector));
+	ASSERT(ctrl->v_intr_vector == 0);
 }
 
 CTASSERT(VMCB_EVENTINJ_TYPE_INTR	== VM_INTINFO_HWINTR);
 CTASSERT(VMCB_EVENTINJ_TYPE_NMI		== VM_INTINFO_NMI);
 CTASSERT(VMCB_EVENTINJ_TYPE_EXCEPTION	== VM_INTINFO_HWEXCP);
-CTASSERT(VMCB_EVENTINJ_TYPE_INTn	== VM_INTINFO_SWINTR);
+CTASSERT(VMCB_EVENTINJ_TYPE_INTN	== VM_INTINFO_SWINTR);
 CTASSERT(VMCB_EVENTINJ_EC_VALID		== VM_INTINFO_DEL_ERRCODE);
 CTASSERT(VMCB_EVENTINJ_VALID		== VM_INTINFO_VALID);
 
@@ -1333,12 +1327,8 @@ svm_vmexit(struct svm_softc *svm_sc, int vcpu, struct vm_exit *vmexit)
 		return (0);
 	}
 
-	KASSERT((ctrl->eventinj & VMCB_EVENTINJ_VALID) == 0, ("%s: event "
-	    "injection valid bit is set %lx", __func__, ctrl->eventinj));
-
-	KASSERT(vmexit->inst_length >= 0 && vmexit->inst_length <= 15,
-	    ("invalid inst_length %d: code (%lx), info1 (%lx), info2 (%lx)",
-	    vmexit->inst_length, code, info1, info2));
+	ASSERT((ctrl->eventinj & VMCB_EVENTINJ_VALID) == 0);
+	ASSERT(vmexit->inst_length >= 0 && vmexit->inst_length <= 15);
 
 	svm_update_virqinfo(svm_sc, vcpu);
 	svm_save_exitintinfo(svm_sc, vcpu);
@@ -2528,10 +2518,46 @@ svm_getcap(void *arg, int vcpu, int type, int *retval)
 	return (error);
 }
 
+struct svm_vlapic_state {
+	struct svm_softc *svs_softc;
+};
+
+static inline struct svm_vlapic_state *
+vlapic_to_svs(struct vlapic *vlapic)
+{
+	return ((struct svm_vlapic_state *)vlapic->priv);
+}
+
+static void
+svm_vlapic_set_tpr(struct vlapic *vlapic, uint8_t new_tpr)
+{
+	struct svm_softc *sc = vlapic_to_svs(vlapic)->svs_softc;
+	struct vmcb_ctrl *ctrl  = svm_get_vmcb_ctrl(sc, vlapic->vcpuid);
+
+	/*
+	 * The guest can modify the TPR by writing to %cr8. In guest mode the
+	 * CPU reflects this write to V_TPR without hypervisor intervention.
+	 *
+	 * The guest can also modify the TPR by writing to it via the memory
+	 * mapped APIC page. In this case, the write will be emulated by the
+	 * hypervisor.  Keep V_TPR in sync when this occurs.
+	 */
+	const uint8_t v_tpr = new_tpr >> 4;
+	if (ctrl->v_tpr != v_tpr) {
+		ctrl->v_tpr = v_tpr;
+		svm_set_dirty(sc, vlapic->vcpuid, VMCB_CACHE_TPR);
+	}
+}
+
 static void
 svm_vlapic_init(void *arg, int vcpuid, struct vlapic *vlapic)
 {
-	/* TODO: setup AVIC */
+	struct svm_softc *sc = arg;
+	struct svm_vlapic_state *svs = vlapic_to_svs(vlapic);
+
+	svs->svs_softc = sc;
+
+	vlapic->ops.set_tpr = svm_vlapic_set_tpr;
 }
 
 static void
@@ -2634,7 +2660,7 @@ struct vmm_ops vmm_ops_amd = {
 	.vmpause	= svm_pause,
 
 	.vlapic_init	= svm_vlapic_init,
-	.vlapic_priv_sz	= 0,
+	.vlapic_priv_sz	= sizeof (struct svm_vlapic_state),
 
 	.vmsavectx	= svm_savectx,
 	.vmrestorectx	= svm_restorectx,

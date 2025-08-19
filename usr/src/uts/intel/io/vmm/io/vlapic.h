@@ -77,6 +77,7 @@ int vlapic_pending_intr(struct vlapic *vlapic, int *vecptr);
  */
 void vlapic_intr_accepted(struct vlapic *vlapic, int vector);
 
+void vlapic_set_irr(struct vlapic *, uint8_t, bool);
 vcpu_notify_t vlapic_set_intr_ready(struct vlapic *vlapic, int vector,
     bool level);
 
@@ -85,7 +86,8 @@ vcpu_notify_t vlapic_set_intr_ready(struct vlapic *vlapic, int vector,
  * hardware assist if available (e.g. Posted Interrupt) or fall back to
  * sending an IPI to interrupt the 'hostcpu'.
  */
-void vlapic_post_intr(struct vlapic *vlapic, int hostcpu);
+void vlapic_notify_pir(struct vlapic *vlapic, int hostcpu);
+bool vlapic_notify_doorbell(struct vlapic *vlapic);
 
 void vlapic_fire_cmci(struct vlapic *vlapic);
 int vlapic_trigger_lvt(struct vlapic *vlapic, int vector);

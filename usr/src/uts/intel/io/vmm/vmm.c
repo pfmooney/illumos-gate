@@ -3578,16 +3578,15 @@ vm_set_x2apic_state(struct vm *vm, int vcpuid, enum x2apic_state state)
 static void
 vcpu_notify_event_locked(struct vcpu *vcpu, vcpu_notify_t ntype)
 {
-	int hostcpu;
+	ASSERT(ntype == VCPU_NOTIFY_EXIT || ntype == VCPU_NOTIFY_PIR);
 
-	ASSERT(ntype == VCPU_NOTIFY_APIC || VCPU_NOTIFY_EXIT);
-
-	hostcpu = vcpu->hostcpu;
+	const int hostcpu = vcpu->hostcpu;
 	if (vcpu->state == VCPU_RUNNING) {
-		KASSERT(hostcpu != NOCPU, ("vcpu running on invalid hostcpu"));
+		ASSERT(hostcpu != NOCPU);
+
 		if (hostcpu != curcpu) {
-			if (ntype == VCPU_NOTIFY_APIC) {
-				vlapic_post_intr(vcpu->vlapic, hostcpu);
+			if (ntype == VCPU_NOTIFY_PIR) {
+				vlapic_notify_pir(vcpu->vlapic, hostcpu);
 			} else {
 				poke_cpu(hostcpu);
 			}
@@ -3600,8 +3599,8 @@ vcpu_notify_event_locked(struct vcpu *vcpu, vcpu_notify_t ntype)
 			 */
 		}
 	} else {
-		KASSERT(hostcpu == NOCPU, ("vcpu state %d not consistent "
-		    "with hostcpu %d", vcpu->state, hostcpu));
+		ASSERT(hostcpu == NOCPU);
+
 		if (vcpu->state == VCPU_SLEEPING) {
 			cv_signal(&vcpu->vcpu_cv);
 		}
@@ -3627,9 +3626,26 @@ vcpu_notify_event_type(struct vm *vm, int vcpuid, vcpu_notify_t ntype)
 		return;
 	}
 
-	vcpu_lock(vcpu);
-	vcpu_notify_event_locked(vcpu, ntype);
-	vcpu_unlock(vcpu);
+	switch (ntype) {
+	case VCPU_NOTIFY_NONE:
+		return;
+	case VCPU_NOTIFY_DOORBELL:
+		if (vlapic_notify_doorbell(vcpu->vlapic)) {
+			/* Successful transmission of doorbell notification */
+			return;
+		}
+		ntype = VCPU_NOTIFY_EXIT;
+		/* FALLTHROUGH */
+	case VCPU_NOTIFY_EXIT:
+	case VCPU_NOTIFY_PIR:
+		vcpu_lock(vcpu);
+		vcpu_notify_event_locked(vcpu, ntype);
+		vcpu_unlock(vcpu);
+		break;
+	default:
+		/* NOTREACHED */
+		panic("invalid notification type: %d", ntype);
+	}
 }
 
 void

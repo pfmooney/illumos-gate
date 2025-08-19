@@ -110,11 +110,11 @@
 struct vlapic;
 
 struct vlapic_ops {
-	vcpu_notify_t (*set_intr_ready)(struct vlapic *vlapic, int vector,
-	    bool level);
+	vcpu_notify_t (*set_intr_ready)(struct vlapic *, uint8_t, bool);
 	void (*sync_state)(struct vlapic *vlapic);
 	void (*intr_accepted)(struct vlapic *vlapic, int vector);
-	void (*post_intr)(struct vlapic *vlapic, int hostcpu);
+	void (*notify_pir)(struct vlapic *vlapic, int hostcpu);
+	bool (*notify_doorbell)(struct vlapic *);
 	void (*set_x2apic_mode)(struct vlapic *vlapic, bool x2apic_enabled);
 	void (*set_tpr)(struct vlapic *, uint8_t);
 };
@@ -158,5 +158,7 @@ struct vlapic {
 	/* Private data specific to the emulation backend (SVM/VMX) */
 	void			*priv[] __cacheline_aligned;
 };
+
+void vlapic_set_irr(struct vlapic *, uint8_t, bool);
 
 #endif	/* _VLAPIC_PRIV_H_ */

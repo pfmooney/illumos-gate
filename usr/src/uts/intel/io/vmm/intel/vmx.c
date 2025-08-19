@@ -3503,7 +3503,8 @@ struct vlapic_vtx {
 
 	struct vmx	*vmx;
 	uint_t		pending_prio;
-	boolean_t	tmr_sync;
+	bool		tmr_sync;
+	bool		pir_supported;
 };
 
 static inline struct vlapic_vtx *
@@ -3517,7 +3518,7 @@ CTASSERT((offsetof(struct vlapic_vtx, tmr_active) & 63) == 0);
 #define	VPR_PRIO_BIT(vpr)	(1 << ((vpr) >> 4))
 
 static vcpu_notify_t
-vmx_apicv_set_ready(struct vlapic *vlapic, int vector, bool level)
+vmx_apicv_set_ready(struct vlapic *vlapic, uint8_t vector, bool level)
 {
 	struct vlapic_vtx *vlapic_vtx = vlapic_to_vtx(vlapic);
 	struct pir_desc *pir_desc = &vlapic_vtx->pir_desc;
@@ -3579,7 +3580,7 @@ vmx_apicv_set_ready(struct vlapic *vlapic, int vector, bool level)
 	 */
 	vcpu_notify_t notify = VCPU_NOTIFY_NONE;
 	if (atomic_cmpset_long(&pir_desc->pending, 0, 1) != 0) {
-		notify = VCPU_NOTIFY_APIC;
+		notify = VCPU_NOTIFY_PIR;
 		vlapic_vtx->pending_prio = 0;
 	} else {
 		const uint_t old_prio = vlapic_vtx->pending_prio;
@@ -3587,8 +3588,17 @@ vmx_apicv_set_ready(struct vlapic *vlapic, int vector, bool level)
 
 		if ((old_prio & prio_bit) == 0 && prio_bit > old_prio) {
 			atomic_set_int(&vlapic_vtx->pending_prio, prio_bit);
-			notify = VCPU_NOTIFY_APIC;
+			notify = VCPU_NOTIFY_PIR;
 		}
+	}
+
+	/*
+	 * Only attempt to use PIR notifications if they are available.
+	 * In their absence, the vCPU will get IPIed out of guest mode and
+	 * manually consolidate the pending PIR state via vmx_apicv_sync().
+	 */
+	if (notify == VCPU_NOTIFY_PIR && !vlapic_vtx->pir_supported) {
+		notify = VCPU_NOTIFY_EXIT;
 	}
 
 	return (notify);
@@ -3624,7 +3634,7 @@ vmx_apicv_sync_tmr(struct vlapic *vlapic)
 	vmcs_write(VMCS_EOI_EXIT1, ((uint64_t)tmrs[3] << 32) | tmrs[2]);
 	vmcs_write(VMCS_EOI_EXIT2, ((uint64_t)tmrs[5] << 32) | tmrs[4]);
 	vmcs_write(VMCS_EOI_EXIT3, ((uint64_t)tmrs[7] << 32) | tmrs[6]);
-	vlapic_vtx->tmr_sync = B_FALSE;
+	vlapic_vtx->tmr_sync = false;
 }
 
 static void
@@ -3742,7 +3752,7 @@ vmx_apicv_sync(struct vlapic *vlapic)
 		if (*tmrp != vlapic_vtx->tmr_active[i]) {
 			/* Check if VMX EOI triggers require updating. */
 			vlapic_vtx->tmr_active[i] = *tmrp;
-			vlapic_vtx->tmr_sync = B_TRUE;
+			vlapic_vtx->tmr_sync = true;
 		}
 	}
 }
@@ -3799,7 +3809,8 @@ vmx_vlapic_init(void *arg, int vcpuid, struct vlapic *vlapic)
 		ASSERT(vmx_cap_en(vmx, VMX_CAP_APICV));
 
 		vmcs_write(VMCS_PIR_DESC, pir_desc_pa);
-		vlapic->ops.post_intr = vmx_apicv_notify;
+		vlapic->ops.notify_pir = vmx_apicv_notify;
+		vlapic_vtx->pir_supported = true;
 	}
 	vmcs_clear(vmx, vcpuid);
 }

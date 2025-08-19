@@ -25,6 +25,15 @@
 #include "svm.h"
 #include "svm_softc.h"
 #include "svm_avic.h"
+#include "vlapic.h"
+#include "vlapic_priv.h"
+
+
+static inline struct svm_vlapic_state *
+vlapic_to_svs(struct vlapic *vlapic)
+{
+	return ((struct svm_vlapic_state *)vlapic->priv);
+}
 
 typedef enum svm_avic_capabs {
 	SAC_NONE	= 0,		/* No support */
@@ -81,4 +90,63 @@ svm_avic_probe(void)
 	default:
 		break;
 	}
+}
+
+vcpu_notify_t
+svm_avic_set_intr_ready(struct vlapic *vlapic, uint8_t vector, bool level)
+{
+	vlapic_set_irr(vlapic, vector, level);
+
+	return (VCPU_NOTIFY_DOORBELL);
+}
+
+bool
+svm_avic_notify_doorbell(struct vlapic *vlapic)
+{
+	/* TODO determine if vCPU is running and use doorbell instead */
+
+	/* Fall back to vCPU exit until then */
+	return (false);
+}
+
+void
+svm_vlapic_set_tpr(struct vlapic *vlapic, uint8_t new_tpr)
+{
+	struct svm_vlapic_state *svs = vlapic_to_svs(vlapic);
+
+	if (svs->svs_avic_flags & SAF_AVIC_ACTIVE) {
+		/*
+		 * TPR state lives solely in the APIC page while AVIC is active,
+		 * and V_TPR contents are ignored.
+		 */
+		return;
+	}
+
+	/*
+	 * The guest can modify the TPR by writing to %cr8. In guest mode the
+	 * CPU reflects this write to V_TPR without hypervisor intervention.
+	 *
+	 * The guest can also modify the TPR by writing to it via the memory
+	 * mapped APIC page. In this case, the write will be emulated by the
+	 * hypervisor.  Keep V_TPR in sync when this occurs.
+	 */
+	struct svm_softc *sc = svs->svs_softc;
+	struct vmcb_ctrl *ctrl  = svm_get_vmcb_ctrl(sc, vlapic->vcpuid);
+	const uint8_t v_tpr = new_tpr >> 4;
+	if (ctrl->v_tpr != v_tpr) {
+		ctrl->v_tpr = v_tpr;
+		svm_set_dirty(sc, vlapic->vcpuid, VMCB_CACHE_TPR);
+	}
+}
+
+void
+svm_vlapic_init(void *arg, int vcpuid, struct vlapic *vlapic)
+{
+	struct svm_softc *sc = arg;
+	struct svm_vlapic_state *svs = vlapic_to_svs(vlapic);
+
+	svs->svs_softc = sc;
+
+	vlapic->ops.set_tpr = svm_vlapic_set_tpr;
+	vlapic->ops.set_intr_ready = svm_avic_set_intr_ready;
 }

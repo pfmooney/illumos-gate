@@ -74,7 +74,6 @@
 #include "vmm_ioport.h"
 #include "vatpic.h"
 #include "vlapic.h"
-#include "vlapic_priv.h"
 
 #include "vmcb.h"
 #include "svm.h"
@@ -949,28 +948,17 @@ svm_save_exitintinfo(struct svm_softc *svm_sc, int vcpu)
 	}
 }
 
-static __inline int
-vintr_intercept_enabled(struct svm_softc *sc, int vcpu)
-{
-
-	return (svm_get_intercept(sc, vcpu, VMCB_CTRL1_INTCPT,
-	    VMCB_INTCPT_VINTR));
-}
-
 static void
 svm_enable_intr_window_exiting(struct svm_softc *sc, int vcpu)
 {
-	struct vmcb_ctrl *ctrl;
-	struct vmcb_state *state;
-
-	ctrl = svm_get_vmcb_ctrl(sc, vcpu);
-	state = svm_get_vmcb_state(sc, vcpu);
+	struct vmcb_ctrl *ctrl = svm_get_vmcb_ctrl(sc, vcpu);
+	struct vmcb_state *state = svm_get_vmcb_state(sc, vcpu);
 
 	if ((ctrl->v_irq & V_IRQ) != 0 && ctrl->v_intr_vector == 0) {
-		KASSERT(ctrl->v_intr_prio & V_IGN_TPR,
-		    ("%s: invalid v_ign_tpr", __func__));
-		KASSERT(vintr_intercept_enabled(sc, vcpu),
-		    ("%s: vintr intercept should be enabled", __func__));
+		/* Interrupt window exiting already configured */
+		ASSERT(ctrl->v_intr_prio & V_IGN_TPR);
+		ASSERT(svm_get_intercept(sc, vcpu, VMCB_CTRL1_INTCPT,
+		    VMCB_INTCPT_VINTR));
 		return;
 	}
 
@@ -990,18 +978,18 @@ svm_enable_intr_window_exiting(struct svm_softc *sc, int vcpu)
 	ctrl->v_intr_vector = 0;
 	svm_set_dirty(sc, vcpu, VMCB_CACHE_TPR);
 	svm_enable_intercept(sc, vcpu, VMCB_CTRL1_INTCPT, VMCB_INTCPT_VINTR);
+	/* TODO: disable AVIC (if applicable) */
 }
 
 static void
 svm_disable_intr_window_exiting(struct svm_softc *sc, int vcpu)
 {
-	struct vmcb_ctrl *ctrl;
-
-	ctrl = svm_get_vmcb_ctrl(sc, vcpu);
+	struct vmcb_ctrl *ctrl = svm_get_vmcb_ctrl(sc, vcpu);
 
 	if ((ctrl->v_irq & V_IRQ) == 0 && ctrl->v_intr_vector == 0) {
-		KASSERT(!vintr_intercept_enabled(sc, vcpu),
-		    ("%s: vintr intercept should be disabled", __func__));
+		/* Interrupt window exiting already disabled */
+		ASSERT(!svm_get_intercept(sc, vcpu, VMCB_CTRL1_INTCPT,
+		    VMCB_INTCPT_VINTR));
 		return;
 	}
 
@@ -1009,6 +997,7 @@ svm_disable_intr_window_exiting(struct svm_softc *sc, int vcpu)
 	ctrl->v_intr_vector = 0;
 	svm_set_dirty(sc, vcpu, VMCB_CACHE_TPR);
 	svm_disable_intercept(sc, vcpu, VMCB_CTRL1_INTCPT, VMCB_INTCPT_VINTR);
+	/* TODO: re-enable AVIC (if applicable) */
 }
 
 /*
@@ -1664,13 +1653,10 @@ static enum event_inject_state
 svm_inject_vlapic(struct svm_softc *sc, int vcpu, struct vlapic *vlapic,
     enum event_inject_state ev_state)
 {
-	struct vmcb_ctrl *ctrl;
-	struct vmcb_state *state;
+	struct vmcb_ctrl *ctrl  = svm_get_vmcb_ctrl(sc, vcpu);
+	struct vmcb_state *state = svm_get_vmcb_state(sc, vcpu);
 	int vector;
 	uint8_t v_tpr;
-
-	state = svm_get_vmcb_state(sc, vcpu);
-	ctrl  = svm_get_vmcb_ctrl(sc, vcpu);
 
 	/*
 	 * The guest can modify the TPR by writing to %cr8. In guest mode the
@@ -2516,48 +2502,6 @@ svm_getcap(void *arg, int vcpu, int type, int *retval)
 		break;
 	}
 	return (error);
-}
-
-struct svm_vlapic_state {
-	struct svm_softc *svs_softc;
-};
-
-static inline struct svm_vlapic_state *
-vlapic_to_svs(struct vlapic *vlapic)
-{
-	return ((struct svm_vlapic_state *)vlapic->priv);
-}
-
-static void
-svm_vlapic_set_tpr(struct vlapic *vlapic, uint8_t new_tpr)
-{
-	struct svm_softc *sc = vlapic_to_svs(vlapic)->svs_softc;
-	struct vmcb_ctrl *ctrl  = svm_get_vmcb_ctrl(sc, vlapic->vcpuid);
-
-	/*
-	 * The guest can modify the TPR by writing to %cr8. In guest mode the
-	 * CPU reflects this write to V_TPR without hypervisor intervention.
-	 *
-	 * The guest can also modify the TPR by writing to it via the memory
-	 * mapped APIC page. In this case, the write will be emulated by the
-	 * hypervisor.  Keep V_TPR in sync when this occurs.
-	 */
-	const uint8_t v_tpr = new_tpr >> 4;
-	if (ctrl->v_tpr != v_tpr) {
-		ctrl->v_tpr = v_tpr;
-		svm_set_dirty(sc, vlapic->vcpuid, VMCB_CACHE_TPR);
-	}
-}
-
-static void
-svm_vlapic_init(void *arg, int vcpuid, struct vlapic *vlapic)
-{
-	struct svm_softc *sc = arg;
-	struct svm_vlapic_state *svs = vlapic_to_svs(vlapic);
-
-	svs->svs_softc = sc;
-
-	vlapic->ops.set_tpr = svm_vlapic_set_tpr;
 }
 
 static void

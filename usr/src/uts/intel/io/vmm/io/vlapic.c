@@ -405,17 +405,41 @@ vlapic_esr_write_handler(struct vlapic *vlapic)
 	vlapic->esr_pending = 0;
 }
 
+void
+vlapic_set_irr(struct vlapic *vlapic, uint8_t vector, bool level)
+{
+	struct LAPIC *lapic = vlapic->apic_page;
+
+	const uint_t idx = (vector / 32) * 4;
+	const uint32_t mask = 1 << (vector % 32);
+	uint32_t *tmrptr = &lapic->tmr0;
+	uint32_t *irrptr = &lapic->irr0;
+
+	/*
+	 * Update TMR for requested vector, if necessary.
+	 * This must be done prior to asserting the bit in IRR so that the
+	 * proper TMR state is always visible before the to-be-queued interrupt
+	 * can be injected.
+	 */
+	const uint32_t tmr = atomic_load_acq_32(&tmrptr[idx]);
+	if ((tmr & mask) != (level ? mask : 0)) {
+		if (level) {
+			atomic_set_int(&tmrptr[idx], mask);
+		} else {
+			atomic_clear_int(&tmrptr[idx], mask);
+		}
+	}
+
+	/* Now set the bit in IRR */
+	atomic_set_int(&irrptr[idx], mask);
+}
+
 vcpu_notify_t
 vlapic_set_intr_ready(struct vlapic *vlapic, int vector, bool level)
 {
-	struct LAPIC *lapic;
-	uint32_t *irrptr, *tmrptr, mask, tmr;
-	int idx;
+	ASSERT(vector >= 0 && vector < 256);
 
-	KASSERT(vector >= 0 && vector < 256, ("invalid vector %d", vector));
-
-	lapic = vlapic->apic_page;
-	if (!(lapic->svr & APIC_SVR_ENABLE)) {
+	if (!(vlapic->apic_page->svr & APIC_SVR_ENABLE)) {
 		/* ignore interrupt on software-disabled APIC */
 		return (VCPU_NOTIFY_NONE);
 	}
@@ -435,29 +459,7 @@ vlapic_set_intr_ready(struct vlapic *vlapic, int vector, bool level)
 		return ((*vlapic->ops.set_intr_ready)(vlapic, vector, level));
 	}
 
-	idx = (vector / 32) * 4;
-	mask = 1 << (vector % 32);
-	tmrptr = &lapic->tmr0;
-	irrptr = &lapic->irr0;
-
-	/*
-	 * Update TMR for requested vector, if necessary.
-	 * This must be done prior to asserting the bit in IRR so that the
-	 * proper TMR state is always visible before the to-be-queued interrupt
-	 * can be injected.
-	 */
-	tmr = atomic_load_acq_32(&tmrptr[idx]);
-	if ((tmr & mask) != (level ? mask : 0)) {
-		if (level) {
-			atomic_set_int(&tmrptr[idx], mask);
-		} else {
-			atomic_clear_int(&tmrptr[idx], mask);
-		}
-	}
-
-	/* Now set the bit in IRR */
-	atomic_set_int(&irrptr[idx], mask);
-
+	vlapic_set_irr(vlapic, (uint8_t)vector, level);
 	return (VCPU_NOTIFY_EXIT);
 }
 
@@ -1860,10 +1862,12 @@ vlapic_deliver_intr(struct vm *vm, bool level, uint32_t dest, bool phys,
 }
 
 void
-vlapic_post_intr(struct vlapic *vlapic, int hostcpu)
+vlapic_notify_pir(struct vlapic *vlapic, int hostcpu)
 {
+	ASSERT(vlapic->ops.notify_pir != NULL);
+
 	/*
-	 * Post an interrupt to the vcpu currently running on 'hostcpu'.
+	 * Post an interrupt to the vCPU currently running on 'hostcpu'.
 	 *
 	 * This is done by leveraging features like Posted Interrupts (Intel)
 	 * Doorbell MSR (AMD AVIC) that avoid a VM exit.
@@ -1871,10 +1875,15 @@ vlapic_post_intr(struct vlapic *vlapic, int hostcpu)
 	 * If neither of these features are available then fallback to
 	 * sending an IPI to 'hostcpu'.
 	 */
-	if (vlapic->ops.post_intr)
-		(*vlapic->ops.post_intr)(vlapic, hostcpu);
-	else
-		poke_cpu(hostcpu);
+	(*vlapic->ops.notify_pir)(vlapic, hostcpu);
+}
+
+bool
+vlapic_notify_doorbell(struct vlapic *vlapic)
+{
+	ASSERT(vlapic->ops.notify_doorbell != NULL);
+
+	return ((*vlapic->ops.notify_doorbell)(vlapic));
 }
 
 void

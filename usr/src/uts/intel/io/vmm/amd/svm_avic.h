@@ -22,6 +22,20 @@
 
 #include "svm_softc.h"
 
+typedef enum svm_avic_flags {
+	SAF_AVIC_ACTIVE		= (1 << 0),
+} svm_avic_flags_t;
+
+struct svm_vlapic_state {
+	struct svm_softc	*svs_softc;
+	svm_avic_flags_t	svs_avic_flags;
+};
+
 void svm_avic_probe(void);
+vcpu_notify_t svm_avic_set_intr_ready(struct vlapic *, uint8_t, bool);
+bool svm_avic_notify_doorbell(struct vlapic *);
+
+void svm_vlapic_set_tpr(struct vlapic *, uint8_t);
+void svm_vlapic_init(void *, int, struct vlapic *);
 
 #endif /* _SVM_AVIC_H */

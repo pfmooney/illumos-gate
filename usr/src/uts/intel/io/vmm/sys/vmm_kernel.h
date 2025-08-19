@@ -290,8 +290,9 @@ vcpu_should_yield(struct vm *vm, int vcpu)
 
 typedef enum vcpu_notify {
 	VCPU_NOTIFY_NONE,
-	VCPU_NOTIFY_APIC,	/* Posted intr notification (if possible) */
 	VCPU_NOTIFY_EXIT,	/* IPI to cause VM exit */
+	VCPU_NOTIFY_PIR,	/* APICv-style posted interrupt */
+	VCPU_NOTIFY_DOORBELL,	/* AVIC-style doorbell notification */
 } vcpu_notify_t;
 
 void *vcpu_stats(struct vm *vm, int vcpu);
